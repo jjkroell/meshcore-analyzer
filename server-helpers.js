@@ -85,6 +85,22 @@ function geoDist(lat1, lon1, lat2, lon2) {
   return Math.sqrt((lat1 - lat2) ** 2 + (lon1 - lon2) ** 2);
 }
 
+// Point-in-polygon: ray-casting algorithm
+// coords: array of [lat, lon] pairs
+function isPointInPolygon(lat, lon, coords) {
+  if (!coords || coords.length < 3) return false;
+  let inside = false;
+  const n = coords.length;
+  for (let i = 0, j = n - 1; i < n; j = i++) {
+    const yi = coords[i][0], xi = coords[i][1];
+    const yj = coords[j][0], xj = coords[j][1];
+    if ((yi > lat) !== (yj > lat) && lon < (xj - xi) * (lat - yi) / (yj - yi) + xi) {
+      inside = !inside;
+    }
+  }
+  return inside;
+}
+
 // Derive hashtag channel key
 function deriveHashtagChannelKey(channelName) {
   return crypto.createHash('sha256').update(channelName).digest('hex').slice(0, 32);
@@ -313,6 +329,7 @@ module.exports = {
   isHashSizeFlipFlop,
   computeContentHash,
   geoDist,
+  isPointInPolygon,
   deriveHashtagChannelKey,
   buildBreakdown,
   disambiguateHops,

@@ -14,6 +14,13 @@
   let heatLayer = null;
   let userHasMoved = false;
   let controlsCollapsed = false;
+  let boundaryCoords = [];
+  let boundaryEnabled = false;
+  let boundaryLayer = null;
+  let drawMode = false;
+  let drawPoints = [];
+  let drawLayer = null;
+  let mapClickHandler = null;
 
   // Safe escape — falls back to identity if app.js hasn't loaded yet
   const safeEsc = (typeof esc === 'function') ? esc : function (s) { return s; };
@@ -122,6 +129,17 @@
             <legend class="mc-label">Quick Jump</legend>
             <div class="mc-jumps" id="mcJumps" role="group" aria-label="Jump to region"></div>
           </fieldset>
+          <fieldset class="mc-section">
+            <legend class="mc-label">Boundary</legend>
+            <label for="mcBoundaryFilter"><input type="checkbox" id="mcBoundaryFilter"> Filter to boundary</label>
+            <div style="margin-top:4px;display:flex;gap:4px;flex-wrap:wrap;">
+              <button id="mcBoundaryDraw" class="btn" style="flex:1;font-size:11px;">Draw</button>
+              <button id="mcBoundaryFinish" class="btn" style="flex:1;font-size:11px;display:none;" disabled>Finish</button>
+              <button id="mcBoundaryCancel" class="btn" style="flex:1;font-size:11px;display:none;">Cancel</button>
+              <button id="mcBoundaryClear" class="btn" style="flex:1;font-size:11px;" disabled>Clear</button>
+            </div>
+            <div id="mcBoundaryStatus" style="font-size:11px;color:var(--text-muted);margin-top:4px;">No boundary set</div>
+          </fieldset>
         </div>
       </div>`;
 
@@ -223,6 +241,38 @@
         document.querySelectorAll('#mcStatusFilter .btn').forEach(b => b.classList.toggle('active', b.dataset.status === filters.statusFilter));
         renderMarkers();
       });
+    });
+
+    // Boundary: load from localStorage (user-drawn) or server config
+    try {
+      const saved = localStorage.getItem('meshcore-boundary');
+      if (saved) {
+        boundaryCoords = JSON.parse(saved);
+      } else {
+        const bCfg = await (await fetch('/api/config/boundary')).json();
+        if (bCfg && Array.isArray(bCfg.coords) && bCfg.coords.length >= 3) {
+          boundaryCoords = bCfg.coords;
+        }
+      }
+    } catch {}
+    boundaryEnabled = localStorage.getItem('meshcore-boundary-enabled') === 'true';
+    drawBoundaryLayer();
+    updateBoundaryUI();
+
+    document.getElementById('mcBoundaryFilter').addEventListener('change', e => {
+      boundaryEnabled = e.target.checked;
+      localStorage.setItem('meshcore-boundary-enabled', boundaryEnabled);
+      renderMarkers();
+    });
+    document.getElementById('mcBoundaryDraw').addEventListener('click', () => startDrawMode());
+    document.getElementById('mcBoundaryFinish').addEventListener('click', () => finishDraw());
+    document.getElementById('mcBoundaryCancel').addEventListener('click', () => cancelDraw());
+    document.getElementById('mcBoundaryClear').addEventListener('click', () => {
+      boundaryCoords = [];
+      localStorage.removeItem('meshcore-boundary');
+      drawBoundaryLayer();
+      updateBoundaryUI();
+      renderMarkers();
     });
 
     // WS for live advert updates
@@ -599,6 +649,10 @@
         const status = getNodeStatus(role, lastMs);
         if (status !== filters.statusFilter) return false;
       }
+      // Boundary filter
+      if (boundaryEnabled && boundaryCoords.length >= 3) {
+        if (!isPointInPolygon(n.lat, n.lon, boundaryCoords)) return false;
+      }
       return true;
     });
 
@@ -717,9 +771,111 @@
     map.fitBounds(bounds, { padding: [50, 50], maxZoom: 14 });
   }
 
+  function isPointInPolygon(lat, lon, coords) {
+    let inside = false;
+    const n = coords.length;
+    for (let i = 0, j = n - 1; i < n; j = i++) {
+      const yi = coords[i][0], xi = coords[i][1];
+      const yj = coords[j][0], xj = coords[j][1];
+      if ((yi > lat) !== (yj > lat) && lon < (xj - xi) * (lat - yi) / (yj - yi) + xi) {
+        inside = !inside;
+      }
+    }
+    return inside;
+  }
+
+  function drawBoundaryLayer() {
+    if (boundaryLayer) { map.removeLayer(boundaryLayer); boundaryLayer = null; }
+    if (boundaryCoords.length < 3) return;
+    boundaryLayer = L.polygon(boundaryCoords, {
+      color: '#f59e0b', weight: 2, opacity: 0.9,
+      fillColor: '#f59e0b', fillOpacity: 0.06, dashArray: '6,4',
+    }).addTo(map);
+    boundaryLayer.bindTooltip(boundaryCoords.length + '-vertex boundary', { sticky: true });
+  }
+
+  function updateBoundaryUI() {
+    const filterEl = document.getElementById('mcBoundaryFilter');
+    const statusEl = document.getElementById('mcBoundaryStatus');
+    const clearEl = document.getElementById('mcBoundaryClear');
+    if (filterEl) filterEl.checked = boundaryEnabled;
+    if (statusEl) statusEl.textContent = boundaryCoords.length >= 3 ? boundaryCoords.length + ' vertices' : 'No boundary set';
+    if (clearEl) clearEl.disabled = boundaryCoords.length === 0;
+  }
+
+  function startDrawMode() {
+    if (drawMode) return;
+    drawMode = true;
+    drawPoints = [];
+    drawLayer = L.layerGroup().addTo(map);
+    map.getContainer().style.cursor = 'crosshair';
+    map.doubleClickZoom.disable();
+
+    mapClickHandler = function(e) {
+      drawPoints.push([e.latlng.lat, e.latlng.lng]);
+      drawLayer.clearLayers();
+      for (const pt of drawPoints) {
+        L.circleMarker(pt, { radius: 5, color: '#f59e0b', fillColor: '#f59e0b', fillOpacity: 1, weight: 2 }).addTo(drawLayer);
+      }
+      if (drawPoints.length >= 2) {
+        L.polygon(drawPoints, { color: '#f59e0b', weight: 2, fillOpacity: 0.08, dashArray: '4,4' }).addTo(drawLayer);
+      }
+      const finishBtn = document.getElementById('mcBoundaryFinish');
+      if (finishBtn) finishBtn.disabled = drawPoints.length < 3;
+      const statusEl = document.getElementById('mcBoundaryStatus');
+      if (statusEl) statusEl.textContent = drawPoints.length + ' vertices — click to add more';
+    };
+    map.on('click', mapClickHandler);
+
+    document.getElementById('mcBoundaryDraw').style.display = 'none';
+    document.getElementById('mcBoundaryFinish').style.display = '';
+    document.getElementById('mcBoundaryCancel').style.display = '';
+    document.getElementById('mcBoundaryClear').style.display = 'none';
+    document.getElementById('mcBoundaryStatus').textContent = 'Click map to add vertices';
+  }
+
+  function finishDraw() {
+    if (!drawMode || drawPoints.length < 3) return;
+    map.off('click', mapClickHandler);
+    map.getContainer().style.cursor = '';
+    map.doubleClickZoom.enable();
+    drawMode = false;
+    if (drawLayer) { map.removeLayer(drawLayer); drawLayer = null; }
+
+    boundaryCoords = [...drawPoints];
+    drawPoints = [];
+    localStorage.setItem('meshcore-boundary', JSON.stringify(boundaryCoords));
+
+    drawBoundaryLayer();
+    document.getElementById('mcBoundaryDraw').style.display = '';
+    document.getElementById('mcBoundaryFinish').style.display = 'none';
+    document.getElementById('mcBoundaryCancel').style.display = 'none';
+    document.getElementById('mcBoundaryClear').style.display = '';
+    updateBoundaryUI();
+    if (boundaryEnabled) renderMarkers();
+  }
+
+  function cancelDraw() {
+    if (!drawMode) return;
+    map.off('click', mapClickHandler);
+    map.getContainer().style.cursor = '';
+    map.doubleClickZoom.enable();
+    drawMode = false;
+    drawPoints = [];
+    if (drawLayer) { map.removeLayer(drawLayer); drawLayer = null; }
+    document.getElementById('mcBoundaryDraw').style.display = '';
+    document.getElementById('mcBoundaryFinish').style.display = 'none';
+    document.getElementById('mcBoundaryCancel').style.display = 'none';
+    document.getElementById('mcBoundaryClear').style.display = '';
+    updateBoundaryUI();
+  }
+
   function destroy() {
+    if (drawMode) cancelDraw();
     if (wsHandler) offWS(wsHandler);
     wsHandler = null;
+    if (boundaryLayer) { map.removeLayer(boundaryLayer); boundaryLayer = null; }
+    if (drawLayer) { map.removeLayer(drawLayer); drawLayer = null; }
     if (map) {
       map.remove();
       map = null;

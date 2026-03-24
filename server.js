@@ -316,6 +316,10 @@ app.get('/api/config/regions', (req, res) => {
   res.json(regions);
 });
 
+app.get('/api/config/boundary', (req, res) => {
+  res.json(config.boundary || null);
+});
+
 // Helper: get set of observer IDs matching region filter (comma-separated IATA codes)
 function getObserverIdsForRegions(regionParam) {
   if (!regionParam) return null; // null = no filter
