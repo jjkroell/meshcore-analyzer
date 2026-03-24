@@ -99,6 +99,9 @@ function getCachedNodes(includeRole) {
 
 const configuredChannelKeys = config.channelKeys || {};
 const hashChannels = Array.isArray(config.hashChannels) ? config.hashChannels : [];
+const blockedChannels = new Set(
+  (Array.isArray(config.blockedChannels) ? config.blockedChannels : []).map(c => c.toLowerCase())
+);
 
 const derivedHashChannelKeys = {};
 for (const rawChannel of hashChannels) {
@@ -688,6 +691,11 @@ for (const source of mqttSources) {
       // Topic: meshcore/<region>/<observer>/packets, payload: { raw, SNR, RSSI, hash }
       if (msg.raw && typeof msg.raw === 'string') {
         const decoded = decoder.decodePacket(msg.raw, channelKeys);
+        // Drop blocked channels before storing or broadcasting
+        if (decoded.header.payloadTypeName === 'GRP_TXT') {
+          const chName = (decoded.payload?.channelName || decoded.payload?.channel || '').toLowerCase();
+          if (blockedChannels.has(chName)) return;
+        }
         const observerId = parts[2] || null;
         const region = parts[1] || null;
 
@@ -2222,6 +2230,7 @@ app.get('/api/channels', (req, res) => {
     if (decoded.type !== 'CHAN') continue;
 
     const channelName = decoded.channel || 'unknown';
+    if (blockedChannels.has(channelName.toLowerCase())) continue;
     const key = channelName;
     
     if (!channelMap[key]) {
@@ -2248,10 +2257,11 @@ app.get('/api/channels', (req, res) => {
 });
 
 app.get('/api/channels/:hash/messages', (req, res) => {
-  const _ck = 'channels:' + req.params.hash + ':' + (req.query.limit||100) + ':' + (req.query.offset||0);
+  const channelHash = req.params.hash;
+  if (blockedChannels.has(channelHash.toLowerCase())) return res.json({ messages: [], total: 0 });
+  const _ck = 'channels:' + channelHash + ':' + (req.query.limit||100) + ':' + (req.query.offset||0);
   const _c = cache.get(_ck); if (_c) return res.json(_c);
   const { limit = 100, offset = 0 } = req.query;
-  const channelHash = req.params.hash;
   const msgBoundaryObs = getBoundaryObserverIds();
   const packets = pktStore.filter(p => p.payload_type === 5 && (!msgBoundaryObs || msgBoundaryObs.has(p.observer_id))).sort((a,b) => a.timestamp > b.timestamp ? 1 : -1);
 
