@@ -5,7 +5,7 @@
 (function () {
   let styleEl = null;
   let originalValues = {};
-  let activeTab = 'branding';
+  let activeTab = 'theme';
 
   const DEFAULTS = {
     branding: {
@@ -625,7 +625,6 @@
 
   function renderTabs() {
     var tabs = [
-      { id: 'branding', label: '🏷️', title: 'Branding' },
       { id: 'theme', label: '🎨', title: 'Theme Colors' },
       { id: 'nodes', label: '🎯', title: 'Colors' },
       { id: 'home', label: '🏠', title: 'Home Page' },
@@ -884,7 +883,6 @@
     container.innerHTML =
       renderTabs() +
       '<div class="cust-body">' +
-      renderBranding() +
       renderTheme() +
       renderNodes() +
       renderHome() +
