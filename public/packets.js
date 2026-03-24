@@ -913,18 +913,20 @@
       pktBody.addEventListener('keydown', handler);
     }
 
-    // Escape to close packet detail panel
-    document.addEventListener('keydown', function pktEsc(e) {
-      if (e.key === 'Escape') {
-        const panel = document.getElementById('pktRight');
-        if (panel && !panel.classList.contains('empty')) {
-          panel.classList.add('empty');
-          panel.innerHTML = '<div class="panel-resize-handle" id="pktResizeHandle"></div><span>Select a packet to view details</span>';
-          selectedId = null;
-          renderTableRows();
-        }
+    function closeDetailPanel() {
+      const panel = document.getElementById('pktRight');
+      if (panel && !panel.classList.contains('empty')) {
+        panel.classList.add('empty');
+        panel.innerHTML = '<div class="panel-resize-handle" id="pktResizeHandle"></div><span>Select a packet to view details</span>';
+        selectedId = null;
+        history.replaceState(null, '', '#/packets');
+        renderTableRows();
+        initPanelResize();
       }
-    });
+    }
+
+    // Escape to close packet detail panel
+    document.addEventListener('keydown', e => { if (e.key === 'Escape') closeDetailPanel(); });
 
     renderTableRows();
     makeColumnsResizable('#pktTable', 'meshcore-pkt-col-widths');
@@ -1161,7 +1163,11 @@
       const content = document.createElement('div');
       panel.appendChild(content);
       await renderDetail(content, data);
-      if (!isMobileNow) initPanelResize();
+      if (!isMobileNow) {
+        initPanelResize();
+        const closeBtn = panel.querySelector('#pktDetailClose');
+        if (closeBtn) closeBtn.addEventListener('click', closeDetailPanel);
+      }
     } catch (e) {
       panel.innerHTML = `<div class="text-muted">Error: ${e.message}</div>`;
     }
@@ -1294,6 +1300,7 @@
     }
 
     panel.innerHTML = `
+      <button class="panel-close-btn" id="pktDetailClose" title="Close (Esc)">✕</button>
       <div class="detail-title">${hasRawHex ? `Packet Byte Breakdown (${size} bytes)` : typeName + ' Packet'}</div>
       <div class="detail-hash">${pkt.hash || 'Packet #' + pkt.id}</div>
       ${messageHtml}
