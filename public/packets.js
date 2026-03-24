@@ -1018,7 +1018,7 @@
           <td class="mono col-hash">${truncate(p.hash || '—', 8)}</td>
           <td class="col-size">${groupSize ? groupSize + 'B' : '—'}</td>
           <td class="col-type">${p.payload_type != null ? `<span class="badge badge-${groupTypeClass}">${groupTypeName}</span>` : '—'}</td>
-          <td class="col-observer">${isSingle ? truncate(obsName(headerObserverId, p.observer_name), 16) : truncate(obsName(headerObserverId, p.observer_name), 10) + (p.observer_count > 1 ? ' +' + (p.observer_count - 1) : '')}</td>
+          <td class="col-observer">${obsName(headerObserverId, p.observer_name)}${p.observer_count > 1 ? ' <span style="color:var(--text-muted)">+' + (p.observer_count - 1) + '</span>' : ''}</td>
           <td class="col-path"><span class="path-hops">${groupPathStr}</span></td>
           <td class="col-rpt">${p.observation_count > 1 ? '<span class="badge badge-obs" title="Seen ' + p.observation_count + ' times">👁 ' + p.observation_count + '</span>' : (isSingle ? '' : p.count)}</td>
           <td class="col-details">${getDetailPreview((() => { try { return JSON.parse(p.decoded_json || '{}'); } catch { return {}; } })())}</td>
@@ -1045,7 +1045,7 @@
               <td class="mono col-hash">${truncate(c.hash || '', 8)}</td>
               <td class="col-size">${size}B</td>
               <td class="col-type"><span class="badge badge-${typeClass}">${typeName}</span></td>
-              <td class="col-observer">${truncate(obsName(c.observer_id, c.observer_name), 16)}</td>
+              <td class="col-observer">${obsName(c.observer_id, c.observer_name)}</td>
               <td class="col-path"><span class="path-hops">${childPathStr}</span></td>
               <td class="col-rpt"></td>
               <td class="col-details">${getDetailPreview((() => { try { return JSON.parse(c.decoded_json); } catch { return {}; } })())}</td>
@@ -1074,7 +1074,7 @@
         <td class="mono col-hash">${truncate(p.hash || String(p.id), 8)}</td>
         <td class="col-size">${size}B</td>
         <td class="col-type"><span class="badge badge-${typeClass}">${typeName}</span></td>
-        <td class="col-observer">${truncate(obsName(p.observer_id, p.observer_name), 16)}</td>
+        <td class="col-observer">${obsName(p.observer_id, p.observer_name)}</td>
         <td class="col-path"><span class="path-hops">${pathStr}</span></td>
         <td class="col-rpt"></td>
         <td class="col-details">${detail}</td>
