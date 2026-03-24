@@ -876,7 +876,7 @@
       '</details>' +
       '<hr style="border:none;border-top:1px solid var(--border);margin:16px 0">' +
       '<p class="cust-section-title">Tools</p>' +
-      '<a href="#/audio-lab" style="display:inline-flex;align-items:center;gap:6px;font-size:13px;color:var(--accent);text-decoration:none;padding:6px 10px;border:1px solid var(--border);border-radius:6px;" onclick="document.getElementById(\'custPanel\')?.classList.remove(\'open\')">🎵 Audio Lab</a>' +
+      '<a href="#/audio-lab" style="display:inline-flex;align-items:center;gap:6px;font-size:13px;color:var(--accent);text-decoration:none;padding:6px 10px;border:1px solid var(--border);border-radius:6px;" onclick="document.querySelector(\'.cust-overlay\')?.classList.add(\'hidden\')">🎵 Audio Lab</a>' +
     '</div>';
   }
 
