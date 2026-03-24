@@ -102,8 +102,8 @@ a:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible
   position: sticky; top: 0; z-index: 1100;
   box-shadow: 0 2px 8px rgba(0,0,0,.3);
 }
-.nav-left { display: flex; align-items: center; gap: 24px; }
-.nav-brand { display: flex; align-items: center; gap: 8px; text-decoration: none; color: var(--nav-text); font-weight: 700; font-size: 16px; }
+.nav-left { display: flex; align-items: center; gap: 16px; }
+.nav-brand { display: flex; align-items: center; gap: 8px; text-decoration: none; color: var(--nav-text); font-weight: 700; font-size: 16px; white-space: nowrap; }
 .brand-logo { display: block; flex-shrink: 0; }
 .live-dot {
   width: 8px; height: 8px; border-radius: 50%; background: var(--text-muted);
@@ -118,7 +118,7 @@ a:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible
 
 .nav-links { display: flex; align-items: center; gap: 4px; }
 .nav-link {
-  color: var(--nav-text-muted); text-decoration: none; padding: 14px 12px; font-size: 14px;
+  color: var(--nav-text-muted); text-decoration: none; padding: 14px 9px; font-size: 13px;
   border-bottom: 2px solid transparent; transition: all .15s;
   background: none; border-top: none; border-left: none; border-right: none;
   cursor: pointer; font-family: var(--font);
