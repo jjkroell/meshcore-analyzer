@@ -31,6 +31,18 @@
   let filtersBuilt = false;
   const PANEL_WIDTH_KEY = 'meshcore-panel-width';
 
+  function closeDetailPanel() {
+    const panel = document.getElementById('pktRight');
+    if (panel && !panel.classList.contains('empty')) {
+      panel.classList.add('empty');
+      panel.innerHTML = '<div class="panel-resize-handle" id="pktResizeHandle"></div><span>Select a packet to view details</span>';
+      selectedId = null;
+      history.replaceState(null, '', '#/packets');
+      renderTableRows();
+      initPanelResize();
+    }
+  }
+
   function initPanelResize() {
     const handle = document.getElementById('pktResizeHandle');
     const panel = document.getElementById('pktRight');
@@ -911,18 +923,6 @@
       };
       pktBody.addEventListener('click', handler);
       pktBody.addEventListener('keydown', handler);
-    }
-
-    function closeDetailPanel() {
-      const panel = document.getElementById('pktRight');
-      if (panel && !panel.classList.contains('empty')) {
-        panel.classList.add('empty');
-        panel.innerHTML = '<div class="panel-resize-handle" id="pktResizeHandle"></div><span>Select a packet to view details</span>';
-        selectedId = null;
-        history.replaceState(null, '', '#/packets');
-        renderTableRows();
-        initPanelResize();
-      }
     }
 
     // Escape to close packet detail panel
