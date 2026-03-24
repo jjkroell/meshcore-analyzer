@@ -104,7 +104,7 @@ a:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible
 }
 .nav-left { display: flex; align-items: center; gap: 24px; }
 .nav-brand { display: flex; align-items: center; gap: 8px; text-decoration: none; color: var(--nav-text); font-weight: 700; font-size: 16px; }
-.brand-icon { font-size: 20px; }
+.brand-logo { display: block; flex-shrink: 0; }
 .live-dot {
   width: 8px; height: 8px; border-radius: 50%; background: var(--text-muted);
   display: inline-block; margin-left: 4px; transition: background .3s;
