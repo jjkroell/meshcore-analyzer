@@ -172,7 +172,7 @@ a:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible
 .panel-right {
   width: 420px; min-width: 280px; max-width: 70vw; border-left: 1px solid var(--border);
   background: var(--detail-bg); overflow-y: auto; overflow-x: hidden; padding: 16px;
-  position: relative;
+  position: relative; transition: width 0.15s ease, min-width 0.15s ease, padding 0.15s ease;
 }
 .panel-close-btn {
   position: absolute; top: 10px; right: 12px;
@@ -189,8 +189,9 @@ a:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible
   background: var(--accent); opacity: 0.3;
 }
 .panel-right.empty {
+  width: 38px; min-width: 38px; padding: 8px 0;
   display: flex; align-items: center; justify-content: center;
-  color: var(--text-muted); font-size: 14px;
+  color: transparent; font-size: 14px; overflow: hidden;
 }
 
 /* === Page Header === */
