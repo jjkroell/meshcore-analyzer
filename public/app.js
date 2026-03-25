@@ -820,18 +820,18 @@ function makeColumnsResizable(tableSelector, storageKey) {
         }
       }
     }
-  } else if (totalNeeded < containerW) {
-    // Give surplus to the 2 widest columns (content-heavy ones)
-    const surplus = containerW - totalNeeded;
-    const indexed = finalWidths.map((w, i) => ({ w, i })).sort((a, b) => b.w - a.w);
-    const topN = indexed.slice(0, Math.min(2, indexed.length));
-    const topTotal = topN.reduce((s, x) => s + x.w, 0);
-    topN.forEach(x => { finalWidths[x.i] += Math.round(surplus * (x.w / topTotal)); });
   }
 
-  table.style.width = '100%';
-  const totalFinal = finalWidths.reduce((s, w) => s + w, 0);
-  ths.forEach((th, i) => { th.style.width = (finalWidths[i] / totalFinal * 100) + '%'; });
+  const fitsNaturally = totalNeeded <= containerW;
+  if (fitsNaturally) {
+    // Content narrower than container — use pixel widths and let table size to content
+    table.style.width = 'auto';
+    ths.forEach((th, i) => { th.style.width = finalWidths[i] + 'px'; });
+  } else {
+    table.style.width = '100%';
+    const totalFinal = finalWidths.reduce((s, w) => s + w, 0);
+    ths.forEach((th, i) => { th.style.width = (finalWidths[i] / totalFinal * 100) + '%'; });
+  }
 
   addResizeHandles();
 

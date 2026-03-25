@@ -643,7 +643,7 @@
       </tr>`;
     }).join('');
     bindFavStars(tbody);
-    makeColumnsResizable('#nodesTable', 'meshcore-nodes-col-widths-v2');
+    makeColumnsResizable('#nodesTable', 'meshcore-nodes-col-widths-v3');
   }
 
   async function selectNode(pubkey) {
