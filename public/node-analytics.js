@@ -53,7 +53,7 @@
     container.innerHTML = `
       <div style="max-width:1000px;margin:0 auto;padding:12px 16px;height:100%;overflow-y:auto">
         <div style="margin-bottom:12px">
-          <a href="#/nodes/${encodeURIComponent(n.public_key)}" style="color:var(--accent);text-decoration:none;font-size:12px">← Back to ${nodeName}</a>
+          <a href="/nodes/${encodeURIComponent(n.public_key)}" style="color:var(--accent);text-decoration:none;font-size:12px">← Back to ${nodeName}</a>
           <h2 style="margin:4px 0 2px;font-size:18px">📊 ${nodeName} — Analytics</h2>
           <div style="color:var(--text-muted);font-size:11px">${n.role || 'Unknown role'} · ${s.totalTransmissions || s.totalPackets} packets in ${days}d window</div>
         </div>
@@ -135,7 +135,7 @@
             <table class="analytics-peer-table">
               <thead><tr><th>Peer</th><th>Messages</th><th>Last Contact</th></tr></thead>
               <tbody>${data.peerInteractions.map(p => `<tr>
-                <td><a href="#/nodes/${encodeURIComponent(p.peer_key)}" style="color:var(--accent)">${escapeHtml(p.peer_name)}</a></td>
+                <td><a href="/nodes/${encodeURIComponent(p.peer_key)}" style="color:var(--accent)">${escapeHtml(p.peer_name)}</a></td>
                 <td>${p.messageCount}</td>
                 <td>${timeAgo(p.lastContact)}</td>
               </tr>`).join('')}</tbody>

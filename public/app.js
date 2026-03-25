@@ -264,9 +264,15 @@ function registerPage(name, mod) { pages[name] = mod; }
 
 let currentPage = null;
 
+function goto(path) {
+  history.pushState(null, '', path);
+  navigate();
+}
+window.goto = goto;
+
 function navigate() {
-  const hash = location.hash.replace('#/', '') || 'packets';
-  const route = hash.split('?')[0];
+  const raw = location.pathname.replace(/^\//, '') || 'home';
+  const route = raw.split('?')[0];
 
   // Handle parameterized routes: nodes/<pubkey> → nodes page + select
   let basePage = route;
@@ -314,7 +320,7 @@ function navigate() {
   }
 }
 
-window.addEventListener('hashchange', navigate);
+window.addEventListener('popstate', navigate);
 let _themeRefreshTimer = null;
 window.addEventListener('theme-changed', () => {
   if (_themeRefreshTimer) clearTimeout(_themeRefreshTimer);
@@ -387,11 +393,50 @@ window.addEventListener('DOMContentLoaded', () => {
   // --- Hamburger Menu ---
   const hamburger = document.getElementById('hamburger');
   const navLinks = document.querySelector('.nav-links');
-  hamburger.addEventListener('click', () => navLinks.classList.toggle('open'));
-  // Close menu on nav link click
-  navLinks.querySelectorAll('.nav-link').forEach(link => {
-    link.addEventListener('click', () => navLinks.classList.remove('open'));
+  const topNav = document.querySelector('.top-nav');
+  const navRight = document.querySelector('.nav-right');
+
+  hamburger.addEventListener('click', (e) => { e.stopPropagation(); navLinks.classList.toggle('open'); });
+  // Intercept all nav link clicks — use goto() for SPA navigation, no full reload
+  document.addEventListener('click', (e) => {
+    const link = e.target.closest('a[href]');
+    if (link && link.origin === location.origin && !link.hasAttribute('download') && link.target !== '_blank') {
+      e.preventDefault();
+      navLinks.classList.remove('open');
+      goto(link.pathname + link.search);
+      return;
+    }
+    if (!navLinks.contains(e.target) && e.target !== hamburger) navLinks.classList.remove('open');
   });
+
+  // Dynamic compact mode — collapse nav as soon as any element goes off screen
+  let _firstCompactCheck = true;
+  function updateNavCompact() {
+    // Measure natural (expanded) nav width by temporarily positioning links off-screen
+    navLinks.style.cssText = 'position:fixed;top:-9999px;display:flex;visibility:hidden';
+    topNav.classList.remove('nav-compact');
+
+    const needed = (topNav.querySelector('.nav-brand')?.offsetWidth || 0)
+      + 16 // gap between brand and links
+      + navLinks.scrollWidth
+      + 16 // gap between links and right
+      + (navRight?.offsetWidth || 0)
+      + 40; // left+right padding
+
+    navLinks.style.cssText = '';
+    const compact = needed > topNav.clientWidth;
+    topNav.classList.toggle('nav-compact', compact);
+    if (!compact) {
+      navLinks.classList.remove('open');
+    } else if (_firstCompactCheck) {
+      // On initial load in compact mode, open the menu so navigation is immediately visible
+      navLinks.classList.add('open');
+    }
+    _firstCompactCheck = false;
+  }
+
+  new ResizeObserver(updateNavCompact).observe(topNav);
+  updateNavCompact();
 
   // --- Favorites dropdown ---
   const favToggle = document.getElementById('favToggle');
@@ -428,14 +473,14 @@ window.addEventListener('DOMContentLoaded', () => {
         const h = await api('/nodes/' + pk + '/health', { ttl: CLIENT_TTL.nodeHealth });
         const age = h.stats.lastHeard ? Date.now() - new Date(h.stats.lastHeard).getTime() : null;
         const status = age === null ? '🔴' : age < HEALTH_THRESHOLDS.nodeDegradedMs ? '🟢' : age < HEALTH_THRESHOLDS.nodeSilentMs ? '🟡' : '🔴';
-        return '<a href="#/nodes/' + pk + '" class="fav-dd-item" data-key="' + pk + '">'
+        return '<a href="/nodes/' + pk + '" class="fav-dd-item" data-key="' + pk + '">'
           + '<span class="fav-dd-status">' + status + '</span>'
           + '<span class="fav-dd-name">' + (h.node.name || truncate(pk, 12)) + '</span>'
           + '<span class="fav-dd-meta">' + (h.stats.lastHeard ? timeAgo(h.stats.lastHeard) : 'never') + '</span>'
           + favStar(pk, 'fav-dd-star')
           + '</a>';
       } catch {
-        return '<a href="#/nodes/' + pk + '" class="fav-dd-item" data-key="' + pk + '">'
+        return '<a href="/nodes/' + pk + '" class="fav-dd-item" data-key="' + pk + '">'
           + '<span class="fav-dd-status">❓</span>'
           + '<span class="fav-dd-name">' + truncate(pk, 16) + '</span>'
           + '<span class="fav-dd-meta">not found</span>'
@@ -499,21 +544,21 @@ window.addEventListener('DOMContentLoaded', () => {
         const pktList = packets.packets || packets;
         if (Array.isArray(pktList)) {
           for (const p of pktList.slice(0, 5)) {
-            html += `<div class="search-result-item" onclick="location.hash='#/packets/${p.packet_hash || p.hash || p.id}';document.getElementById('searchOverlay').classList.add('hidden')">
+            html += `<div class="search-result-item" onclick="goto('/packets/${p.packet_hash || p.hash || p.id}');document.getElementById('searchOverlay').classList.add('hidden')">
               <span class="search-result-type">Packet</span>${truncate(p.packet_hash || '', 16)} — ${payloadTypeName(p.payload_type)}</div>`;
           }
         }
         const nodeList = Array.isArray(nodes) ? nodes : (nodes.nodes || []);
         for (const n of nodeList.slice(0, 5)) {
           if (n.name && n.name.toLowerCase().includes(q.toLowerCase())) {
-            html += `<div class="search-result-item" onclick="location.hash='#/nodes/${n.public_key}';document.getElementById('searchOverlay').classList.add('hidden')">
+            html += `<div class="search-result-item" onclick="goto('/nodes/${n.public_key}');document.getElementById('searchOverlay').classList.add('hidden')">
               <span class="search-result-type">Node</span>${n.name} — ${truncate(n.public_key || '', 16)}</div>`;
           }
         }
         const chList = Array.isArray(channels) ? channels : [];
         for (const c of chList) {
           if (c.name && c.name.toLowerCase().includes(q.toLowerCase())) {
-            html += `<div class="search-result-item" onclick="location.hash='#/channels/${c.channel_hash}';document.getElementById('searchOverlay').classList.add('hidden')">
+            html += `<div class="search-result-item" onclick="goto('/channels/${c.channel_hash}');document.getElementById('searchOverlay').classList.add('hidden')">
               <span class="search-result-type">Channel</span>${c.name}</div>`;
           }
         }
@@ -620,8 +665,8 @@ window.addEventListener('DOMContentLoaded', () => {
       }
     }
   }).catch(() => { window.SITE_CONFIG = null; }).finally(() => {
-    if (!location.hash || location.hash === '#/') location.hash = '#/home';
-    else navigate();
+    if (location.pathname === '/' || location.pathname === '') history.replaceState(null, '', '/home');
+    navigate();
   });
 });
 

@@ -131,7 +131,7 @@
           ${adverts.length ? `<div class="ch-node-adverts"><span class="ch-node-label">Recent Adverts</span>
             ${adverts.slice(0, 5).map(a => `<div class="ch-node-advert">${timeAgo(a.timestamp)} · SNR ${a.snr != null ? a.snr + 'dB' : '?'}</div>`).join('')}
           </div>` : ''}
-          <a href="#/nodes/${n.public_key}" class="ch-node-link">View full node detail →</a>
+          <a href="/nodes/${n.public_key}" class="ch-node-link">View full node detail →</a>
         </div>`;
       _focusTrapCleanup = trapFocus(panel);
       panel.querySelector('.ch-node-close')?.focus();
@@ -230,6 +230,10 @@
           <div class="ch-sidebar-title"><span class="ch-icon">💬</span> Channels</div>
         </div>
         <div id="chRegionFilter" class="region-filter-container" style="padding:0 8px"></div>
+        <div class="ch-add-channel">
+          <input type="text" id="chAddInput" placeholder="#channel-name" aria-label="Add channel by name">
+          <button id="chAddBtn" title="Add channel">+</button>
+        </div>
         <div class="ch-channel-list" id="chList" role="listbox" aria-label="Channels">
           <div class="ch-loading">Loading channels…</div>
         </div>
@@ -244,7 +248,7 @@
           <div class="ch-empty">Choose a channel from the sidebar to view messages</div>
         </div>
         <span id="chAriaLive" class="sr-only" aria-live="polite"></span>
-        <button class="ch-scroll-btn hidden" id="chScrollBtn">↓ New messages</button>
+        <button class="ch-scroll-btn hidden" id="chScrollBtn">↑ New messages</button>
       </div>
     </div>`;
 
@@ -296,6 +300,30 @@
       else if (action === 'ch-back') chBack();
     });
 
+    // Add channel by name
+    async function addChannel() {
+      const input = document.getElementById('chAddInput');
+      const btn = document.getElementById('chAddBtn');
+      const name = (input.value || '').trim();
+      if (!name) return;
+      btn.disabled = true; btn.textContent = '…';
+      try {
+        const res = await fetch('/api/channels/add', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name }) });
+        const data = await res.json();
+        if (data.ok) {
+          input.value = '';
+          channels.length = 0;
+          await loadChannels(false, true);
+        } else {
+          alert(data.error || 'Failed to add channel');
+        }
+      } finally {
+        btn.disabled = false; btn.textContent = '+';
+      }
+    }
+    document.getElementById('chAddBtn').addEventListener('click', addChannel);
+    document.getElementById('chAddInput').addEventListener('keydown', e => { if (e.key === 'Enter') addChannel(); });
+
     // Event delegation for channel selection (touch-friendly)
     document.getElementById('chList').addEventListener('click', (e) => {
       const item = e.target.closest('.ch-item[data-hash]');
@@ -304,11 +332,11 @@
 
     const msgEl = document.getElementById('chMessages');
     msgEl.addEventListener('scroll', () => {
-      const atBottom = msgEl.scrollHeight - msgEl.scrollTop - msgEl.clientHeight < 60;
-      autoScroll = atBottom;
-      document.getElementById('chScrollBtn').classList.toggle('hidden', atBottom);
+      const atTop = msgEl.scrollTop < 60;
+      autoScroll = atTop;
+      document.getElementById('chScrollBtn').classList.toggle('hidden', atTop);
     });
-    document.getElementById('chScrollBtn').addEventListener('click', scrollToBottom);
+    document.getElementById('chScrollBtn').addEventListener('click', scrollToTop);
 
     // Event delegation for node clicks and hovers (click + touchend for mobile reliability)
     function handleNodeTap(e) {
@@ -395,7 +423,8 @@
         var payload = m.data?.decoded?.payload;
         if (!payload) continue;
 
-        var channelName = payload.channel || 'unknown';
+        var channelName = payload.channel;
+        if (!channelName) continue;
         var rawText = payload.text || '';
         var sender = payload.sender || null;
         var displayText = rawText;
@@ -485,7 +514,7 @@
           header.querySelector('.ch-header-text').textContent = (ch2.name || 'Channel ' + selectedHash) + ' — ' + messages.length + ' messages';
         }
         var msgEl = document.getElementById('chMessages');
-        if (msgEl && autoScroll) scrollToBottom();
+        if (msgEl && autoScroll) scrollToTop();
         else {
           document.getElementById('chScrollBtn')?.classList.remove('hidden');
           var liveEl = document.getElementById('chAriaLive');
@@ -524,11 +553,11 @@
     if (panel) panel.remove();
   }
 
-  async function loadChannels(silent) {
+  async function loadChannels(silent, bustCache) {
     try {
       const rp = RegionFilter.getRegionParam();
       const qs = rp ? '?region=' + encodeURIComponent(rp) : '';
-      const data = await api('/channels' + qs, { ttl: CLIENT_TTL.channels });
+      const data = await api('/channels' + qs, { ttl: bustCache ? 0 : CLIENT_TTL.channels });
       channels = (data.channels || []).map(ch => {
         ch.lastActivityMs = ch.lastActivity ? new Date(ch.lastActivity).getTime() : 0;
         return ch;
@@ -594,7 +623,7 @@
       const data = await api(`/channels/${encodeURIComponent(hash)}/messages?limit=200`, { ttl: CLIENT_TTL.channelMessages });
       messages = data.messages || [];
       renderMessages();
-      scrollToBottom();
+      scrollToTop();
     } catch (e) {
       msgEl.innerHTML = `<div class="ch-empty">Failed to load messages: ${e.message}</div>`;
     }
@@ -604,7 +633,7 @@
     if (!selectedHash) return;
     const msgEl = document.getElementById('chMessages');
     if (!msgEl) return;
-    const wasAtBottom = msgEl.scrollHeight - msgEl.scrollTop - msgEl.clientHeight < 60;
+    const wasAtTop = msgEl.scrollTop < 60;
     try {
       const data = await api(`/channels/${encodeURIComponent(selectedHash)}/messages?limit=200`, { ttl: CLIENT_TTL.channelMessages });
       const newMsgs = data.messages || [];
@@ -614,7 +643,7 @@
       var prevLen = messages.length;
       messages = newMsgs;
       renderMessages();
-      if (wasAtBottom) scrollToBottom();
+      if (wasAtTop) scrollToTop();
       else {
         document.getElementById('chScrollBtn')?.classList.remove('hidden');
         var liveEl = document.getElementById('chAriaLive');
@@ -628,7 +657,8 @@
     if (!msgEl) return;
     if (messages.length === 0) { msgEl.innerHTML = '<div class="ch-empty">No messages in this channel yet</div>'; return; }
 
-    msgEl.innerHTML = messages.map(msg => {
+    // Newest messages at top
+    msgEl.innerHTML = [...messages].reverse().map(msg => {
       const sender = msg.sender || 'Unknown';
       const senderColor = getSenderColor(sender);
       const senderLetter = sender.replace(/[^\w]/g, '').charAt(0).toUpperCase() || '?';
@@ -652,15 +682,15 @@
         <div class="ch-msg-content">
           <div class="ch-msg-sender ch-sender-link ch-tappable" style="color:${senderColor}" tabindex="0" role="button" data-node="${safeId}">${escapeHtml(sender)}</div>
           <div class="ch-msg-bubble">${displayText}</div>
-          <div class="ch-msg-meta">${meta.join(' · ')}${msg.packetHash ? ` · <a href="#/packets/${msg.packetHash}" class="ch-analyze-link">View packet →</a>` : ''}</div>
+          <div class="ch-msg-meta">${meta.join(' · ')}${msg.packetHash ? ` · <a href="/packets/${msg.packetHash}" class="ch-analyze-link">View packet →</a>` : ''}</div>
         </div>
       </div>`;
     }).join('');
   }
 
-  function scrollToBottom() {
+  function scrollToTop() {
     const msgEl = document.getElementById('chMessages');
-    if (msgEl) { msgEl.scrollTop = msgEl.scrollHeight; autoScroll = true; document.getElementById('chScrollBtn')?.classList.add('hidden'); }
+    if (msgEl) { msgEl.scrollTop = 0; autoScroll = true; document.getElementById('chScrollBtn')?.classList.add('hidden'); }
   }
 
   registerPage('channels', { init, destroy });

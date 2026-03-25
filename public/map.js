@@ -129,8 +129,8 @@
       </div>`;
 
     // Init Leaflet — restore saved position or use configurable defaults (#115)
-    let defaultCenter = [37.6, -122.1];
-    let defaultZoom = 9;
+    let defaultCenter = [49.59, -124.18];
+    let defaultZoom = 7;
     try {
       const mapCfg = await (await fetch('/api/config/map')).json();
       if (Array.isArray(mapCfg.center) && mapCfg.center.length === 2) defaultCenter = mapCfg.center;
@@ -139,7 +139,7 @@
     let initCenter = defaultCenter;
     let initZoom = defaultZoom;
     // Check URL query params first (from packet detail links)
-    const urlParams = new URLSearchParams(location.hash.split('?')[1] || '');
+    const urlParams = new URLSearchParams(location.search.slice(1));
     if (urlParams.get('lat') && urlParams.get('lon')) {
       initCenter = [parseFloat(urlParams.get('lat')), parseFloat(urlParams.get('lon'))];
       initZoom = parseInt(urlParams.get('zoom')) || 12;
@@ -381,7 +381,7 @@
         <div style="color:#9ca3af;font-size:11px;margin-bottom:4px">${p.role || 'unknown'}</div>
         <div style="font-family:monospace;font-size:10px;color:#6b7280;margin-bottom:6px;word-break:break-all">${safeEsc(p.pubkey || '')}</div>
         <div style="font-size:11px;color:#9ca3af">${p.lat.toFixed(4)}, ${p.lon.toFixed(4)}</div>
-        ${p.pubkey ? `<div style="margin-top:6px"><a href="#/nodes/${p.pubkey}" style="color:var(--accent);font-size:11px">View Node →</a></div>` : ''}
+        ${p.pubkey ? `<div style="margin-top:6px"><a href="/nodes/${p.pubkey}" style="color:var(--accent);font-size:11px">View Node →</a></div>` : ''}
       </div>`;
       marker.bindPopup(popupHtml, { className: 'route-popup' });
 
@@ -693,7 +693,7 @@
           <dt style="color:var(--text-muted);float:left;clear:left;width:80px;padding:2px 0;">Packets</dt>
           <dd style="margin-left:88px;padding:2px 0;">${packets}</dd>
         </dl>
-        <a href="#/observers/${encodeURIComponent(obs.id || obs.observer_id)}" style="display:block;margin-top:8px;font-size:12px;color:var(--accent);">View Detail →</a>
+        <a href="/observers/${encodeURIComponent(obs.id || obs.observer_id)}" style="display:block;margin-top:8px;font-size:12px;color:var(--accent);">View Detail →</a>
       </div>`;
   }
 
@@ -722,7 +722,7 @@
           <dt style="color:var(--text-muted);float:left;clear:left;width:80px;padding:2px 0;">Adverts</dt>
           <dd style="margin-left:88px;padding:2px 0;">${node.advert_count || 0}</dd>
         </dl>
-        <div style="margin-top:8px;clear:both;"><a href="#/nodes/${node.public_key}" style="color:var(--accent);font-size:12px;">View Node →</a></div>
+        <div style="margin-top:8px;clear:both;"><a href="/nodes/${node.public_key}" style="color:var(--accent);font-size:12px;">View Node →</a></div>
       </div>`;
   }
 
@@ -744,7 +744,6 @@
       color: '#f59e0b', weight: 2, opacity: 0.9,
       fillColor: '#f59e0b', fillOpacity: 0.06, dashArray: '6,4',
     }).addTo(map);
-    boundaryLayer.bindTooltip(boundaryCoords.length + '-vertex boundary', { sticky: true });
   }
 
   function destroy() {

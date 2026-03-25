@@ -21,7 +21,6 @@
   let rainCanvas = null, rainCtx = null, rainDrops = [], rainRAF = null;
   const propagationBuffer = new Map(); // hash -> {timer, packets[]}
   let _onResize = null;
-  let _navCleanup = null;
   let _timelineRefreshInterval = null;
   let _lcdClockInterval = null;
   let _rateCounterInterval = null;
@@ -693,8 +692,8 @@
       </div>`;
 
     // Fetch configurable map defaults (#115)
-    let mapCenter = [37.45, -122.0];
-    let mapZoom = 9;
+    let mapCenter = [49.59, -124.18];
+    let mapZoom = 7;
     try {
       const mapCfg = await (await fetch('/api/config/map')).json();
       if (Array.isArray(mapCfg.center) && mapCfg.center.length === 2) mapCenter = mapCfg.center;
@@ -1090,47 +1089,9 @@
       if (VCR.mode === 'LIVE') updateVCRClock(Date.now());
     }, 1000);
 
-    // Auto-hide nav with pin toggle (#62)
+    // Keep nav fixed so it overlays the map
     const topNav = document.querySelector('.top-nav');
     if (topNav) { topNav.style.position = 'fixed'; topNav.style.width = '100%'; topNav.style.zIndex = '1100'; }
-    _navCleanup = { timeout: null, fn: null, pinned: false };
-    // Add pin button to nav (guard against duplicate)
-    if (topNav && !document.getElementById('navPinBtn')) {
-      const pinBtn = document.createElement('button');
-      pinBtn.id = 'navPinBtn';
-      pinBtn.className = 'nav-pin-btn';
-      pinBtn.setAttribute('aria-label', 'Pin navigation open');
-      pinBtn.setAttribute('title', 'Pin navigation open');
-      pinBtn.textContent = '📌';
-      pinBtn.addEventListener('click', (e) => {
-        e.stopPropagation();
-        _navCleanup.pinned = !_navCleanup.pinned;
-        pinBtn.classList.toggle('pinned', _navCleanup.pinned);
-        pinBtn.setAttribute('aria-pressed', _navCleanup.pinned);
-        if (_navCleanup.pinned) {
-          clearTimeout(_navCleanup.timeout);
-          topNav.classList.remove('nav-autohide');
-        } else {
-          _navCleanup.timeout = setTimeout(() => { topNav.classList.add('nav-autohide'); }, 1500);
-        }
-      });
-      topNav.appendChild(pinBtn);
-    }
-    function showNav() {
-      if (topNav) topNav.classList.remove('nav-autohide');
-      clearTimeout(_navCleanup.timeout);
-      if (!_navCleanup.pinned) {
-        _navCleanup.timeout = setTimeout(() => { if (topNav) topNav.classList.add('nav-autohide'); }, 4000);
-      }
-    }
-    _navCleanup.fn = showNav;
-    const livePage = document.querySelector('.live-page');
-    if (livePage) {
-      livePage.addEventListener('mousemove', showNav);
-      livePage.addEventListener('touchstart', showNav);
-      livePage.addEventListener('click', showNav);
-    }
-    showNav();
   }
 
   function injectSVGFilters() {
@@ -1202,7 +1163,7 @@
         const regions = [...new Set(observers.map(o => o.iata).filter(Boolean))];
         html += `<h4 style="font-size:12px;margin:12px 0 6px;color:var(--text-muted);">Heard By${regions.length ? ' — Regions: ' + regions.join(', ') : ''}</h4>
           <div style="font-size:11px;">` +
-          observers.map(o => `<div style="padding:2px 0;"><a href="#/observers/${encodeURIComponent(o.observer_id)}" style="color:var(--accent);text-decoration:none;">${escapeHtml(o.observer_name || o.observer_id.slice(0, 12))}${o.iata ? ' (' + escapeHtml(o.iata) + ')' : ''}</a> — ${o.packetCount || o.count || 0} pkts</div>`).join('') +
+          observers.map(o => `<div style="padding:2px 0;"><a href="/observers/${encodeURIComponent(o.observer_id)}" style="color:var(--accent);text-decoration:none;">${escapeHtml(o.observer_name || o.observer_id.slice(0, 12))}${o.iata ? ' (' + escapeHtml(o.iata) + ')' : ''}</a> — ${o.packetCount || o.count || 0} pkts</div>`).join('') +
           '</div>';
       }
 
@@ -1210,7 +1171,7 @@
         html += `<h4 style="font-size:12px;margin:12px 0 6px;color:var(--text-muted);">Recent Packets</h4>
           <div style="font-size:11px;max-height:200px;overflow-y:auto;">` +
           recent.slice(0, 10).map(p => `<div style="padding:2px 0;display:flex;justify-content:space-between;">
-            <a href="#/packets/${encodeURIComponent(p.hash || '')}" style="color:var(--accent);text-decoration:none;">${escapeHtml(p.payload_type || '?')}${p.observation_count > 1 ? ' <span class="badge badge-obs" style="font-size:9px">👁 ' + p.observation_count + '</span>' : ''}</a>
+            <a href="/packets/${encodeURIComponent(p.hash || '')}" style="color:var(--accent);text-decoration:none;">${escapeHtml(p.payload_type || '?')}${p.observation_count > 1 ? ' <span class="badge badge-obs" style="font-size:9px">👁 ' + p.observation_count + '</span>' : ''}</a>
             <span style="color:var(--text-muted)">${p.timestamp ? timeAgo(p.timestamp) : '—'}</span>
           </div>`).join('') +
           '</div>';
@@ -1219,8 +1180,8 @@
       html += `<div id="liveNodePaths" style="margin-top:8px;"><div style="font-size:11px;color:var(--text-muted);padding:4px 0;"><span class="spinner" style="font-size:10px"></span> Loading paths…</div></div>`;
 
       html += `<div style="margin-top:12px;display:flex;gap:8px;">
-        <a href="#/nodes/${encodeURIComponent(n.public_key)}" style="font-size:12px;color:var(--accent);">Full Detail →</a>
-        <a href="#/nodes/${encodeURIComponent(n.public_key)}/analytics" style="font-size:12px;color:var(--accent);">📊 Analytics</a>
+        <a href="/nodes/${encodeURIComponent(n.public_key)}" style="font-size:12px;color:var(--accent);">Full Detail →</a>
+        <a href="/nodes/${encodeURIComponent(n.public_key)}/analytics" style="font-size:12px;color:var(--accent);">📊 Analytics</a>
       </div></div>`;
 
       content.innerHTML = html;
@@ -1240,7 +1201,7 @@
               const isThis = h.pubkey === n.public_key || (h.prefix && n.public_key.toLowerCase().startsWith(h.prefix.toLowerCase()));
               const name = escapeHtml(h.name || h.prefix);
               if (isThis) return `<strong style="color:var(--accent)">${name}</strong>`;
-              return h.pubkey ? `<a href="#/nodes/${h.pubkey}" style="color:var(--text);text-decoration:none">${name}</a>` : name;
+              return h.pubkey ? `<a href="/nodes/${h.pubkey}" style="color:var(--text);text-decoration:none">${name}</a>` : name;
             }).join(' → ');
             return `<div style="padding:3px 0;font-size:11px;line-height:1.4">${chain} <span style="color:var(--text-muted)">(${p.count}×)</span></div>`;
           }).join('');
@@ -1263,8 +1224,21 @@
     }
   }
 
+  let _observerIdSet = null;
+  async function getObserverIdSet() {
+    if (_observerIdSet) return _observerIdSet;
+    try {
+      const resp = await fetch('/api/observers?limit=1000');
+      const data = await resp.json();
+      const list = Array.isArray(data) ? data : (data.observers || []);
+      _observerIdSet = new Set(list.map(o => (o.id || o.public_key || '').toLowerCase()));
+    } catch { _observerIdSet = new Set(); }
+    return _observerIdSet;
+  }
+
   async function loadNodes(beforeTs) {
     try {
+      const obsIds = await getObserverIdSet();
       const url = beforeTs
         ? `/api/nodes?limit=2000&before=${encodeURIComponent(new Date(beforeTs).toISOString())}`
         : '/api/nodes?limit=2000';
@@ -1273,6 +1247,7 @@
       const list = Array.isArray(nodes) ? nodes : (nodes.nodes || []);
       list.forEach(n => {
         if (n.lat != null && n.lon != null && !(n.lat === 0 && n.lon === 0) && isInBoundary(n.lat, n.lon)) {
+          if (obsIds.has((n.public_key || '').toLowerCase())) n.role = 'observer';
           nodeData[n.public_key] = n;
           addNodeMarker(n);
         }
@@ -2324,7 +2299,7 @@
         ${rssi != null ? `<span>📡 ${rssi} dBm</span>` : ''}
         ${observer ? `<span>👁 ${escapeHtml(observer)}</span>` : ''}
       </div>
-      ${pkt.hash ? `<a class="fdc-link" href="#/packets/${pkt.hash.toLowerCase()}">View in packets →</a>` : ''}
+      ${pkt.hash ? `<a class="fdc-link" href="/packets/${pkt.hash.toLowerCase()}">View in packets →</a>` : ''}
       <button class="fdc-replay">↻ Replay</button>
     `;
     card.querySelector('.fdc-close').addEventListener('click', (e) => { e.stopPropagation(); card.remove(); });
@@ -2352,19 +2327,7 @@
     const appEl = document.getElementById('app');
     if (appEl) appEl.style.height = '';
     const topNav = document.querySelector('.top-nav');
-    if (topNav) { topNav.classList.remove('nav-autohide'); topNav.style.position = ''; topNav.style.width = ''; topNav.style.zIndex = ''; }
-    const existingPin = document.getElementById('navPinBtn');
-    if (existingPin) existingPin.remove();
-    if (_navCleanup) {
-      clearTimeout(_navCleanup.timeout);
-      const livePage = document.querySelector('.live-page');
-      if (livePage && _navCleanup.fn) {
-        livePage.removeEventListener('mousemove', _navCleanup.fn);
-        livePage.removeEventListener('touchstart', _navCleanup.fn);
-        livePage.removeEventListener('click', _navCleanup.fn);
-      }
-      _navCleanup = null;
-    }
+    if (topNav) { topNav.style.position = ''; topNav.style.width = ''; topNav.style.zIndex = ''; }
     nodesLayer = pathsLayer = animLayer = heatLayer = null;
     stopMatrixRain();
     nodeMarkers = {}; nodeData = {};

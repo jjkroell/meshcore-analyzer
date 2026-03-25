@@ -57,11 +57,11 @@
       ],
       checklist: [],
       footerLinks: [
-        { label: '📦 Packets', url: '#/packets' },
-        { label: '🗺️ Network Map', url: '#/map' },
-        { label: '🔴 Live', url: '#/live' },
-        { label: '📡 All Nodes', url: '#/nodes' },
-        { label: '💬 Channels', url: '#/channels' }
+        { label: '📦 Packets', url: '/packets' },
+        { label: '🗺️ Network Map', url: '/map' },
+        { label: '🔴 Live', url: '/live' },
+        { label: '📡 All Nodes', url: '/nodes' },
+        { label: '💬 Channels', url: '/channels' }
       ]
     }
   };
@@ -897,7 +897,7 @@
     container.querySelectorAll('.cust-tab').forEach(function (btn) {
       btn.addEventListener('click', function () {
         if (btn.dataset.tab === 'audio-lab') {
-          location.hash = '#/audio-lab';
+          goto('/audio-lab');
           document.querySelector('.cust-overlay')?.classList.add('hidden');
           return;
         }

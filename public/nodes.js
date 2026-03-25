@@ -139,7 +139,7 @@
       html += ` <span class="badge" style="background:var(--nav-bg);color:var(--nav-text);font-family:var(--mono)">${n.public_key.slice(0, n.hash_size * 2).toUpperCase()}</span>`;
     }
     if (n.hash_size_inconsistent) {
-      html += ` <a href="#/nodes/${encodeURIComponent(n.public_key)}?section=node-packets" class="badge" style="background:var(--status-yellow);color:#000;font-size:10px;cursor:pointer;text-decoration:none">⚠️ variable hash size</a>`;
+      html += ` <a href="/nodes/${encodeURIComponent(n.public_key)}?section=node-packets" class="badge" style="background:var(--status-yellow);color:#000;font-size:10px;cursor:pointer;text-decoration:none">⚠️ variable hash size</a>`;
     }
     html += ` <span title="${info.statusTooltip}">${info.statusLabel}</span>`;
     return html;
@@ -173,13 +173,13 @@
           <div class="text-center text-muted" style="padding:40px">Loading…</div>
         </div>
       </div>`;
-      document.getElementById('nodeBackBtn').addEventListener('click', () => { location.hash = '#/nodes'; });
+      document.getElementById('nodeBackBtn').addEventListener('click', () => { goto('/nodes'); });
       loadFullNode(directNode);
       // Escape to go back to nodes list
       document.addEventListener('keydown', function nodesEsc(e) {
         if (e.key === 'Escape') {
           document.removeEventListener('keydown', nodesEsc);
-          location.hash = '#/nodes';
+          goto('/nodes');
         }
       });
       return;
@@ -245,7 +245,7 @@
           <div class="node-detail-key mono" style="font-size:11px;word-break:break-all;margin-bottom:6px">${n.public_key}</div>
           <div>
             <button class="btn-primary" id="copyUrlBtn" style="font-size:12px;padding:4px 10px">📋 Copy URL</button>
-            <a href="#/nodes/${encodeURIComponent(n.public_key)}/analytics" class="btn-primary" style="display:inline-block;margin-left:6px;text-decoration:none;font-size:12px;padding:4px 10px">📊 Analytics</a>
+            <a href="/nodes/${encodeURIComponent(n.public_key)}/analytics" class="btn-primary" style="display:inline-block;margin-left:6px;text-decoration:none;font-size:12px;padding:4px 10px">📊 Analytics</a>
           </div>
         </div>
 
@@ -314,7 +314,7 @@
               return `<div class="node-activity-item">
                 <span class="node-activity-time">${timeAgo(p.timestamp)}</span>
                 <span>${typeLabel}${detail}${hashSizeBadge}${obsBadge}${obs ? ' via ' + escapeHtml(obs) : ''}${snr}${rssi}</span>
-                <a href="#/packets/${p.hash}" class="ch-analyze-link" style="margin-left:8px;font-size:0.8em">Analyze →</a>
+                <a href="/packets/${p.hash}" class="ch-analyze-link" style="margin-left:8px;font-size:0.8em">Analyze →</a>
               </div>`;
             }).join('') : '<div class="text-muted">No recent packets</div>'}
           </div>
@@ -332,7 +332,7 @@
       }
 
       // Copy URL
-      const nodeUrl = location.origin + '#/nodes/' + encodeURIComponent(n.public_key);
+      const nodeUrl = location.origin + '/nodes/' + encodeURIComponent(n.public_key);
       document.getElementById('copyUrlBtn')?.addEventListener('click', () => {
         navigator.clipboard.writeText(nodeUrl).then(() => {
           const btn = document.getElementById('copyUrlBtn');
@@ -342,7 +342,7 @@
       });
 
       // Deep-link scroll: ?section=node-packets or ?section=node-packets
-      const hashParams = location.hash.split('?')[1] || '';
+      const hashParams = location.search.slice(1);
       const urlParams = new URLSearchParams(hashParams);
       const scrollTarget = urlParams.get('section') || (urlParams.has('highlight') ? 'node-packets' : null);
       if (scrollTarget) {
@@ -386,12 +386,12 @@
                 return isThis ? html.replace('class="', 'class="hop-current ') : html;
               }
               const name = escapeHtml(h.name || h.prefix);
-              const link = h.pubkey ? `<a href="#/nodes/${encodeURIComponent(h.pubkey)}" style="${isThis ? 'font-weight:700;color:var(--accent, #3b82f6)' : ''}">${name}</a>` : `<span>${name}</span>`;
+              const link = h.pubkey ? `<a href="/nodes/${encodeURIComponent(h.pubkey)}" style="${isThis ? 'font-weight:700;color:var(--accent, #3b82f6)' : ''}">${name}</a>` : `<span>${name}</span>`;
               return link;
             }).join(' → ');
             return `<div style="padding:6px 0;border-bottom:1px solid var(--border);font-size:12px">
               <div>${chain}</div>
-              <div style="color:var(--text-muted);margin-top:2px">${p.count}× · last ${timeAgo(p.lastSeen)} · <a href="#/packets/${p.sampleHash}" class="ch-analyze-link">Analyze →</a></div>
+              <div style="color:var(--text-muted);margin-top:2px">${p.count}× · last ${timeAgo(p.lastSeen)} · <a href="/packets/${p.sampleHash}" class="ch-analyze-link">Analyze →</a></div>
             </div>`;
           }).join('');
         }
@@ -647,7 +647,7 @@
   async function selectNode(pubkey) {
     // On mobile, navigate to full-screen node view
     if (window.innerWidth <= 640) {
-      location.hash = '#/nodes/' + encodeURIComponent(pubkey);
+      goto('/nodes/' + encodeURIComponent(pubkey));
       return;
     }
     selectedKey = pubkey;
@@ -676,7 +676,7 @@
     const observers = h.observers || [];
     const recent = h.recentPackets || [];
     const hasLoc = n.lat != null && n.lon != null;
-    const nodeUrl = location.origin + '#/nodes/' + encodeURIComponent(n.public_key);
+    const nodeUrl = location.origin + '/nodes/' + encodeURIComponent(n.public_key);
 
     // Status calculation via shared helper
     const lastHeard = stats.lastHeard;
@@ -689,8 +689,8 @@
       <div class="node-detail">
         <div class="node-detail-name">${escapeHtml(n.name || '(unnamed)')}</div>
         <div class="node-detail-role">${renderNodeBadges(n, roleColor)}
-          <a href="#/nodes/${encodeURIComponent(n.public_key)}" class="btn-primary" style="display:inline-block;text-decoration:none;font-size:11px;padding:2px 8px;margin-left:8px">🔍 Details</a>
-          <a href="#/nodes/${encodeURIComponent(n.public_key)}/analytics" class="btn-primary" style="display:inline-block;margin-left:4px;text-decoration:none;font-size:11px;padding:2px 8px">📊 Analytics</a>
+          <a href="/nodes/${encodeURIComponent(n.public_key)}" class="btn-primary" style="display:inline-block;text-decoration:none;font-size:11px;padding:2px 8px;margin-left:8px">🔍 Details</a>
+          <a href="/nodes/${encodeURIComponent(n.public_key)}/analytics" class="btn-primary" style="display:inline-block;margin-left:4px;text-decoration:none;font-size:11px;padding:2px 8px">📊 Analytics</a>
         </div>
         ${renderStatusExplanation(n)}
 
@@ -749,7 +749,7 @@
                   ${a.observation_count > 1 ? ' <span class="badge badge-obs">👁 ' + a.observation_count + '</span>' : ''}
                   ${obs ? ' via ' + escapeHtml(obs) : ''}
                   ${a.snr != null ? ` · SNR ${a.snr}dB` : ''}${a.rssi != null ? ` · RSSI ${a.rssi}dBm` : ''}
-                  <br><a href="#/packets/${a.hash}" class="ch-analyze-link">Analyze →</a>
+                  <br><a href="/packets/${a.hash}" class="ch-analyze-link">Analyze →</a>
                 </div>
               </div>`;
             }).join('') : '<div class="text-muted" style="padding:8px">No recent packets</div>'}
@@ -814,12 +814,12 @@
           const chain = p.hops.map(h => {
             const isThis = h.pubkey === n.public_key;
             const name = escapeHtml(h.name || h.prefix);
-            const link = h.pubkey ? `<a href="#/nodes/${encodeURIComponent(h.pubkey)}" style="${isThis ? 'font-weight:700;color:var(--accent, #3b82f6)' : ''}">${name}</a>` : `<span>${name}</span>`;
+            const link = h.pubkey ? `<a href="/nodes/${encodeURIComponent(h.pubkey)}" style="${isThis ? 'font-weight:700;color:var(--accent, #3b82f6)' : ''}">${name}</a>` : `<span>${name}</span>`;
             return link;
           }).join(' → ');
           return `<div style="padding:6px 0;border-bottom:1px solid var(--border);font-size:12px">
             <div>${chain}</div>
-            <div style="color:var(--text-muted);margin-top:2px">${p.count}× · last ${timeAgo(p.lastSeen)} · <a href="#/packets/${p.sampleHash}" class="ch-analyze-link">Analyze →</a></div>
+            <div style="color:var(--text-muted);margin-top:2px">${p.count}× · last ${timeAgo(p.lastSeen)} · <a href="/packets/${p.sampleHash}" class="ch-analyze-link">Analyze →</a></div>
           </div>`;
         }).join('');
       }

@@ -105,7 +105,7 @@
     });
 
     // Deep-link: #/analytics?tab=collisions
-    const hashParams = location.hash.split('?')[1] || '';
+    const hashParams = location.search.slice(1);
     const urlTab = new URLSearchParams(hashParams).get('tab');
     if (urlTab) {
       const tabBtn = analyticsTabs.querySelector(`[data-tab="${urlTab}"]`);
@@ -127,7 +127,7 @@
         if (!row) return;
         if (e.type === 'keydown' && e.key !== 'Enter' && e.key !== ' ') return;
         if (e.type === 'keydown') e.preventDefault();
-        location.hash = row.dataset.value;
+        goto(row.dataset.value);
       };
       analyticsContent.addEventListener('click', handler);
       analyticsContent.addEventListener('keydown', handler);
@@ -179,7 +179,7 @@
       });
     });
     // Deep-link scroll to section within tab
-    const sectionId = new URLSearchParams((location.hash.split('?')[1] || '')).get('section');
+    const sectionId = new URLSearchParams((location.search.slice(1))).get('section');
     if (sectionId) {
       setTimeout(() => {
         const target = document.getElementById(sectionId);
@@ -524,7 +524,7 @@
     let html = '<div class="repeater-list">';
     repeaters.slice(0, 15).forEach(r => {
       const pct = (r.count / max * 100).toFixed(0);
-      html += `<div class="repeater-row ${r.pubkey ? 'clickable-row' : ''}" ${r.pubkey ? `onclick="location.hash='#/nodes/${encodeURIComponent(r.pubkey)}'"` : ''}>
+      html += `<div class="repeater-row ${r.pubkey ? 'clickable-row' : ''}" ${r.pubkey ? `onclick="goto('/nodes/${encodeURIComponent(r.pubkey)}')"` : ''}>
         <div class="repeater-name">${r.name ? '<strong>' + esc(r.name) + '</strong>' : '<span class="mono">' + r.hop + '</span>'}</div>
         <div class="repeater-bar"><div class="hash-bar-track"><div class="hash-bar-fill" style="width:${pct}%;background:var(--accent)"></div></div></div>
         <div class="repeater-count">${r.count.toLocaleString()}</div>
@@ -538,8 +538,8 @@
     let html = '<table class="analytics-table"><thead><tr><th>Node A</th><th>Node B</th><th>Co-appearances</th></tr></thead><tbody>';
     pairs.slice(0, 12).forEach(p => {
       html += `<tr>
-        <td>${p.nameA ? `<a href="#/nodes/${encodeURIComponent(p.pubkeyA)}" class="analytics-link">${esc(p.nameA)}</a>` : `<span class="mono">${p.hopA}</span>`}</td>
-        <td>${p.nameB ? `<a href="#/nodes/${encodeURIComponent(p.pubkeyB)}" class="analytics-link">${esc(p.nameB)}</a>` : `<span class="mono">${p.hopB}</span>`}</td>
+        <td>${p.nameA ? `<a href="/nodes/${encodeURIComponent(p.pubkeyA)}" class="analytics-link">${esc(p.nameA)}</a>` : `<span class="mono">${p.hopA}</span>`}</td>
+        <td>${p.nameB ? `<a href="/nodes/${encodeURIComponent(p.pubkeyB)}" class="analytics-link">${esc(p.nameB)}</a>` : `<span class="mono">${p.hopB}</span>`}</td>
         <td>${p.count}</td>
       </tr>`;
     });
@@ -572,7 +572,7 @@
     data.rings.forEach(ring => {
       const opacity = Math.max(0.3, 1 - ring.hops * 0.06);
       const nodeLinks = ring.nodes.slice(0, 8).map(n => {
-        const label = n.name ? `<a href="#/nodes/${encodeURIComponent(n.pubkey)}" class="analytics-link">${esc(n.name)}</a>` : `<span class="mono">${n.hop}</span>`;
+        const label = n.name ? `<a href="/nodes/${encodeURIComponent(n.pubkey)}" class="analytics-link">${esc(n.name)}</a>` : `<span class="mono">${n.hop}</span>`;
         const detail = n.distRange ? ` <span class="text-muted">(${n.distRange})</span>` : '';
         return label + detail;
       }).join(', ');
@@ -601,7 +601,7 @@
       <thead><tr><th>Node</th><th>Observers</th><th>Hop Distances</th></tr></thead><tbody>`;
     nodes.forEach(n => {
       const name = n.name
-        ? `<a href="#/nodes/${encodeURIComponent(n.pubkey)}" class="analytics-link">${esc(n.name)}</a>`
+        ? `<a href="/nodes/${encodeURIComponent(n.pubkey)}" class="analytics-link">${esc(n.name)}</a>`
         : `<span class="mono">${n.hop}</span>`;
       const obsInfo = n.observers.map(o =>
         `${esc(o.observer_name)}: <strong>${o.minDist} hop${o.minDist > 1 ? 's' : ''}</strong> <span class="text-muted">(${o.count} pkts)</span>`
@@ -624,7 +624,7 @@
       const opacity = Math.max(0.3, 1 - (+dist) * 0.06);
       const nodeLinks = nodes.slice(0, 10).map(n => {
         const label = n.name
-          ? `<a href="#/nodes/${encodeURIComponent(n.pubkey)}" class="analytics-link">${esc(n.name)}</a>`
+          ? `<a href="/nodes/${encodeURIComponent(n.pubkey)}" class="analytics-link">${esc(n.name)}</a>`
           : `<span class="mono">${n.hop}</span>`;
         return label + ` <span class="text-muted">via ${esc(n.observer_name)}</span>`;
       }).join(', ');
@@ -793,27 +793,27 @@
   async function renderCollisionTab(el, data) {
     el.innerHTML = `
       <nav id="hashIssuesToc" style="display:flex;gap:12px;margin-bottom:12px;font-size:13px;flex-wrap:wrap">
-        <a href="#/analytics?tab=collisions&section=inconsistentHashSection" style="color:var(--accent)">⚠️ Inconsistent Sizes</a>
+        <a href="/analytics?tab=collisions&section=inconsistentHashSection" style="color:var(--accent)">⚠️ Inconsistent Sizes</a>
         <span style="color:var(--border)">|</span>
-        <a href="#/analytics?tab=collisions&section=hashMatrixSection" style="color:var(--accent)">🔢 Hash Matrix</a>
+        <a href="/analytics?tab=collisions&section=hashMatrixSection" style="color:var(--accent)">🔢 Hash Matrix</a>
         <span style="color:var(--border)">|</span>
-        <a href="#/analytics?tab=collisions&section=collisionRiskSection" style="color:var(--accent)">💥 Collision Risk</a>
+        <a href="/analytics?tab=collisions&section=collisionRiskSection" style="color:var(--accent)">💥 Collision Risk</a>
       </nav>
 
       <div class="analytics-card" id="inconsistentHashSection">
-        <div style="display:flex;justify-content:space-between;align-items:center"><h3 style="margin:0">⚠️ Inconsistent Hash Sizes</h3><a href="#/analytics?tab=collisions" style="font-size:11px;color:var(--text-muted)">↑ top</a></div>
+        <div style="display:flex;justify-content:space-between;align-items:center"><h3 style="margin:0">⚠️ Inconsistent Hash Sizes</h3><a href="/analytics?tab=collisions" style="font-size:11px;color:var(--text-muted)">↑ top</a></div>
         <p class="text-muted" style="margin:4px 0 8px;font-size:0.8em">Nodes sending adverts with varying hash sizes. Caused by a <a href="https://github.com/meshcore-dev/MeshCore/commit/fcfdc5f" target="_blank" style="color:var(--accent)">bug</a> where automatic adverts ignored the configured multibyte path setting. Fixed in <a href="https://github.com/meshcore-dev/MeshCore/releases/tag/repeater-v1.14.1" target="_blank" style="color:var(--accent)">repeater v1.14.1</a>.</p>
         <div id="inconsistentHashList"><div class="text-muted" style="padding:8px"><span class="spinner"></span> Loading…</div></div>
       </div>
 
       <div class="analytics-card" id="hashMatrixSection">
-        <div style="display:flex;justify-content:space-between;align-items:center"><h3 style="margin:0">🔢 1-Byte Hash Usage Matrix</h3><a href="#/analytics?tab=collisions" style="font-size:11px;color:var(--text-muted)">↑ top</a></div>
+        <div style="display:flex;justify-content:space-between;align-items:center"><h3 style="margin:0">🔢 1-Byte Hash Usage Matrix</h3><a href="/analytics?tab=collisions" style="font-size:11px;color:var(--text-muted)">↑ top</a></div>
         <p class="text-muted" style="margin:4px 0 8px;font-size:0.8em">Click a cell to see which nodes share that prefix. Green = available, yellow = taken, red = collision.</p>
         <div id="hashMatrix"></div>
       </div>
 
       <div class="analytics-card" id="collisionRiskSection">
-        <div style="display:flex;justify-content:space-between;align-items:center"><h3 style="margin:0">💥 1-Byte Collision Risk</h3><a href="#/analytics?tab=collisions" style="font-size:11px;color:var(--text-muted)">↑ top</a></div>
+        <div style="display:flex;justify-content:space-between;align-items:center"><h3 style="margin:0">💥 1-Byte Collision Risk</h3><a href="/analytics?tab=collisions" style="font-size:11px;color:var(--text-muted)">↑ top</a></div>
         <div id="collisionList"><div class="text-muted" style="padding:8px">Loading…</div></div>
       </div>
     `;
@@ -839,7 +839,7 @@
             }).join(' ');
             const stripe = i % 2 === 1 ? 'background:var(--row-stripe)' : '';
             return `<tr style="${stripe}">
-              <td><a href="#/nodes/${encodeURIComponent(n.public_key)}?section=node-packets" style="font-weight:600;color:var(--accent)">${esc(n.name || n.public_key.slice(0, 12))}</a></td>
+              <td><a href="/nodes/${encodeURIComponent(n.public_key)}?section=node-packets" style="font-weight:600;color:var(--accent)">${esc(n.name || n.public_key.slice(0, 12))}</a></td>
               <td><span class="badge" style="background:${roleColor}20;color:${roleColor}">${n.role}</span></td>
               <td><code style="font-family:var(--mono);font-weight:700">${prefix}</code> <span class="text-muted">(${n.hash_size || '?'}B)</span></td>
               <td>${sizeBadges}</td>
@@ -949,7 +949,7 @@
               ? `<span class="text-muted" style="font-size:0.8em">(${m.lat.toFixed(2)}, ${m.lon.toFixed(2)})</span>`
               : '<span class="text-muted" style="font-size:0.8em">(no coords)</span>';
             const role = m.role ? `<span class="badge" style="font-size:0.7em;padding:1px 4px;background:var(--border)">${esc(m.role)}</span> ` : '';
-            return `<div style="padding:3px 0">${role}<a href="#/nodes/${encodeURIComponent(m.public_key)}" class="analytics-link">${esc(m.name || m.public_key.slice(0,12))}</a> ${coords}</div>`;
+            return `<div style="padding:3px 0">${role}<a href="/nodes/${encodeURIComponent(m.public_key)}" class="analytics-link">${esc(m.name || m.public_key.slice(0,12))}</a> ${coords}</div>`;
           }).join('')}</div>`;
         el.querySelectorAll('.hash-selected').forEach(c => c.classList.remove('hash-selected'));
         td.classList.add('hash-selected');
@@ -1023,7 +1023,7 @@
               const loc = (m.lat && m.lon && !(m.lat === 0 && m.lon === 0)) 
                 ? ` <span class="text-muted" style="font-size:0.75em">(${m.lat.toFixed(2)}, ${m.lon.toFixed(2)})</span>` 
                 : ' <span class="text-muted" style="font-size:0.75em">(no coords)</span>';
-              return `<a href="#/nodes/${encodeURIComponent(m.public_key)}" class="analytics-link">${esc(m.name || m.public_key.slice(0,12))}</a>${loc}`;
+              return `<a href="/nodes/${encodeURIComponent(m.public_key)}" class="analytics-link">${esc(m.name || m.public_key.slice(0,12))}</a>${loc}`;
             }).join('<br>')}</td>
           </tr>`;
         }).join('')}</tbody>
@@ -1268,7 +1268,7 @@
       const { active, degraded, silent, total: totalNodes, roleCounts } = netStatus;
 
       function nodeLink(n) {
-        return `<a href="#/nodes/${encodeURIComponent(n.public_key)}/analytics" class="analytics-link">${esc(n.name || n.public_key.slice(0, 12))}</a>`;
+        return `<a href="/nodes/${encodeURIComponent(n.public_key)}/analytics" class="analytics-link">${esc(n.name || n.public_key.slice(0, 12))}</a>`;
       }
       function claimedBadge(n) {
         return myKeys.has(n.public_key) ? ' <span style="color:var(--accent);font-size:10px">★ MINE</span>' : '';
@@ -1334,7 +1334,7 @@
                 <td><span class="badge" style="background:${(ROLE_COLORS[n.role]||'#6b7280')}20;color:${ROLE_COLORS[n.role]||'#6b7280'}">${n.role}</span></td>
                 <td>${n.health.stats.totalTransmissions || n.health.stats.totalPackets || 0}</td>
                 <td>${n.health.stats.packetsToday || 0}</td>
-                <td><a href="#/nodes/${encodeURIComponent(n.public_key)}/analytics" class="analytics-link">📊</a></td>
+                <td><a href="/nodes/${encodeURIComponent(n.public_key)}/analytics" class="analytics-link">📊</a></td>
               </tr>`).join('')}
             </tbody>
           </table>
@@ -1349,7 +1349,7 @@
                 <td><span class="badge" style="background:${(ROLE_COLORS[n.role]||'#6b7280')}20;color:${ROLE_COLORS[n.role]||'#6b7280'}">${n.role}</span></td>
                 <td>${n.health.stats.avgSnr.toFixed(1)} dB</td>
                 <td>${n.health.observers?.length || 0}</td>
-                <td><a href="#/nodes/${encodeURIComponent(n.public_key)}/analytics" class="analytics-link">📊</a></td>
+                <td><a href="/nodes/${encodeURIComponent(n.public_key)}/analytics" class="analytics-link">📊</a></td>
               </tr>`).join('')}
             </tbody>
           </table>
@@ -1364,7 +1364,7 @@
                 <td><span class="badge" style="background:${(ROLE_COLORS[n.role]||'#6b7280')}20;color:${ROLE_COLORS[n.role]||'#6b7280'}">${n.role}</span></td>
                 <td>${n.health.observers?.length || 0}</td>
                 <td>${n.health.stats.avgSnr != null ? n.health.stats.avgSnr.toFixed(1) + ' dB' : '—'}</td>
-                <td><a href="#/nodes/${encodeURIComponent(n.public_key)}/analytics" class="analytics-link">📊</a></td>
+                <td><a href="/nodes/${encodeURIComponent(n.public_key)}/analytics" class="analytics-link">📊</a></td>
               </tr>`).join('')}
             </tbody>
           </table>
@@ -1378,7 +1378,7 @@
                 <td><span class="badge" style="background:${(ROLE_COLORS[n.role]||'#6b7280')}20;color:${ROLE_COLORS[n.role]||'#6b7280'}">${n.role}</span></td>
                 <td>${timeAgo(n.health.stats.lastHeard)}</td>
                 <td>${n.health.stats.packetsToday || 0}</td>
-                <td><a href="#/nodes/${encodeURIComponent(n.public_key)}/analytics" class="analytics-link">📊</a></td>
+                <td><a href="/nodes/${encodeURIComponent(n.public_key)}/analytics" class="analytics-link">📊</a></td>
               </tr>`).join('')}
             </tbody>
           </table>
@@ -1426,10 +1426,10 @@
       html += `<div class="analytics-section"><h3>🏆 Top 20 Longest Hops</h3><table class="data-table"><thead><tr><th>#</th><th>From</th><th>To</th><th>Distance (km)</th><th>Type</th><th>SNR</th><th>Packet</th><th></th></tr></thead><tbody>`;
       const top20 = data.topHops.slice(0, 20);
       top20.forEach((h, i) => {
-        const fromLink = h.fromPk ? `<a href="#/nodes/${encodeURIComponent(h.fromPk)}" class="analytics-link">${esc(h.fromName)}</a>` : esc(h.fromName || '?');
-        const toLink = h.toPk ? `<a href="#/nodes/${encodeURIComponent(h.toPk)}" class="analytics-link">${esc(h.toName)}</a>` : esc(h.toName || '?');
+        const fromLink = h.fromPk ? `<a href="/nodes/${encodeURIComponent(h.fromPk)}" class="analytics-link">${esc(h.fromName)}</a>` : esc(h.fromName || '?');
+        const toLink = h.toPk ? `<a href="/nodes/${encodeURIComponent(h.toPk)}" class="analytics-link">${esc(h.toName)}</a>` : esc(h.toName || '?');
         const snr = h.snr != null ? h.snr + ' dB' : '<span class="text-muted">—</span>';
-        const pktLink = h.hash ? `<a href="#/packet/${encodeURIComponent(h.hash)}" class="analytics-link mono" style="font-size:0.85em">${esc(h.hash.slice(0, 12))}…</a>` : '—';
+        const pktLink = h.hash ? `<a href="/packet/${encodeURIComponent(h.hash)}" class="analytics-link mono" style="font-size:0.85em">${esc(h.hash.slice(0, 12))}…</a>` : '—';
         const mapBtn = h.fromPk && h.toPk ? `<button class="btn-icon dist-map-hop" data-from="${esc(h.fromPk)}" data-to="${esc(h.toPk)}" title="View on map">🗺️</button>` : '';
         html += `<tr><td>${i+1}</td><td>${fromLink}</td><td>${toLink}</td><td><strong>${h.dist}</strong></td><td>${esc(h.type)}</td><td>${snr}</td><td>${pktLink}</td><td>${mapBtn}</td></tr>`;
       });
@@ -1440,7 +1440,7 @@
         html += `<div class="analytics-section"><h3>🛤️ Top 10 Longest Multi-Hop Paths</h3><table class="data-table"><thead><tr><th>#</th><th>Total Distance (km)</th><th>Hops</th><th>Route</th><th>Packet</th><th></th></tr></thead><tbody>`;
         data.topPaths.slice(0, 10).forEach((p, i) => {
           const route = p.hops.map(h => esc(h.fromName)).concat(esc(p.hops[p.hops.length-1].toName)).join(' → ');
-          const pktLink = p.hash ? `<a href="#/packet/${encodeURIComponent(p.hash)}" class="analytics-link mono" style="font-size:0.85em">${esc(p.hash.slice(0, 12))}…</a>` : '—';
+          const pktLink = p.hash ? `<a href="/packet/${encodeURIComponent(p.hash)}" class="analytics-link mono" style="font-size:0.85em">${esc(p.hash.slice(0, 12))}…</a>` : '—';
           // Collect all unique pubkeys in path order
           const pathPks = [];
           p.hops.forEach(h => { if (h.fromPk && !pathPks.includes(h.fromPk)) pathPks.push(h.fromPk); });
@@ -1457,7 +1457,7 @@
       el.querySelectorAll('.dist-map-hop').forEach(btn => {
         btn.addEventListener('click', () => {
           sessionStorage.setItem('map-route-hops', JSON.stringify({ hops: [btn.dataset.from, btn.dataset.to] }));
-          window.location.hash = '#/map?route=1';
+          goto('/map?route=1');
         });
       });
       el.querySelectorAll('.dist-map-path').forEach(btn => {
@@ -1465,7 +1465,7 @@
           try {
             const hops = JSON.parse(btn.dataset.hops);
             sessionStorage.setItem('map-route-hops', JSON.stringify({ hops }));
-            window.location.hash = '#/map?route=1';
+            goto('/map?route=1');
           } catch {}
         });
       });

@@ -101,11 +101,11 @@
       <section class="home-footer">
         <div class="home-footer-links">
           ${homeCfg?.footerLinks ? homeCfg.footerLinks.map(l => `<a href="${escapeAttr(l.url)}" class="home-footer-link" target="_blank" rel="noopener">${escapeHtml(l.label)}</a>`).join('') : `
-          <a href="#/packets" class="home-footer-link">📦 Packets</a>
-          <a href="#/map" class="home-footer-link">🗺️ Network Map</a>
-          <a href="#/live" class="home-footer-link">🔴 Live</a>
-          <a href="#/nodes" class="home-footer-link">📡 All Nodes</a>
-          <a href="#/channels" class="home-footer-link">💬 Channels</a>`}
+          <a href="/packets" class="home-footer-link">📦 Packets</a>
+          <a href="/map" class="home-footer-link">🗺️ Network Map</a>
+          <a href="/live" class="home-footer-link">🔴 Live</a>
+          <a href="/nodes" class="home-footer-link">📡 All Nodes</a>
+          <a href="/channels" class="home-footer-link">💬 Channels</a>`}
         </div>
         <div class="home-level-toggle">
           <small>${exp ? 'Want setup guides? ' : 'Already know MeshCore? '}
@@ -333,7 +333,7 @@
       btn.addEventListener('click', (e) => {
         e.stopPropagation();
         if (btn.dataset.action === 'health') loadHealth(btn.dataset.key);
-        if (btn.dataset.action === 'packets') window.location.hash = '#/packets/' + btn.dataset.key;
+        if (btn.dataset.action === 'packets') goto('/packets/' + btn.dataset.key);
       });
     });
 
@@ -529,7 +529,7 @@
       { q: '🔁 Step 4: Check "Heard N repeats"',
         a: '<ul><li><strong>"Sent"</strong> = transmitted, no confirmation</li><li><strong>"Heard 0 repeats"</strong> = no repeater picked it up</li><li><strong>"Heard 1+ repeats"</strong> = you\'re on the mesh!</li></ul>' },
       { q: '📍 Repeaters near you?',
-        a: '<p><a href="#/map" style="color:var(--accent)">Check the network map</a> to see active repeaters.</p>' }
+        a: '<p><a href="/map" style="color:var(--accent)">Check the network map</a> to see active repeaters.</p>' }
     ];
     return items.map(i => `<div class="checklist-item"><div class="checklist-q" role="button" tabindex="0" aria-expanded="false">${i.q}</div><div class="checklist-a">${i.a}</div></div>`).join('');
   }

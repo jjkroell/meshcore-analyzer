@@ -305,6 +305,35 @@ class PacketStore {
     return result;
   }
 
+  /** Remove transmissions of a given payload_type older than maxAgeMs from memory + SQLite */
+  pruneOlderThan(maxAgeMs, payloadType) {
+    const cutoff = new Date(Date.now() - maxAgeMs).toISOString();
+    const toRemove = this.packets.filter(p => p.payload_type === payloadType && p.timestamp < cutoff);
+    if (!toRemove.length) return 0;
+    // Remove from memory indexes
+    for (const old of toRemove) {
+      this.byHash.delete(old.hash);
+      this.byTxId.delete(old.id);
+      for (const obs of (old.observations || [])) {
+        this.byId.delete(obs.id);
+        if (obs.observer_id && this.byObserver.has(obs.observer_id)) {
+          const arr = this.byObserver.get(obs.observer_id).filter(o => o.id !== obs.id);
+          if (arr.length) this.byObserver.set(obs.observer_id, arr); else this.byObserver.delete(obs.observer_id);
+        }
+      }
+    }
+    const removeHashes = new Set(toRemove.map(p => p.hash));
+    this.packets = this.packets.filter(p => !removeHashes.has(p.hash));
+    // Remove from SQLite — observations first (no cascade), then transmissions
+    const removeTxIds = toRemove.map(p => p.id).filter(Boolean);
+    if (removeTxIds.length) {
+      const placeholders = removeTxIds.map(() => '?').join(',');
+      this.db.prepare(`DELETE FROM observations WHERE transmission_id IN (${placeholders})`).run(...removeTxIds);
+      this.db.prepare(`DELETE FROM transmissions WHERE id IN (${placeholders})`).run(...removeTxIds);
+    }
+    return toRemove.length;
+  }
+
   /** Remove oldest transmissions when over memory limit */
   _evict() {
     while (this.packets.length > this.maxPackets) {

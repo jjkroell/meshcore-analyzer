@@ -133,6 +133,31 @@ const derivedCount = Object.keys(derivedHashChannelKeys).length;
 const rainbowCount = Object.keys(rainbowKeys).length;
 console.log(`[channels] ${totalKeys} channel key(s) (${derivedCount} derived from hashChannels, ${rainbowCount} from rainbow table)`);
 
+// Auto-learn new channel names: when a channel name is seen for the first time,
+// add it to hashChannels config and derive its key in memory so raw packets are decryptable.
+const configPath = path.join(__dirname, 'config.json');
+function autoLearnChannel(channelName) {
+  if (!channelName || typeof channelName !== 'string') return;
+  const name = channelName.trim().startsWith('#') ? channelName.trim() : `#${channelName.trim()}`;
+  if (blockedChannels.has(name.toLowerCase())) return;
+  if (channelKeys[name]) return; // already known
+  const key = deriveHashtagChannelKey(name);
+  channelKeys[name] = key;
+  derivedHashChannelKeys[name] = key;
+  // Persist to config.json
+  try {
+    const cfg = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+    if (!Array.isArray(cfg.hashChannels)) cfg.hashChannels = [];
+    if (!cfg.hashChannels.includes(name)) {
+      cfg.hashChannels.push(name);
+      fs.writeFileSync(configPath, JSON.stringify(cfg, null, 2) + '\n');
+      console.log(`[channels] Auto-learned new channel: ${name}`);
+    }
+  } catch (e) {
+    console.warn('[channels] Failed to persist auto-learned channel:', e.message);
+  }
+}
+
 // --- Cache TTL config (seconds → ms) ---
 const _ttlCfg = config.cacheTTL || {};
 const TTL = {
@@ -363,7 +388,7 @@ app.get('/api/config/theme', (req, res) => {
   const theme = loadThemeFile();
   res.json({
     branding: {
-      siteName: 'MeshCore Analyzer',
+      siteName: 'SWBC/Salish Mesh',
       tagline: 'Real-time MeshCore LoRa mesh network analyzer',
       ...(cfg.branding || {}),
       ...(theme.branding || {})
@@ -402,8 +427,8 @@ app.get('/api/config/theme', (req, res) => {
 app.get('/api/config/map', (req, res) => {
   const defaults = config.mapDefaults || {};
   res.json({
-    center: defaults.center || [37.45, -122.0],
-    zoom: defaults.zoom || 9
+    center: defaults.center || [49.59, -124.18],
+    zoom: defaults.zoom || 7
   });
 });
 
@@ -450,6 +475,20 @@ setInterval(() => {
   if (evtLoopSamples.length > 60) evtLoopSamples.shift();  // last 60s
   _elLast = now;
 }, EL_INTERVAL).unref();
+
+// Prune channel messages (payload_type=5) older than 18 hours — runs hourly
+const CHANNEL_MAX_AGE_MS = 18 * 60 * 60 * 1000;
+function pruneOldChannelMessages() {
+  try {
+    const count = pktStore.pruneOlderThan(CHANNEL_MAX_AGE_MS, 5);
+    if (count > 0) {
+      cache.debouncedInvalidateAll();
+      console.log(`[cleanup] Pruned ${count} channel messages older than 18h`);
+    }
+  } catch (e) { console.error('[cleanup] Channel prune error:', e.message); }
+}
+pruneOldChannelMessages(); // run once at startup
+setInterval(pruneOldChannelMessages, 60 * 60 * 1000).unref(); // then hourly
 
 // Manual WAL checkpoint every 5 minutes (auto-checkpoint disabled to avoid random event loop spikes)
 setInterval(() => {
@@ -757,6 +796,7 @@ for (const source of mqttSources) {
         broadcast({ type: 'packet', data: broadcastData });
 
         if (decoded.header.payloadTypeName === 'GRP_TXT') {
+          if (decoded.payload?.channel) autoLearnChannel(decoded.payload.channel);
           broadcast({ type: 'message', data: broadcastData });
         }
         return;
@@ -826,6 +866,14 @@ for (const source of mqttSources) {
         const channelMsg = msg.payload || msg;
         const channelIdx = channelMsg.channel_idx ?? msg.attributes?.channel_idx ?? topic.split('/').pop();
         const channelHash = `ch${channelIdx}`;
+        // Resolve channel index to a named channel (e.g. #LongFast)
+        const resolvedChannelName = hashChannels[Number(channelIdx)] || channelHash;
+        // Enrich payload with resolved channel name so it appears on the channels page
+        channelMsg.channel = resolvedChannelName;
+        // Drop blocked channels
+        if (blockedChannels.has(resolvedChannelName.toLowerCase())) return;
+        // Auto-learn if it's a proper named channel
+        if (resolvedChannelName.startsWith('#')) autoLearnChannel(resolvedChannelName);
         // Extract sender name from "Name: message" format
         const senderName = channelMsg.text?.split(':')[0] || null;
         // Create/update node for sender
@@ -2210,6 +2258,45 @@ app.get('/api/resolve-hops', (req, res) => {
 
 // channelHashNames removed — we only use decoded channel names now
 
+app.post('/api/channels/add', (req, res) => {
+  const { name } = req.body || {};
+  if (!name || typeof name !== 'string') return res.status(400).json({ error: 'name required' });
+  const channelName = name.trim().startsWith('#') ? name.trim() : `#${name.trim()}`;
+  if (blockedChannels.has(channelName.toLowerCase())) return res.status(400).json({ error: 'channel is blocked' });
+  autoLearnChannel(channelName);
+
+  // Retroactively re-decode any encrypted packets in pktStore that match this channel's key
+  const { ChannelCrypto } = require('@michaelhart/meshcore-decoder/dist/crypto/channel-crypto');
+  const key = channelKeys[channelName];
+  let redecoded = 0;
+  if (key) {
+    for (const pkt of pktStore.all()) {
+      if (pkt.payload_type !== 5) continue;
+      let decoded;
+      try { decoded = JSON.parse(pkt.decoded_json); } catch { continue; }
+      if (decoded.channel) continue; // already decoded
+      if (!decoded.encryptedData || !decoded.mac) continue;
+      const result = ChannelCrypto.decryptGroupTextMessage(decoded.encryptedData, decoded.mac, key);
+      if (result.success && result.data) {
+        const newDecoded = {
+          type: 'CHAN', channel: channelName, channelHash: decoded.channelHash,
+          sender: result.data.sender || null,
+          text: result.data.sender && result.data.message ? `${result.data.sender}: ${result.data.message}` : result.data.message || '',
+          sender_timestamp: result.data.timestamp, flags: result.data.flags,
+        };
+        pkt.decoded_json = JSON.stringify(newDecoded);
+        // Update DB too
+        try { db.db.prepare('UPDATE transmissions SET decoded_json=? WHERE hash=?').run(pkt.decoded_json, pkt.hash); } catch {}
+        redecoded++;
+      }
+    }
+  }
+
+  cache.debouncedInvalidateAll();
+  console.log(`[channels] Added ${channelName}, re-decoded ${redecoded} existing packets`);
+  res.json({ ok: true, name: channelName, redecoded });
+});
+
 app.get('/api/channels', (req, res) => {
   const { region } = req.query;
   const regionObsIds = getObserverIdsForRegions(region);
@@ -2226,10 +2313,9 @@ app.get('/api/channels', (req, res) => {
     let decoded;
     try { decoded = JSON.parse(pkt.decoded_json); } catch { continue; }
 
-    // Only show decrypted messages — skip encrypted garbage
-    if (decoded.type !== 'CHAN') continue;
-
-    const channelName = decoded.channel || 'unknown';
+    // Only show messages with a resolved channel name (filters encrypted garbage and unnamed packets)
+    if (!decoded.channel) continue;
+    const channelName = decoded.channel;
     if (blockedChannels.has(channelName.toLowerCase())) continue;
     const key = channelName;
     
@@ -2265,6 +2351,14 @@ app.get('/api/channels/:hash/messages', (req, res) => {
   const msgBoundaryObs = getBoundaryObserverIds();
   const packets = pktStore.filter(p => p.payload_type === 5 && (!msgBoundaryObs || msgBoundaryObs.has(p.observer_id))).sort((a,b) => a.timestamp > b.timestamp ? 1 : -1);
 
+  // Build sender name → location map for boundary filtering (case-insensitive)
+  const senderLocMap = new Map();
+  if (configBoundary) {
+    for (const n of db.db.prepare('SELECT name, lat, lon FROM nodes WHERE name IS NOT NULL AND lat IS NOT NULL AND lon IS NOT NULL AND lat != 0 AND lon != 0').all()) {
+      senderLocMap.set(n.name.toLowerCase(), { lat: n.lat, lon: n.lon });
+    }
+  }
+
   // Group by message content + timestamp to deduplicate repeats
   const msgMap = new Map();
   for (const pkt of packets) {
@@ -2297,6 +2391,11 @@ app.get('/api/channels/:hash/messages', (req, res) => {
           displaySender = decoded.text.slice(0, colonIdx);
           displayText = decoded.text.slice(colonIdx + 2);
         }
+      }
+      // Filter by sender location — if sender has a known location outside the boundary, skip
+      if (configBoundary && senderLocMap.size > 0) {
+        const senderLoc = senderLocMap.get(displaySender.toLowerCase());
+        if (senderLoc && !isPointInPolygon(senderLoc.lat, senderLoc.lon, configBoundary)) continue;
       }
       msgMap.set(dedupeKey, {
         sender: displaySender,

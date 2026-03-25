@@ -37,7 +37,7 @@
       panel.classList.add('empty');
       panel.innerHTML = '<div class="panel-resize-handle" id="pktResizeHandle"></div><span>Select a packet to view details</span>';
       selectedId = null;
-      history.replaceState(null, '', '#/packets');
+      history.replaceState(null, '', '/packets');
       renderTableRows();
       initPanelResize();
     }
@@ -1093,7 +1093,7 @@
     // Advertisements — show node name and role
     if (decoded.type === 'ADVERT' && decoded.name) {
       const role = decoded.flags?.repeater ? '📡' : decoded.flags?.room ? '🏠' : decoded.flags?.sensor ? '🌡' : '📻';
-      return `${role} <a href="#/nodes/${encodeURIComponent(decoded.pubKey)}" class="hop-link hop-named" data-hop-link="true">${escapeHtml(decoded.name)}</a>`;
+      return `${role} <a href="/nodes/${encodeURIComponent(decoded.pubKey)}" class="hop-link hop-named" data-hop-link="true">${escapeHtml(decoded.name)}</a>`;
     }
     // Direct messages
     if (decoded.type === 'TXT_MSG') return `✉️ ${decoded.srcHash?.slice(0,8) || '?'} → ${decoded.destHash?.slice(0,8) || '?'}`;
@@ -1271,7 +1271,7 @@
       const nodeName = decoded.name || '';
       locationHtml = `${decoded.lat.toFixed(5)}, ${decoded.lon.toFixed(5)}`;
       if (nodeName) locationHtml = `${escapeHtml(nodeName)} — ${locationHtml}`;
-      if (locationNodeKey) locationHtml += ` <a href="#/map?node=${encodeURIComponent(locationNodeKey)}" style="font-size:0.85em">📍map</a>`;
+      if (locationNodeKey) locationHtml += ` <a href="/map?node=${encodeURIComponent(locationNodeKey)}" style="font-size:0.85em">📍map</a>`;
     } else {
       // Try to resolve sender node location from nodes list
       const senderKey = decoded.pubKey || decoded.srcPubKey;
@@ -1283,7 +1283,7 @@
             locationNodeKey = nodeData.node.public_key;
             locationHtml = `${nodeData.node.lat.toFixed(5)}, ${nodeData.node.lon.toFixed(5)}`;
             if (nodeData.node.name) locationHtml = `${escapeHtml(nodeData.node.name)} — ${locationHtml}`;
-            locationHtml += ` <a href="#/map?node=${encodeURIComponent(locationNodeKey)}" style="font-size:0.85em">📍map</a>`;
+            locationHtml += ` <a href="/map?node=${encodeURIComponent(locationNodeKey)}" style="font-size:0.85em">📍map</a>`;
           } else if (senderName && !senderKey) {
             // Search by name
             const searchData = await api(`/nodes/search?q=${encodeURIComponent(senderName)}`, { ttl: 30000 }).catch(() => null);
@@ -1292,7 +1292,7 @@
               locationNodeKey = match.public_key;
               locationHtml = `${match.lat.toFixed(5)}, ${match.lon.toFixed(5)}`;
               locationHtml = `${escapeHtml(match.name)} — ${locationHtml}`;
-              locationHtml += ` <a href="#/map?node=${encodeURIComponent(locationNodeKey)}" style="font-size:0.85em">📍map</a>`;
+              locationHtml += ` <a href="/map?node=${encodeURIComponent(locationNodeKey)}" style="font-size:0.85em">📍map</a>`;
             }
           }
         } catch {}
@@ -1318,7 +1318,7 @@
       <div class="detail-actions">
         <button class="copy-link-btn" data-packet-hash="${pkt.hash || ''}" data-packet-id="${pkt.id}" title="Copy link to this packet">🔗 Copy Link</button>
         ${pathHops.length ? `<button class="detail-map-link" id="viewRouteBtn">🗺️ View route on map</button>` : ''}
-        ${pkt.hash ? `<a href="#/traces/${pkt.hash}" class="detail-map-link" style="text-decoration:none">🔍 Trace</a>` : ''}
+        ${pkt.hash ? `<a href="/traces/${pkt.hash}" class="detail-map-link" style="text-decoration:none">🔍 Trace</a>` : ''}
         <button class="replay-live-btn" title="Replay this packet on the live map">▶ Replay</button>
       </div>
 
@@ -1373,7 +1373,7 @@
           });
         }
         sessionStorage.setItem('replay-packet', JSON.stringify(replayPackets));
-        window.location.hash = '#/live';
+        goto('/live');
       });
     }
 
@@ -1408,9 +1408,9 @@
             origin: origin,
             hops: resolvedKeys
           }));
-          window.location.hash = '#/map?route=1';
+          goto('/map?route=1');
         } catch {
-          window.location.hash = '#/map';
+          goto('/map');
         }
       });
     }
@@ -1481,7 +1481,7 @@
           fOff += 8;
         }
         if (decoded.flags.hasName) {
-          rows += fieldRow(fOff, 'Node Name', decoded.pubKey ? `<a href="#/nodes/${encodeURIComponent(decoded.pubKey)}" class="hop-link hop-named" data-hop-link="true">${escapeHtml(decoded.name || '')}</a>` : escapeHtml(decoded.name || ''), '');
+          rows += fieldRow(fOff, 'Node Name', decoded.pubKey ? `<a href="/nodes/${encodeURIComponent(decoded.pubKey)}" class="hop-link hop-named" data-hop-link="true">${escapeHtml(decoded.name || '')}</a>` : escapeHtml(decoded.name || ''), '');
         }
       }
     } else if (decoded.type === 'GRP_TXT') {
@@ -1770,21 +1770,21 @@
       try {
         await loadObservers();
         const data = await api(`/packets/${param}`);
-        if (!data?.packet) { app.innerHTML = `<div style="max-width:800px;margin:0 auto;padding:40px;text-align:center"><h2>Packet not found</h2><p>Packet ${param} doesn't exist.</p><a href="#/packets">← Back to packets</a></div>`; return; }
+        if (!data?.packet) { app.innerHTML = `<div style="max-width:800px;margin:0 auto;padding:40px;text-align:center"><h2>Packet not found</h2><p>Packet ${param} doesn't exist.</p><a href="/packets">← Back to packets</a></div>`; return; }
         const hops = [];
         try { const ph = JSON.parse(data.packet.path_json || '[]'); hops.push(...ph); } catch {}
         const newHops = hops.filter(h => !(h in hopNameCache));
         if (newHops.length) await resolveHops(newHops);
         const container = document.createElement('div');
         container.style.cssText = 'max-width:800px;margin:0 auto;padding:20px';
-        container.innerHTML = `<div style="margin-bottom:16px"><a href="#/packets" style="color:var(--accent);text-decoration:none">← Back to packets</a></div>`;
+        container.innerHTML = `<div style="margin-bottom:16px"><a href="/packets" style="color:var(--accent);text-decoration:none">← Back to packets</a></div>`;
         const detail = document.createElement('div');
         container.appendChild(detail);
         await renderDetail(detail, data);
         app.innerHTML = '';
         app.appendChild(container);
       } catch (e) {
-        app.innerHTML = `<div style="max-width:800px;margin:0 auto;padding:40px;text-align:center"><h2>Error</h2><p>${e.message}</p><a href="#/packets">← Back to packets</a></div>`;
+        app.innerHTML = `<div style="max-width:800px;margin:0 auto;padding:40px;text-align:center"><h2>Error</h2><p>${e.message}</p><a href="/packets">← Back to packets</a></div>`;
       }
     },
     destroy: () => {}

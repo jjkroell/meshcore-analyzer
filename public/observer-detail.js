@@ -39,7 +39,7 @@
     app.innerHTML = `
       <div class="observer-detail-page" style="overflow-y:auto;height:calc(100vh - 56px);padding:16px">
         <div class="page-header" style="display:flex;align-items:center;gap:12px;margin-bottom:16px">
-          <a href="#/observers" class="btn-icon" title="Back to Observers" aria-label="Back">←</a>
+          <a href="/observers" class="btn-icon" title="Back to Observers" aria-label="Back">←</a>
           <h2 style="margin:0" id="obsTitle">Observer Detail</h2>
           <div style="margin-left:auto;display:flex;gap:8px">
             <select id="obsDaysSelect" class="time-range-select" aria-label="Time range">
@@ -304,7 +304,7 @@
         const decoded = typeof p.decoded_json === 'string' ? JSON.parse(p.decoded_json) : (p.decoded_json || {});
         const hops = typeof p.path_json === 'string' ? JSON.parse(p.path_json) : (p.path_json || []);
         const typeName = PAYLOAD_LABELS[p.payload_type] || 'Type ' + p.payload_type;
-        return `<tr style="cursor:pointer" onclick="location.hash='#/packets/${p.hash || p.id}'">
+        return `<tr style="cursor:pointer" onclick="goto('/packets/${p.hash || p.id}')">
           <td>${timeAgo(p.timestamp)}</td>
           <td>${typeName}</td>
           <td class="mono" style="font-size:0.85em">${(p.hash || '').substring(0, 10)}</td>

@@ -7,7 +7,7 @@
   let packetMeta = null;
   function init(app, routeParam) {
     // Check URL for pre-filled hash — support both route param and query param
-    const params = new URLSearchParams(location.hash.split('?')[1] || '');
+    const params = new URLSearchParams(location.search.slice(1));
     const urlHash = routeParam || params.get('hash') || '';
 
     app.innerHTML = `
@@ -43,7 +43,7 @@
   function obsLink(t) {
     const label = escapeHtml(obsLabel(t));
     if (!t.observer) return label;
-    return `<a href="#/observers/${encodeURIComponent(t.observer)}" style="color:var(--accent);text-decoration:none;" title="${escapeHtml(t.observer)}">${label}</a>`;
+    return `<a href="/observers/${encodeURIComponent(t.observer)}" style="color:var(--accent);text-decoration:none;" title="${escapeHtml(t.observer)}">${label}</a>`;
   }
 
   async function doTrace() {

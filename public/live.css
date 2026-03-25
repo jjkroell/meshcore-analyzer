@@ -415,16 +415,6 @@
   50% { opacity: 0.6; }
 }
 
-/* Site nav auto-hide on live page — fixed overlay, no layout shift */
-.nav-autohide {
-  opacity: 0 !important;
-  transform: translateY(-100%) !important;
-  pointer-events: none !important;
-  visibility: hidden;
-}
-.top-nav {
-  transition: opacity 0.25s ease, transform 0.25s ease, visibility 0.25s ease;
-}
 
 /* Feed hide/show */
 .live-feed { transition: opacity 0.3s, transform 0.3s; }
@@ -759,16 +749,3 @@
 }
 .feed-resize-handle:hover::after { background: rgba(59,130,246,0.5); color: #fff; }
 
-/* Nav pin button (#62) */
-.nav-pin-btn {
-  background: none;
-  border: none;
-  font-size: 14px;
-  cursor: pointer;
-  padding: 4px 8px;
-  opacity: 0.5;
-  transition: opacity 0.2s;
-  margin-left: auto;
-}
-.nav-pin-btn:hover { opacity: 0.8; }
-.nav-pin-btn.pinned { opacity: 1; filter: drop-shadow(0 0 4px rgba(59,130,246,0.5)); }
