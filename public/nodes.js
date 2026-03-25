@@ -536,15 +536,17 @@
           </select>
         </div>
       </div>
-      <table class="data-table" id="nodesTable">
-        <thead><tr>
-          <th class="sortable${sortState.column==='name'?' sort-active':''}" data-sort="name">Name${sortArrow('name')}</th>
-          <th class="sortable${sortState.column==='role'?' sort-active':''}" data-sort="role">Role${sortArrow('role')}</th>
-          <th class="sortable${sortState.column==='last_seen'?' sort-active':''}" data-sort="last_seen">Last Seen${sortArrow('last_seen')}</th>
-          <th class="sortable${sortState.column==='advert_count'?' sort-active':''}" data-sort="advert_count">Adverts${sortArrow('advert_count')}</th>
-        </tr></thead>
-        <tbody id="nodesBody"></tbody>
-      </table>`;
+      <div class="nodes-table-wrap">
+        <table class="data-table" id="nodesTable">
+          <thead><tr>
+            <th class="sortable${sortState.column==='name'?' sort-active':''}" data-sort="name">Name${sortArrow('name')}</th>
+            <th class="sortable${sortState.column==='role'?' sort-active':''}" data-sort="role">Role${sortArrow('role')}</th>
+            <th class="sortable${sortState.column==='last_seen'?' sort-active':''}" data-sort="last_seen">Last Seen${sortArrow('last_seen')}</th>
+            <th class="sortable${sortState.column==='advert_count'?' sort-active':''}" data-sort="advert_count">Adverts${sortArrow('advert_count')}</th>
+          </tr></thead>
+          <tbody id="nodesBody"></tbody>
+        </table>
+      </div>`;
 
     // Tab clicks
     const nodeTabs = document.getElementById('nodeTabs');
