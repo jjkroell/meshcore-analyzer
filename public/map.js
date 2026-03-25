@@ -248,7 +248,7 @@
     // WS for live advert updates
     wsHandler = debouncedOnWS(function (msgs) {
       if (msgs.some(function (m) { return m.type === 'packet' && m.data?.decoded?.header?.payloadTypeName === 'ADVERT'; })) {
-        loadNodes();
+        loadNodes({ bust: true });
       }
     });
 
@@ -407,12 +407,12 @@
     }
   }
 
-  async function loadNodes() {
+  async function loadNodes({ bust = false } = {}) {
     try {
       // Load regions from config + observed IATAs
       try { REGION_NAMES = await api('/config/regions', { ttl: 3600 }); } catch {}
 
-      const data = await api(`/nodes?limit=10000&lastHeard=${filters.lastHeard}`, { ttl: CLIENT_TTL.nodeList });
+      const data = await api(`/nodes?limit=10000&lastHeard=${filters.lastHeard}`, { ttl: CLIENT_TTL.nodeList, bust });
       nodes = data.nodes || [];
 
       // Load observers for jump buttons + map markers
