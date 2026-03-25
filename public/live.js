@@ -1774,7 +1774,7 @@
 
     let r = 2, op = 0.9;
     const iv = setInterval(() => {
-      r += 0.8; op -= 0.03;
+      r += 0.33; op -= 0.03;
       if (op <= 0) {
         clearInterval(iv);
         try { animLayer.removeLayer(ring); } catch {}
