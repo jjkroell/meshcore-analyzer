@@ -170,7 +170,7 @@ a:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible
 #app { height: calc(100vh - 52px); height: calc(100dvh - 52px); overflow: hidden; }
 
 .split-layout {
-  display: flex; height: 100%; overflow: hidden;
+  display: flex; height: 100%; overflow: clip;
 }
 .panel-left {
   flex: 1; min-width: 0; overflow: auto; padding: 8px 12px;
