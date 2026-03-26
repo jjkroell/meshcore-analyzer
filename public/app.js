@@ -231,6 +231,17 @@ function escapeHtml(s) {
   return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
 
+/* Render a public key with the hash prefix highlighted in accent colour */
+function renderPubkeyHtml(pubkey, hashSize) {
+  if (!pubkey) return '';
+  const prefixLen = (hashSize || 0) * 2;
+  if (!prefixLen) return escapeHtml(pubkey);
+  return '<span style="color:var(--accent);font-weight:700;letter-spacing:.5px">' +
+    escapeHtml(pubkey.slice(0, prefixLen).toUpperCase()) +
+    '</span>' + escapeHtml(pubkey.slice(prefixLen));
+}
+window.renderPubkeyHtml = renderPubkeyHtml;
+
 /* Global debounce */
 function debounce(fn, ms) {
   let t;
@@ -281,11 +292,6 @@ function navigate() {
   if (slashIdx > 0) {
     basePage = route.substring(0, slashIdx);
     routeParam = decodeURIComponent(route.substring(slashIdx + 1));
-  }
-
-  // Special route: nodes/PUBKEY/analytics → node-analytics page
-  if (basePage === 'nodes' && routeParam && routeParam.endsWith('/analytics')) {
-    basePage = 'node-analytics';
   }
 
   // Special route: packet/123 → standalone packet detail page
@@ -660,7 +666,12 @@ window.addEventListener('DOMContentLoaded', () => {
       }
     }
   }).catch(() => { window.SITE_CONFIG = null; }).finally(() => {
-    if (location.pathname === '/' || location.pathname === '') history.replaceState(null, '', '/home');
+    // Redirect legacy hash-based URLs (e.g. /#/packets/abc) to clean paths (/packets/abc)
+    if (location.hash && location.hash.startsWith('#/')) {
+      history.replaceState(null, '', location.hash.slice(1) + location.search);
+    } else if (location.pathname === '/' || location.pathname === '') {
+      history.replaceState(null, '', '/home');
+    }
     navigate();
   });
 });

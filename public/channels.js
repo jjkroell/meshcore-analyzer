@@ -472,22 +472,13 @@
         if (pktHash) seenHashes.add(pktHash + ':' + channelName);
 
         var ch = channels.find(function (c) { return c.hash === channelName; });
+        // Only update channels that already exist in the approved list from the API.
+        // Never add new channels from WS events — channels are only added via /api/channels/add.
         if (ch) {
           if (isFirstObservation) ch.messageCount = (ch.messageCount || 0) + 1;
           ch.lastActivityMs = Date.now();
           ch.lastSender = sender;
           ch.lastMessage = truncate(displayText, 100);
-          channelListDirty = true;
-        } else if (isFirstObservation) {
-          // New channel we haven't seen
-          channels.push({
-            hash: channelName,
-            name: channelName,
-            messageCount: 1,
-            lastActivityMs: Date.now(),
-            lastSender: sender,
-            lastMessage: truncate(displayText, 100),
-          });
           channelListDirty = true;
         }
 
@@ -519,7 +510,7 @@
       }
 
       if (channelListDirty) {
-        channels.sort(function (a, b) { return (b.lastActivityMs || 0) - (a.lastActivityMs || 0); });
+        channels.sort(function (a, b) { return (a.name || a.hash || '').localeCompare(b.name || b.hash || ''); });
         renderChannelList();
       }
       if (messagesDirty) {
@@ -578,7 +569,7 @@
       channels = (data.channels || []).map(ch => {
         ch.lastActivityMs = ch.lastActivity ? new Date(ch.lastActivity).getTime() : 0;
         return ch;
-      }).sort((a, b) => (b.lastActivityMs || 0) - (a.lastActivityMs || 0));
+      }).sort((a, b) => (a.name || a.hash || '').localeCompare(b.name || b.hash || ''));
       renderChannelList();
     } catch (e) {
       if (!silent) {
@@ -593,10 +584,7 @@
     if (!el) return;
     if (channels.length === 0) { el.innerHTML = '<div class="ch-empty">No channels found</div>'; return; }
 
-    // Sort by message count desc
-    const sorted = [...channels].sort((a, b) => {
-      return (b.messageCount || 0) - (a.messageCount || 0);
-    });
+    const sorted = [...channels].sort((a, b) => (a.name || a.hash || '').localeCompare(b.name || b.hash || ''));
 
     el.innerHTML = sorted.map(ch => {
       const name = ch.name || `Channel ${ch.hash}`;

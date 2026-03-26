@@ -413,7 +413,7 @@
 /* My Nodes Grid */
 .my-nodes-grid {
   max-width: 900px;
-  margin: 0 auto;
+  margin: 20px auto 0;
   padding: 0 20px 20px;
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(min(380px, 100%), 1fr));
@@ -469,14 +469,28 @@
 }
 .mnc-btn:hover { border-color: var(--accent); color: var(--accent); }
 
-/* Health claim button */
-.health-claim {
+/* Health banner actions */
+.health-node-link {
   margin-left: auto;
+  padding: 4px 12px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.4);
+  background: transparent; color: #fff; font: 600 .75rem var(--font);
+  text-decoration: none; white-space: nowrap; transition: background .15s;
+}
+.health-node-link:hover { background: rgba(255,255,255,0.15); }
+
+.health-claim {
   padding: 4px 12px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.4);
   background: transparent; color: #fff; font: 600 .75rem var(--font);
   cursor: pointer; transition: all .15s;
 }
 .health-claim:hover { background: rgba(255,255,255,0.15); }
+
+.health-close {
+  padding: 2px 8px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.3);
+  background: transparent; color: rgba(255,255,255,0.7); font-size: .9rem;
+  cursor: pointer; line-height: 1; transition: all .15s; flex-shrink: 0;
+}
+.health-close:hover { background: rgba(255,255,255,0.15); color: #fff; }
 
 .health-observers { font-size: .8rem; color: var(--text-muted); margin-bottom: 12px; }
 

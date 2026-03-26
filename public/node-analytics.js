@@ -9,6 +9,7 @@
   let charts = [];
   let currentDays = 7;
   let currentPubkey = null;
+  let loadGen = 0;
 
   function destroyCharts() {
     charts.forEach(c => { try { c.destroy(); } catch {} });
@@ -31,6 +32,7 @@
   }
 
   async function loadAnalytics(container, pubkey, days) {
+    const gen = ++loadGen;
     currentPubkey = pubkey;
     currentDays = days;
     destroyCharts();
@@ -42,20 +44,21 @@
     try {
       data = await api('/nodes/' + encodeURIComponent(pubkey) + '/analytics?days=' + days, { ttl: CLIENT_TTL.nodeAnalytics });
     } catch (e) {
+      if (gen !== loadGen) return;
       container.innerHTML = '<div style="padding:40px;text-align:center;color:#ff6b6b">Failed to load analytics: ' + escapeHtml(e.message) + '</div>';
       return;
     }
+    if (gen !== loadGen) return;
 
     const n = data.node;
     const s = data.computedStats;
     const nodeName = escapeHtml(n.name || n.public_key.slice(0, 12));
 
     container.innerHTML = `
-      <div style="max-width:1000px;margin:0 auto;padding:12px 16px;height:100%;overflow-y:auto">
-        <div style="margin-bottom:12px">
-          <a href="/nodes/${encodeURIComponent(n.public_key)}" style="color:var(--accent);text-decoration:none;font-size:12px">← Back to ${nodeName}</a>
-          <h2 style="margin:4px 0 2px;font-size:18px">📊 ${nodeName} — Analytics</h2>
-          <div style="color:var(--text-muted);font-size:11px">${n.role || 'Unknown role'} · ${s.totalTransmissions || s.totalPackets} packets in ${days}d window</div>
+      <div style="padding:12px 16px">
+        <div style="margin-bottom:8px;display:flex;align-items:baseline;gap:8px">
+          <h4 style="margin:0;font-size:14px">📊 Analytics</h4>
+          <div style="color:var(--text-muted);font-size:11px">${s.totalTransmissions || s.totalPackets} packets in ${days}d window</div>
         </div>
 
         <div class="analytics-time-range" id="timeRangeBtns">
@@ -152,17 +155,17 @@
       });
     });
 
-    // Build charts
-    buildActivityChart(data);
-    buildSnrChart(data);
-    buildPacketTypeChart(data);
-    buildObserverChart(data);
-    buildHopChart(data);
-    buildHeatmap(data);
+    // Build charts (pass container so canvas lookups are scoped, not global)
+    buildActivityChart(data, container);
+    buildSnrChart(data, container);
+    buildPacketTypeChart(data, container);
+    buildObserverChart(data, container);
+    buildHopChart(data, container);
+    buildHeatmap(data, container);
   }
 
-  function buildActivityChart(data) {
-    const ctx = document.getElementById('activityChart');
+  function buildActivityChart(data, container) {
+    const ctx = container.querySelector('#activityChart');
     if (!ctx) return;
     const tl = data.activityTimeline;
     const c = new Chart(ctx, {
@@ -179,8 +182,8 @@
     charts.push(c);
   }
 
-  function buildSnrChart(data) {
-    const ctx = document.getElementById('snrChart');
+  function buildSnrChart(data, container) {
+    const ctx = container.querySelector('#snrChart');
     if (!ctx) return;
     // Group by observer
     const byObs = {};
@@ -211,8 +214,8 @@
     charts.push(c);
   }
 
-  function buildPacketTypeChart(data) {
-    const ctx = document.getElementById('packetTypeChart');
+  function buildPacketTypeChart(data, container) {
+    const ctx = container.querySelector('#packetTypeChart');
     if (!ctx) return;
     const items = data.packetTypeBreakdown;
     const c = new Chart(ctx, {
@@ -226,8 +229,8 @@
     charts.push(c);
   }
 
-  function buildObserverChart(data) {
-    const ctx = document.getElementById('observerChart');
+  function buildObserverChart(data, container) {
+    const ctx = container.querySelector('#observerChart');
     if (!ctx) return;
     const obs = data.observerCoverage;
     const c = new Chart(ctx, {
@@ -245,8 +248,8 @@
     charts.push(c);
   }
 
-  function buildHopChart(data) {
-    const ctx = document.getElementById('hopChart');
+  function buildHopChart(data, container) {
+    const ctx = container.querySelector('#hopChart');
     if (!ctx) return;
     const hops = data.hopDistribution;
     const c = new Chart(ctx, {
@@ -260,8 +263,8 @@
     charts.push(c);
   }
 
-  function buildHeatmap(data) {
-    const grid = document.getElementById('heatmapGrid');
+  function buildHeatmap(data, container) {
+    const grid = container.querySelector('#heatmapGrid');
     if (!grid) return;
     // Build lookup
     const lookup = {};
@@ -289,20 +292,8 @@
     }
   }
 
-  function init(container, routeParam) {
-    // routeParam is "PUBKEY/analytics"
-    if (!routeParam || !routeParam.endsWith('/analytics')) {
-      container.innerHTML = '<div style="padding:40px;text-align:center">Invalid analytics URL</div>';
-      return;
-    }
-    const pubkey = routeParam.slice(0, -'/analytics'.length);
-    loadAnalytics(container, pubkey, 7);
-  }
-
-  function destroy() {
-    destroyCharts();
-    currentPubkey = null;
-  }
-
-  registerPage('node-analytics', { init, destroy });
+  window.NodeAnalytics = {
+    load: loadAnalytics,
+    destroy: function() { destroyCharts(); currentPubkey = null; }
+  };
 })();

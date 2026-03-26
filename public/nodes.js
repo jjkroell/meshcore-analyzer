@@ -125,9 +125,6 @@
     // Returns HTML for: role badge, hash prefix badge, hash inconsistency link, status label
     const info = getStatusInfo(n);
     let html = `<span class="badge" style="background:${roleColor}20;color:${roleColor}">${n.role}</span>`;
-    if (n.hash_size) {
-      html += ` <span class="badge" style="background:var(--nav-bg);color:var(--nav-text);font-family:var(--mono)">${n.public_key.slice(0, n.hash_size * 2).toUpperCase()}</span>`;
-    }
     if (n.hash_size_inconsistent) {
       html += ` <a href="/nodes/${encodeURIComponent(n.public_key)}?section=node-packets" class="badge" style="background:var(--status-yellow);color:#000;font-size:10px;cursor:pointer;text-decoration:none">⚠️ variable hash size</a>`;
     }
@@ -150,20 +147,25 @@
   let regionChangeHandler = null;
 
   function init(app, routeParam) {
+    // Strip legacy /analytics suffix — analytics is now embedded in node detail
+    if (routeParam && routeParam.endsWith('/analytics')) {
+      const cleanParam = routeParam.slice(0, -'/analytics'.length);
+      history.replaceState(null, '', '/nodes/' + encodeURIComponent(cleanParam));
+      routeParam = cleanParam;
+    }
     directNode = routeParam || null;
 
     if (directNode) {
       // Full-screen single node view
       app.innerHTML = `<div class="node-fullscreen">
         <div class="node-full-header">
-          <button class="detail-back-btn node-back-btn" id="nodeBackBtn" aria-label="Back to nodes">←</button>
-          <span class="node-full-title">Loading…</span>
+          <button class="detail-back-btn node-back-btn pill-btn" id="nodeBackBtn" aria-label="Go back">← Back</button>
         </div>
         <div class="node-full-body" id="nodeFullBody">
           <div class="text-center text-muted" style="padding:40px">Loading…</div>
         </div>
       </div>`;
-      document.getElementById('nodeBackBtn').addEventListener('click', () => { goto('/nodes'); });
+      document.getElementById('nodeBackBtn').addEventListener('click', () => { history.back(); });
       loadFullNode(directNode);
       // Escape to go back to nodes list
       document.addEventListener('keydown', function nodesEsc(e) {
@@ -181,10 +183,7 @@
         <div class="nodes-counts" id="nodeCounts"></div>
       </div>
       <div id="nodesRegionFilter" class="region-filter-container"></div>
-      <div class="split-layout">
-        <div class="panel-left" id="nodesLeft"></div>
-        <div class="panel-right empty" id="nodesRight"><span>Select a node to view details</span></div>
-      </div>
+      <div class="nodes-list-wrap" id="nodesLeft"></div>
     </div>`;
 
     RegionFilter.init(document.getElementById('nodesRegionFilter'));
@@ -208,8 +207,6 @@
       ]);
       const n = nodeData.node;
       const adverts = (nodeData.recentAdverts || []).sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
-      const title = document.querySelector('.node-full-title');
-      if (title) title.textContent = n.name || pubkey.slice(0, 12);
 
       const hasLoc = n.lat != null && n.lon != null;
 
@@ -232,18 +229,24 @@
           <div class="node-detail-name" style="font-size:20px">${escapeHtml(n.name || '(unnamed)')}</div>
           <div style="margin:4px 0 6px">${renderNodeBadges(n, roleColor)}</div>
           ${renderHashInconsistencyWarning(n)}
-          <div class="node-detail-key mono" style="font-size:11px;word-break:break-all;margin-bottom:6px">${n.public_key}</div>
-          <div>
-            <button class="btn-primary" id="copyUrlBtn" style="font-size:12px;padding:4px 10px">📋 Copy URL</button>
-            <a href="/nodes/${encodeURIComponent(n.public_key)}/analytics" class="btn-primary" style="display:inline-block;margin-left:6px;text-decoration:none;font-size:12px;padding:4px 10px">📊 Analytics</a>
+          <div style="margin-bottom:6px">
+            <span style="display:inline-block;font-size:13px;font-weight:600;letter-spacing:.7px;color:var(--accent);text-transform:uppercase;background:color-mix(in srgb,var(--accent) 12%,transparent);border:1px solid color-mix(in srgb,var(--accent) 30%,transparent);padding:2px 7px;border-radius:99px;margin-bottom:4px">Public Key</span>
+            <span class="node-detail-key mono">${(() => {
+              const key = n.public_key;
+              const prefixLen = (n.hash_size || 0) * 2;
+              if (!prefixLen) return key;
+              const prefix = key.slice(0, prefixLen).toUpperCase();
+              const rest = key.slice(prefixLen);
+              return '<span class="hash-prefix-tip" style="color:var(--accent);font-weight:700;letter-spacing:.5px;cursor:default" data-tip="' + n.hash_size + '-byte ID hash prefix">' + prefix + '</span>' + rest;
+            })()}</span>
           </div>
+          <div></div>
         </div>
 
         <div class="node-top-row">
           ${hasLoc ? `<div class="node-map-wrap"><div id="nodeFullMap" class="node-detail-map" style="height:100%;min-height:200px;border-radius:8px;overflow:hidden"></div></div>` : ''}
           <div class="node-qr-wrap${hasLoc ? '' : ' node-qr-wrap--full'}">
             <div class="node-qr" id="nodeFullQrCode"></div>
-            <div class="mono" style="font-size:10px;color:var(--text-muted);margin-top:8px;word-break:break-all;text-align:center;max-width:180px">${n.public_key.slice(0, 16)}…${n.public_key.slice(-8)}</div>
           </div>
         </div>
 
@@ -256,7 +259,6 @@
           ${stats.avgSnr != null ? `<tr><td>Avg SNR</td><td>${stats.avgSnr.toFixed(1)} dB</td></tr>` : ''}
           ${stats.avgHops ? `<tr><td>Avg Hops</td><td>${stats.avgHops}</td></tr>` : ''}
           ${hasLoc ? `<tr><td>Location</td><td>${n.lat.toFixed(5)}, ${n.lon.toFixed(5)}</td></tr>` : ''}
-          <tr><td>Hash Prefix</td><td>${n.hash_size ? '<code style="font-family:var(--mono);font-weight:700">' + n.public_key.slice(0, n.hash_size * 2).toUpperCase() + '</code> (' + n.hash_size + '-byte)' : 'Unknown'}${n.hash_size_inconsistent ? ' <span style="color:var(--status-yellow);cursor:help" title="Seen: ' + (n.hash_sizes_seen || []).join(', ') + '-byte">⚠️ varies</span>' : ''}</td></tr>
         </table>
 
         ${observers.length ? `<div class="node-full-card" id="node-observers">
@@ -275,6 +277,8 @@
             </tbody>
           </table>
         </div>` : ''}
+
+        <div class="node-full-card" id="nodeAnalyticsEmbed" style="padding:0"></div>
 
         <div class="node-full-card" id="fullPathsSection">
           <h4>Paths Through This Node</h4>
@@ -310,6 +314,10 @@
           </div>
         </div>`;
 
+      // Analytics embed
+      const analyticsEmbed = document.getElementById('nodeAnalyticsEmbed');
+      if (analyticsEmbed && window.NodeAnalytics) NodeAnalytics.load(analyticsEmbed, pubkey, 7);
+
       // Map
       if (hasLoc) {
         try {
@@ -321,15 +329,6 @@
         } catch {}
       }
 
-      // Copy URL
-      const nodeUrl = location.origin + '/nodes/' + encodeURIComponent(n.public_key);
-      document.getElementById('copyUrlBtn')?.addEventListener('click', () => {
-        navigator.clipboard.writeText(nodeUrl).then(() => {
-          const btn = document.getElementById('copyUrlBtn');
-          btn.textContent = '✅ Copied!';
-          setTimeout(() => btn.textContent = '📋 Copy URL', 2000);
-        }).catch(() => {});
-      });
 
       // Deep-link scroll: ?section=node-packets or ?section=node-packets
       const hashParams = location.search.slice(1);
@@ -410,6 +409,7 @@
     if (detailMap) { detailMap.remove(); detailMap = null; }
     if (regionChangeHandler) RegionFilter.offChange(regionChangeHandler);
     regionChangeHandler = null;
+    if (window.NodeAnalytics) NodeAnalytics.destroy();
     nodes = [];
     selectedKey = null;
   }
@@ -566,7 +566,7 @@
       th.addEventListener('click', () => { toggleSort(th.dataset.sort); renderLeft(); });
     });
 
-    // Delegated click/keyboard handler for table rows
+    // Delegated click/keyboard handler for table rows — go direct to full page
     const tbody = document.getElementById('nodesBody');
     if (tbody) {
       const handler = (e) => {
@@ -574,27 +574,14 @@
         if (!row) return;
         if (e.type === 'keydown' && e.key !== 'Enter' && e.key !== ' ') return;
         if (e.type === 'keydown') e.preventDefault();
-        selectNode(row.dataset.value);
+        goto('/nodes/' + encodeURIComponent(row.dataset.value));
       };
       tbody.addEventListener('click', handler);
       tbody.addEventListener('keydown', handler);
     }
 
-    // Close button and Escape to close node detail panel
-    function closeNodePanel() {
-      const panel = document.getElementById('nodesRight');
-      if (panel && !panel.classList.contains('empty')) {
-        panel.classList.add('empty');
-        panel.innerHTML = '<span>Select a node to view details</span>';
-        selectedKey = null;
-        renderRows();
-      }
-    }
-    document.getElementById('nodesRight').addEventListener('click', function(e) {
-      if (e.target.closest('[data-action="close-node-panel"]')) closeNodePanel();
-    });
     document.addEventListener('keydown', function nodesPanelEsc(e) {
-      if (e.key === 'Escape') closeNodePanel();
+      if (e.key === 'Escape') { /* no-op — no panel to close */ }
     });
 
     renderRows();
@@ -630,8 +617,12 @@
       const lastSeenTime = n.last_heard || n.last_seen;
       const status = getNodeStatus(n.role || 'companion', lastSeenTime ? new Date(lastSeenTime).getTime() : 0);
       const lastSeenClass = status === 'active' ? 'last-seen-active' : 'last-seen-stale';
-      return `<tr data-key="${n.public_key}" data-action="select" data-value="${n.public_key}" tabindex="0" role="row" class="${selectedKey === n.public_key ? 'selected' : ''}${isClaimed ? ' claimed-row' : ''}">
-        <td class="node-name-cell col-name">${favStar(n.public_key, 'node-fav')}${isClaimed ? '<span class="claimed-badge" title="My Mesh">★</span> ' : ''}<strong class="node-name-label" data-pubkey="${n.public_key}">${n.name || '(unnamed)'}</strong><span class="node-pubkey-tip mono">${n.public_key}</span></td>
+      return `<tr data-key="${n.public_key}" data-action="select" data-value="${n.public_key}" tabindex="0" role="row" class="${isClaimed ? 'claimed-row' : ''}">
+        <td class="node-name-cell col-name">${favStar(n.public_key, 'node-fav')}${isClaimed ? '<span class="claimed-badge" title="My Mesh">★</span> ' : ''}<strong class="node-name-label" data-pubkey="${n.public_key}">${n.name || '(unnamed)'}</strong><span class="node-pubkey-tip mono">${(() => {
+              const prefixLen = (n.hash_size || 0) * 2;
+              if (!prefixLen) return n.public_key;
+              return '<span style="color:var(--accent);font-weight:700">' + n.public_key.slice(0, prefixLen).toUpperCase() + '</span>' + n.public_key.slice(prefixLen);
+            })()}</span></td>
         <td><span class="badge" style="background:${roleColor}20;color:${roleColor}">${n.role}</span></td>
         <td class="${lastSeenClass}">${timeAgo(n.last_heard || n.last_seen)}</td>
         <td>${n.advert_count || 0}</td>
@@ -688,7 +679,6 @@
         <div class="node-detail-name">${escapeHtml(n.name || '(unnamed)')}</div>
         <div class="node-detail-role">${renderNodeBadges(n, roleColor)}
           <a href="/nodes/${encodeURIComponent(n.public_key)}" class="btn-primary" style="display:inline-block;text-decoration:none;font-size:11px;padding:2px 8px;margin-left:8px">🔍 Details</a>
-          <a href="/nodes/${encodeURIComponent(n.public_key)}/analytics" class="btn-primary" style="display:inline-block;margin-left:4px;text-decoration:none;font-size:11px;padding:2px 8px">📊 Analytics</a>
         </div>
         ${renderStatusExplanation(n)}
 
@@ -698,7 +688,7 @@
         </div>` : `<div class="node-qr" id="nodeQrCode" style="margin:8px 0"></div>`}
 
         <div class="node-detail-section">
-          <div class="node-detail-key mono" style="font-size:11px;word-break:break-all;margin-bottom:4px">${n.public_key}</div>
+          <div class="node-detail-key mono" style="font-size:11px;word-break:break-all;margin-bottom:4px">${renderPubkeyHtml(n.public_key, n.hash_size)}</div>
         </div>
 
         <div class="node-detail-section">
@@ -724,6 +714,8 @@
             </div>`).join('')}
           </div>
         </div>` : ''}
+
+        <div class="node-detail-section" id="nodeAnalyticsEmbed"></div>
 
         <div class="node-detail-section" id="pathsSection">
           <h4>Paths Through This Node</h4>
@@ -754,6 +746,10 @@
           </div>
         </div>
       </div>`;
+
+    // Analytics embed
+    const analyticsEmbed = document.getElementById('nodeAnalyticsEmbed');
+    if (analyticsEmbed && window.NodeAnalytics) NodeAnalytics.load(analyticsEmbed, n.public_key, 7);
 
     // Init map
     if (hasLoc) {

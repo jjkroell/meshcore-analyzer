@@ -1107,7 +1107,7 @@
             <span style="color:var(--text-muted);font-size:12px;margin-left:8px;">${statusLabel}</span>
           </div>
           <div style="font-size:12px;color:var(--text-muted);margin-bottom:8px;">
-            <code style="font-size:10px;word-break:break-all;">${escapeHtml(n.public_key)}</code>
+            <code style="font-size:10px;word-break:break-all;">${window.renderPubkeyHtml ? renderPubkeyHtml(n.public_key, n.hash_size) : escapeHtml(n.public_key)}</code>
           </div>
           <table style="font-size:12px;width:100%;border-collapse:collapse;">
             <tr><td style="color:var(--text-muted);padding:4px 8px 4px 0;">Last Seen</td><td>${lastSeen}</td></tr>
@@ -1140,7 +1140,6 @@
 
       html += `<div style="margin-top:12px;display:flex;gap:8px;">
         <a href="/nodes/${encodeURIComponent(n.public_key)}" style="font-size:12px;color:var(--accent);">Full Detail →</a>
-        <a href="/nodes/${encodeURIComponent(n.public_key)}/analytics" style="font-size:12px;color:var(--accent);">📊 Analytics</a>
       </div></div>`;
 
       content.innerHTML = html;
@@ -1591,9 +1590,10 @@
     // First pass: find all candidates per hop
     const raw = hops.map(hop => {
       const hopLower = hop.toLowerCase();
-      const candidates = known.filter(n => 
+      const candidates = known.filter(n =>
         n.public_key.toLowerCase().startsWith(hopLower) &&
-        n.lat != null && n.lon != null && !(n.lat === 0 && n.lon === 0)
+        n.lat != null && n.lon != null && !(n.lat === 0 && n.lon === 0) &&
+        n.role !== 'companion'
       );
       if (candidates.length === 1) {
         return { key: candidates[0].public_key, pos: [candidates[0].lat, candidates[0].lon], name: candidates[0].name || hop, known: true };
@@ -1641,20 +1641,21 @@
       hop.known = true; nextPos = hop.pos;
     }
 
-    // Sanity check: drop hops that are impossibly far from both neighbors (>200km ≈ 1.8°)
-    // These are almost certainly 1-byte prefix collisions with distant nodes
-    // MAX_HOP_DIST from shared roles.js
+    // Sanity check: drop hops impossibly far from their nearest known neighbor (>200km ≈ 1.8°)
+    // Look past unknown hops to find the nearest known position on each side so that
+    // unknown relays between two distant known positions don't hide the impossible gap.
     for (let i = 0; i < raw.length; i++) {
       if (!raw[i].known || !raw[i].pos) continue;
-      const prev = i > 0 && raw[i-1].known && raw[i-1].pos ? raw[i-1].pos : null;
-      const next = i < raw.length-1 && raw[i+1].known && raw[i+1].pos ? raw[i+1].pos : null;
+      let prev = null, next = null;
+      for (let j = i - 1; j >= 0; j--) { if (raw[j].known && raw[j].pos) { prev = raw[j].pos; break; } }
+      for (let j = i + 1; j < raw.length; j++) { if (raw[j].known && raw[j].pos) { next = raw[j].pos; break; } }
       if (!prev && !next) continue; // lone hop, keep it
       const dPrev = prev ? dist(raw[i].pos[0], raw[i].pos[1], prev[0], prev[1]) : 0;
       const dNext = next ? dist(raw[i].pos[0], raw[i].pos[1], next[0], next[1]) : 0;
       if ((prev && dPrev > MAX_HOP_DIST) && (next && dNext > MAX_HOP_DIST)) {
         raw[i].known = false; raw[i].pos = null; // too far from both neighbors
       } else if (prev && !next && dPrev > MAX_HOP_DIST) {
-        raw[i].known = false; raw[i].pos = null; // first/last with only one neighbor, too far
+        raw[i].known = false; raw[i].pos = null; // endpoint too far from only neighbor
       } else if (!prev && next && dNext > MAX_HOP_DIST) {
         raw[i].known = false; raw[i].pos = null;
       }
@@ -1671,6 +1672,8 @@
       for (let j = i - 1; j >= 0; j--) { if (raw[j].known || raw[j].pos) { before = raw[j].pos; break; } }
       for (let j = i + 1; j < raw.length; j++) { if (raw[j].known) { after = raw[j].pos; break; } }
       if (before && after) {
+        // Don't bridge anchor points that are impossibly far apart for RF
+        if (dist(before[0], before[1], after[0], after[1]) > MAX_HOP_DIST) continue;
         let gapStart = i, gapEnd = i;
         for (let j = i - 1; j >= 0 && !raw[j].known; j--) gapStart = j;
         for (let j = i + 1; j < raw.length && !raw[j].known; j++) gapEnd = j;

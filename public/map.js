@@ -702,14 +702,12 @@
   }
 
   function buildPopup(node) {
-    const key = node.public_key ? truncate(node.public_key, 16) : '—';
+    const key = node.public_key ? (window.renderPubkeyHtml ? renderPubkeyHtml(node.public_key, node.hash_size) : truncate(node.public_key, 16)) : '—';
     const loc = (node.lat && node.lon) ? `${node.lat.toFixed(5)}, ${node.lon.toFixed(5)}` : '—';
     const lastAdvert = node.last_seen ? timeAgo(node.last_seen) : '—';
     const roleBadge = `<span style="display:inline-block;padding:2px 8px;border-radius:12px;font-size:11px;font-weight:600;background:${ROLE_COLORS[node.role] || '#4b5563'};color:#fff;">${(node.role || 'unknown').toUpperCase()}</span>`;
     const hs = node.hash_size || 1;
-    const hashPrefix = node.public_key ? node.public_key.slice(0, hs * 2).toUpperCase() : '—';
-    const hashPrefixRow = `<dt style="color:var(--text-muted);float:left;clear:left;width:80px;padding:2px 0;">Hash Prefix</dt>
-          <dd style="font-family:var(--mono);font-size:11px;font-weight:700;margin-left:88px;padding:2px 0;">${safeEsc(hashPrefix)} <span style="font-weight:400;color:var(--text-muted);">(${hs}B)</span></dd>`;
+    const hashPrefixRow = '';
 
     return `
       <div class="map-popup" style="font-family:var(--font);min-width:180px;">
@@ -721,7 +719,7 @@
         <dl style="margin-top:8px;font-size:12px;">
           ${hashPrefixRow}
           <dt style="color:var(--text-muted);float:left;clear:left;width:80px;padding:2px 0;">Key</dt>
-          <dd style="font-family:var(--mono);font-size:11px;margin-left:88px;padding:2px 0;">${safeEsc(key)}</dd>
+          <dd style="font-family:var(--mono);font-size:11px;margin-left:88px;padding:2px 0;word-break:break-all">${key}</dd>
           <dt style="color:var(--text-muted);float:left;clear:left;width:80px;padding:2px 0;">Location</dt>
           <dd style="margin-left:88px;padding:2px 0;">${loc}</dd>
           <dt style="color:var(--text-muted);float:left;clear:left;width:80px;padding:2px 0;">Last Advert</dt>

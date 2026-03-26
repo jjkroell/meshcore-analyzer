@@ -38,10 +38,10 @@ function loadThemeFile(themePaths) {
 function buildHealthConfig(config) {
   const _ht = (config && config.healthThresholds) || {};
   return {
-    infraDegradedMs: _ht.infraDegradedMs || 86400000,
+    infraDegradedMs: _ht.infraDegradedMs || 172800000,
     infraSilentMs:   _ht.infraSilentMs   || 259200000,
-    nodeDegradedMs:  _ht.nodeDegradedMs  || 3600000,
-    nodeSilentMs:    _ht.nodeSilentMs    || 86400000
+    nodeDegradedMs:  _ht.nodeDegradedMs  || 86400000,
+    nodeSilentMs:    _ht.nodeSilentMs    || 172800000
   };
 }
 
@@ -171,6 +171,7 @@ function disambiguateHops(hops, allNodes, maxHopDist) {
     allNodes._prefixIdx = {};
     allNodes._prefixIdxName = {};
     for (const n of allNodes) {
+      if (n.role === 'companion') continue; // companions are not routing infrastructure
       const pk = n.public_key.toLowerCase();
       for (let len = 1; len <= 3; len++) {
         const p = pk.slice(0, len * 2);

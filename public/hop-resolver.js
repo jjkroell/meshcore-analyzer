@@ -36,6 +36,7 @@ window.HopResolver = (function() {
     prefixIdx = {};
     for (const n of nodesList) {
       if (!n.public_key) continue;
+      if (n.role === 'companion') continue; // companions are not routing infrastructure
       const pk = n.public_key.toLowerCase();
       for (let len = 1; len <= 3; len++) {
         const p = pk.slice(0, len * 2);

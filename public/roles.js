@@ -69,10 +69,10 @@
 
   // ─── Health thresholds (ms) ───
   window.HEALTH_THRESHOLDS = {
-    infraDegradedMs: 86400000,   // 24h
+    infraDegradedMs: 172800000,  // 48h
     infraSilentMs:   259200000,  // 72h
-    nodeDegradedMs:  3600000,    // 1h
-    nodeSilentMs:    86400000    // 24h
+    nodeDegradedMs:  86400000,   // 24h
+    nodeSilentMs:    172800000   // 48h
   };
 
   // Helper: get degraded/silent thresholds for a role (backward compat)

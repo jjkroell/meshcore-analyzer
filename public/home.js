@@ -302,7 +302,7 @@
           ${sparkHtml ? `<div class="mnc-spark">${sparkHtml}</div>` : ''}
           <div class="mnc-actions">
             <button class="mnc-btn" data-action="health" data-key="${mn.pubkey}">Full health →</button>
-            <button class="mnc-btn" data-action="packets" data-key="${mn.pubkey}">View packets →</button>
+            <button class="mnc-btn" data-action="packets" data-key="${mn.pubkey}" data-name="${escapeAttr(name)}">View packets →</button>
           </div>
         </div>`;
       } catch {
@@ -336,7 +336,10 @@
       btn.addEventListener('click', (e) => {
         e.stopPropagation();
         if (btn.dataset.action === 'health') loadHealth(btn.dataset.key);
-        if (btn.dataset.action === 'packets') goto('/packets/' + btn.dataset.key);
+        if (btn.dataset.action === 'packets') {
+          if (btn.dataset.name) sessionStorage.setItem('pkt-filter-name', btn.dataset.name);
+          goto('/packets/' + btn.dataset.key);
+        }
       });
     });
 
@@ -417,7 +420,7 @@
           </div>
           <div class="mnc-actions">
             <button class="mnc-btn" data-action="health" data-key="${pubkey}">Full health →</button>
-            <button class="mnc-btn" data-action="packets" data-key="${pubkey}">View packets →</button>
+            <button class="mnc-btn" data-action="packets" data-key="${pubkey}" data-name="${escapeAttr(name)}">View packets →</button>
           </div>
         </div>`;
       } catch {
@@ -446,7 +449,10 @@
       btn.addEventListener('click', (e) => {
         e.stopPropagation();
         if (btn.dataset.action === 'health') loadHealth(btn.dataset.key);
-        if (btn.dataset.action === 'packets') goto('/packets/' + btn.dataset.key);
+        if (btn.dataset.action === 'packets') {
+          if (btn.dataset.name) sessionStorage.setItem('pkt-filter-name', btn.dataset.name);
+          goto('/packets/' + btn.dataset.key);
+        }
       });
     });
 
@@ -530,7 +536,9 @@
         <div class="health-banner ${color}">
           <span>${status === 'healthy' ? '✅' : status === 'degraded' ? '⚠️' : '❌'}</span>
           <span><strong>${escapeHtml(node.name || truncate(pubkey, 16))}</strong> — ${statusMsg}</span>
+          <a class="health-node-link" href="/nodes/${encodeURIComponent(pubkey)}">View node page →</a>
           ${!claimed ? `<button class="health-claim" data-key="${pubkey}" data-name="${escapeAttr(node.name || '')}">+ Add to My Mesh</button>` : ''}
+          <button class="health-close" aria-label="Close">✕</button>
         </div>
         <div class="health-body">
           <div class="health-metrics">
@@ -562,6 +570,13 @@
           </div>
         </div>
       `;
+
+      // Close button
+      card.querySelector('.health-close')?.addEventListener('click', () => {
+        card.innerHTML = '';
+        card.classList.remove('visible');
+        if (journey) journey.classList.remove('visible');
+      });
 
       // Claim button in health detail
       card.querySelector('.health-claim')?.addEventListener('click', (e) => {

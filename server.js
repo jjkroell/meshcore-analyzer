@@ -85,7 +85,7 @@ const NODES_CACHE_MS = 30000;
 function getCachedNodes(includeRole) {
   const now = Date.now();
   if (!_cachedAllNodes || now - _cachedAllNodesTs > NODES_CACHE_MS) {
-    _cachedAllNodes = db.db.prepare('SELECT public_key, name, lat, lon FROM nodes WHERE name IS NOT NULL').all();
+    _cachedAllNodes = db.db.prepare('SELECT public_key, name, lat, lon, role FROM nodes WHERE name IS NOT NULL').all();
     _cachedAllNodesWithRole = db.db.prepare('SELECT public_key, name, lat, lon, role FROM nodes WHERE name IS NOT NULL').all();
     _cachedAllNodesTs = now;
     // Clear prefix index so disambiguateHops rebuilds it on fresh data
@@ -612,6 +612,7 @@ function disambiguateHops(hops, allNodes) {
     allNodes._prefixIdx = {};
     allNodes._prefixIdxName = {};
     for (const n of allNodes) {
+      if (n.role === 'companion') continue; // companions are not routing infrastructure
       const pk = n.public_key.toLowerCase();
       for (let len = 1; len <= 3; len++) {
         const p = pk.slice(0, len * 2);
@@ -836,8 +837,10 @@ for (const source of mqttSources) {
         broadcast({ type: 'packet', data: broadcastData });
 
         if (decoded.header.payloadTypeName === 'GRP_TXT') {
-          if (decoded.payload?.channel) autoLearnChannel(decoded.payload.channel);
-          broadcast({ type: 'message', data: broadcastData });
+          const _ch = decoded.payload?.channel;
+          if (_ch && approvedChannels.has(_ch)) {
+            broadcast({ type: 'message', data: broadcastData });
+          }
         }
         return;
       }
@@ -1108,10 +1111,25 @@ app.get('/api/packets/:id', (req, res) => {
   const param = req.params.id;
   const isHash = /^[0-9a-f]{16}$/i.test(param);
   let packet;
+  let siblingObservations = [];
+  let observation_count = 1;
+
   if (isHash) {
-    // Hash-based lookup
+    // Hash-based lookup — check memory first, fall back to SQLite
     const tx = pktStore.byHash.get(param.toLowerCase());
-    packet = tx || null;
+    if (tx) {
+      packet = tx;
+      siblingObservations = tx.observations || [];
+      observation_count = tx.observation_count || 1;
+    } else {
+      // Evicted from memory — query SQLite directly
+      const rows = db.db.prepare('SELECT * FROM packets_v WHERE hash = ? ORDER BY timestamp ASC').all(param.toLowerCase());
+      if (rows.length > 0) {
+        packet = rows[0];
+        siblingObservations = rows;
+        observation_count = rows.length;
+      }
+    }
   }
   if (!packet) {
     const id = Number(param);
@@ -1122,7 +1140,7 @@ app.get('/api/packets/:id', (req, res) => {
   }
   if (!packet) return res.status(404).json({ error: 'Not found' });
 
-    // Note: packet.path_json reflects the first observer's path (earliest first_seen).
+  // Note: packet.path_json reflects the first observer's path (earliest first_seen).
   // Individual observation paths are in siblingObservations below.
 
   const pathHops = packet.paths || [];
@@ -1132,10 +1150,14 @@ app.get('/api/packets/:id', (req, res) => {
   // Build byte breakdown
   const breakdown = buildBreakdown(packet.raw_hex, decoded);
 
-  // Include sibling observations for this transmission
-  const transmission = packet.hash ? pktStore.byHash.get(packet.hash) : null;
-  const siblingObservations = transmission ? transmission.observations : [];
-  const observation_count = transmission ? transmission.observation_count : 1;
+  // If observations not yet populated (non-hash path), get from memory
+  if (!siblingObservations.length && packet.hash) {
+    const transmission = pktStore.byHash.get(packet.hash);
+    if (transmission) {
+      siblingObservations = transmission.observations || [];
+      observation_count = transmission.observation_count || 1;
+    }
+  }
 
   res.json({ packet, path: pathHops, breakdown, observation_count, observations: siblingObservations });
 });
@@ -1250,19 +1272,29 @@ app.get('/api/nodes', (req, res) => {
   if (regionNodeKeys) {
     const allNodes = db.db.prepare(`SELECT * FROM nodes ${clause} ORDER BY ${order}`).all(params);
     filteredAll = allNodes.filter(n => regionNodeKeys.has(n.public_key));
-    // Also exclude nodes whose known coordinates are outside the boundary
+    // Exclude nodes with no coordinates or outside the boundary
     if (configBoundary) {
       filteredAll = filteredAll.filter(n =>
-        !n.lat || !n.lon || (n.lat === 0 && n.lon === 0) ||
+        n.lat && n.lon && !(n.lat === 0 && n.lon === 0) &&
         isPointInPolygon(n.lat, n.lon, configBoundary)
       );
     }
     total = filteredAll.length;
     nodes = filteredAll.slice(Number(offset), Number(offset) + Number(limit));
   } else {
-    nodes = db.db.prepare(`SELECT * FROM nodes ${clause} ORDER BY ${order} LIMIT @limit OFFSET @offset`).all({ ...params, limit: Number(limit), offset: Number(offset) });
-    total = db.db.prepare(`SELECT COUNT(*) as count FROM nodes ${clause}`).get(params).count;
-    filteredAll = null;
+    if (configBoundary) {
+      const allNodes = db.db.prepare(`SELECT * FROM nodes ${clause} ORDER BY ${order}`).all(params);
+      filteredAll = allNodes.filter(n =>
+        n.lat && n.lon && !(n.lat === 0 && n.lon === 0) &&
+        isPointInPolygon(n.lat, n.lon, configBoundary)
+      );
+      total = filteredAll.length;
+      nodes = filteredAll.slice(Number(offset), Number(offset) + Number(limit));
+    } else {
+      nodes = db.db.prepare(`SELECT * FROM nodes ${clause} ORDER BY ${order} LIMIT @limit OFFSET @offset`).all({ ...params, limit: Number(limit), offset: Number(offset) });
+      total = db.db.prepare(`SELECT COUNT(*) as count FROM nodes ${clause}`).get(params).count;
+      filteredAll = null;
+    }
   }
 
   const counts = {};
@@ -1299,7 +1331,13 @@ app.get('/api/nodes', (req, res) => {
 app.get('/api/nodes/search', (req, res) => {
   const q = req.query.q || '';
   if (!q.trim()) return res.json({ nodes: [] });
-  const nodes = db.searchNodes(q.trim());
+  let nodes = db.searchNodes(q.trim());
+  if (configBoundary) {
+    nodes = nodes.filter(n =>
+      n.lat && n.lon && !(n.lat === 0 && n.lon === 0) &&
+      isPointInPolygon(n.lat, n.lon, configBoundary)
+    );
+  }
   res.json({ nodes });
 });
 

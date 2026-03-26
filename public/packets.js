@@ -177,13 +177,18 @@
         directPacketHash = routeParam;
       } else {
         filters.node = routeParam;
+        const storedName = sessionStorage.getItem('pkt-filter-name');
+        sessionStorage.removeItem('pkt-filter-name');
+        filters.nodeName = storedName || routeParam.slice(0, 16);
       }
     }
-    app.innerHTML = `<div class="split-layout">
-      <div class="panel-left" id="pktLeft"></div>
-      <div class="panel-right empty" id="pktRight" aria-live="polite">
-        <div class="panel-resize-handle" id="pktResizeHandle"></div>
-        <span>Select a packet to view details</span>
+    app.innerHTML = `<div class="packets-page">
+      <div class="split-layout">
+        <div class="panel-left" id="pktLeft"></div>
+        <div class="panel-right empty" id="pktRight" aria-live="polite">
+          <div class="panel-resize-handle" id="pktResizeHandle"></div>
+          <span>Select a packet to view details</span>
+        </div>
       </div>
     </div>`;
     initPanelResize();
@@ -192,7 +197,36 @@
     const fTW = document.getElementById('fTimeWindow');
     const savedTW = localStorage.getItem('meshcore-time-window');
     if (savedTW !== null && fTW) fTW.value = savedTW;
-    loadPackets();
+    await loadPackets();
+
+    // Populate node filter input after DOM is built
+    if (filters.nodeName) {
+      const fNodeEl = document.getElementById('fNode');
+      if (fNodeEl) {
+        fNodeEl.value = filters.nodeName;
+        fNodeEl.classList.add('node-filter-active');
+      }
+      // Auto-expand filter bar so the populated input is visible
+      const filterBar = document.getElementById('pktFilters');
+      if (filterBar) {
+        filterBar.classList.add('filters-expanded');
+        const toggleBtn = document.getElementById('filterToggleBtn');
+        if (toggleBtn) toggleBtn.textContent = 'Filters ▴';
+      }
+      // Show active-filter chip
+      const chipWrap = document.getElementById('activeNodeFilterChip');
+      if (chipWrap) {
+        chipWrap.innerHTML = `<span class="active-filter-chip">Filtering: <strong>${filters.nodeName.replace(/</g,'&lt;')}</strong> <button class="active-filter-dismiss" title="Clear filter">✕</button></span>`;
+        chipWrap.querySelector('.active-filter-dismiss').addEventListener('click', () => {
+          filters.node = undefined;
+          filters.nodeName = undefined;
+          chipWrap.innerHTML = '';
+          const fn = document.getElementById('fNode');
+          if (fn) { fn.value = ''; fn.classList.remove('node-filter-active'); }
+          loadPackets();
+        });
+      }
+    }
 
     // Auto-select packet detail when arriving via hash URL
     if (directPacketHash) {
@@ -485,80 +519,85 @@
     filtersBuilt = true;
 
     el.innerHTML = `
-      <div class="page-header">
-        <h2>Latest Packets <span class="count">(${totalCount})</span></h2>
-        <div>
-          <button class="btn-icon" data-action="pkt-refresh" title="Refresh">🔄</button>
-          <button class="btn-icon" id="pktPauseBtn" data-action="pkt-pause" title="Pause live updates">⏸</button>
-          <button class="btn-icon" data-action="pkt-byop" title="Bring Your Own Packet" aria-label="Bring Your Own Packet - paste raw packet hex for analysis" aria-haspopup="dialog">📦 BYOP</button>
+      <div class="pkt-header-area">
+        <div id="activeNodeFilterChip"></div>
+        <div class="page-header">
+          <h2>Latest Packets <span class="count">(${totalCount})</span></h2>
+          <div>
+            <button class="btn-icon" data-action="pkt-refresh" title="Refresh">🔄</button>
+            <button class="btn-icon" id="pktPauseBtn" data-action="pkt-pause" title="Pause live updates">⏸</button>
+            <button class="btn-icon" data-action="pkt-byop" title="Bring Your Own Packet" aria-label="Bring Your Own Packet - paste raw packet hex for analysis" aria-haspopup="dialog">📦 BYOP</button>
+          </div>
+        </div>
+        <div class="filter-group" style="flex:1;margin-bottom:8px">
+          <input type="text" id="packetFilterInput" class="packet-filter-input"
+            placeholder='Filter: type == Advert && snr > 5 · payload.name contains "Gilroy"'
+            style="width:100%;padding:6px 10px;border:1px solid var(--border);border-radius:6px;font-family:var(--mono);font-size:13px;background:var(--input-bg);color:var(--text)">
+          <div id="packetFilterError" style="color:var(--status-red);font-size:11px;margin-top:2px;display:none"></div>
+          <div id="packetFilterCount" style="color:var(--text-muted);font-size:11px;margin-top:2px;display:none"></div>
+        </div>
+        <div class="filter-bar" id="pktFilters">
+          <button class="btn filter-toggle-btn" id="filterToggleBtn">Filters ▾</button>
+          <div class="filter-group">
+            <input type="text" placeholder="Packet hash…" id="fHash" aria-label="Filter by packet hash" title="Filter packets by hex hash prefix">
+            <div class="node-filter-wrap" style="position:relative">
+              <input type="text" placeholder="Node name…" id="fNode" autocomplete="off" role="combobox" aria-expanded="false" aria-owns="fNodeDropdown" aria-activedescendant="" aria-autocomplete="list" title="Filter packets involving this node (sender or path)">
+              <div class="node-filter-dropdown hidden" id="fNodeDropdown" role="listbox"></div>
+            </div>
+            <div class="multi-select-wrap" id="observerFilterWrap">
+              <button class="multi-select-trigger" id="observerTrigger" title="Show only packets seen by selected observer stations">All Observers ▾</button>
+              <div class="multi-select-menu" id="observerMenu"></div>
+            </div>
+            <div id="packetsRegionFilter" class="region-filter-container" style="display:inline-block;vertical-align:middle"></div>
+            <div class="multi-select-wrap" id="typeFilterWrap">
+              <button class="multi-select-trigger" id="typeTrigger" title="Filter by packet type">All Types ▾</button>
+              <div class="multi-select-menu" id="typeMenu"></div>
+            </div>
+          </div>
+          <div class="filter-group">
+            <button class="btn ${groupByHash ? 'active' : ''}" id="fGroup" title="Collapse duplicate observations of the same packet into expandable groups">Group by Hash</button>
+            <button class="btn" id="fMyNodes" title="Show only packets from your favorited/claimed nodes">★ My Nodes</button>
+          </div>
+          <div class="filter-group">
+            <select id="fTimeWindow" class="filter-select">
+              <option value="15">Last 15 min</option>
+              <option value="30">Last 30 min</option>
+              <option value="60">Last 1 hour</option>
+              <option value="180">Last 3 hours</option>
+              <option value="360">Last 6 hours</option>
+              <option value="720">Last 12 hours</option>
+              <option value="1440">Last 24 hours</option>
+              <option value="0">All time</option>
+            </select>
+          </div>
+          <div class="filter-group">
+            <select id="fObsSort" aria-label="Observation sort order" title="Controls how observations are ordered within packet groups and which observation appears in the header row. Observer: Groups by observer station, earliest first. Path: Orders by hop count. Time: Orders by observation timestamp.">
+              <option value="observer">Sort: Observer</option>
+              <option value="path-asc">Sort: Path ↑ (shortest)</option>
+              <option value="path-desc">Sort: Path ↓ (longest)</option>
+              <option value="chrono-asc">Sort: Time ↑ (earliest)</option>
+              <option value="chrono-desc">Sort: Time ↓ (latest)</option>
+            </select>
+            <span class="sort-help" id="sortHelpIcon">ⓘ</span>
+          </div>
+          <div class="filter-group">
+            <div class="col-toggle-wrap">
+              <button class="col-toggle-btn" id="colToggleBtn" title="Show/hide table columns">Columns ▾</button>
+              <div class="col-toggle-menu" id="colToggleMenu"></div>
+            </div>
+            <button class="btn btn-icon${showHexHashes ? ' active' : ''}" id="hexHashToggle" title="Show raw hex hash prefixes instead of resolved node names in the path column">Hex Paths</button>
+          </div>
         </div>
       </div>
-      <div class="filter-group" style="flex:1;margin-bottom:8px">
-        <input type="text" id="packetFilterInput" class="packet-filter-input"
-          placeholder='Filter: type == Advert && snr > 5 · payload.name contains "Gilroy"'
-          style="width:100%;padding:6px 10px;border:1px solid var(--border);border-radius:6px;font-family:var(--mono);font-size:13px;background:var(--input-bg);color:var(--text)">
-        <div id="packetFilterError" style="color:var(--status-red);font-size:11px;margin-top:2px;display:none"></div>
-        <div id="packetFilterCount" style="color:var(--text-muted);font-size:11px;margin-top:2px;display:none"></div>
+      <div class="pkt-table-wrap">
+        <table class="data-table" id="pktTable">
+          <thead><tr>
+            <th></th><th class="col-region">Region</th><th class="col-time">Time</th><th class="col-hash">Hash</th><th class="col-size">Size</th>
+            <th class="col-type">Type</th><th class="col-observer">First Observer</th><th class="col-path">Path</th><th class="col-rpt">Rpt</th><th class="col-details">Details</th>
+          </tr></thead>
+          <tbody id="pktBody"></tbody>
+        </table>
       </div>
-      <div class="filter-bar" id="pktFilters">
-        <button class="btn filter-toggle-btn" id="filterToggleBtn">Filters ▾</button>
-        <div class="filter-group">
-          <input type="text" placeholder="Packet hash…" id="fHash" aria-label="Filter by packet hash" title="Filter packets by hex hash prefix">
-          <div class="node-filter-wrap" style="position:relative">
-            <input type="text" placeholder="Node name…" id="fNode" autocomplete="off" role="combobox" aria-expanded="false" aria-owns="fNodeDropdown" aria-activedescendant="" aria-autocomplete="list" title="Filter packets involving this node (sender or path)">
-            <div class="node-filter-dropdown hidden" id="fNodeDropdown" role="listbox"></div>
-          </div>
-          <div class="multi-select-wrap" id="observerFilterWrap">
-            <button class="multi-select-trigger" id="observerTrigger" title="Show only packets seen by selected observer stations">All Observers ▾</button>
-            <div class="multi-select-menu" id="observerMenu"></div>
-          </div>
-          <div id="packetsRegionFilter" class="region-filter-container" style="display:inline-block;vertical-align:middle"></div>
-          <div class="multi-select-wrap" id="typeFilterWrap">
-            <button class="multi-select-trigger" id="typeTrigger" title="Filter by packet type">All Types ▾</button>
-            <div class="multi-select-menu" id="typeMenu"></div>
-          </div>
-        </div>
-        <div class="filter-group">
-          <button class="btn ${groupByHash ? 'active' : ''}" id="fGroup" title="Collapse duplicate observations of the same packet into expandable groups">Group by Hash</button>
-          <button class="btn" id="fMyNodes" title="Show only packets from your favorited/claimed nodes">★ My Nodes</button>
-        </div>
-        <div class="filter-group">
-          <select id="fTimeWindow" class="filter-select">
-            <option value="15">Last 15 min</option>
-            <option value="30">Last 30 min</option>
-            <option value="60">Last 1 hour</option>
-            <option value="180">Last 3 hours</option>
-            <option value="360">Last 6 hours</option>
-            <option value="720">Last 12 hours</option>
-            <option value="1440">Last 24 hours</option>
-            <option value="0">All time</option>
-          </select>
-        </div>
-        <div class="filter-group">
-          <select id="fObsSort" aria-label="Observation sort order" title="Controls how observations are ordered within packet groups and which observation appears in the header row. Observer: Groups by observer station, earliest first. Path: Orders by hop count. Time: Orders by observation timestamp.">
-            <option value="observer">Sort: Observer</option>
-            <option value="path-asc">Sort: Path ↑ (shortest)</option>
-            <option value="path-desc">Sort: Path ↓ (longest)</option>
-            <option value="chrono-asc">Sort: Time ↑ (earliest)</option>
-            <option value="chrono-desc">Sort: Time ↓ (latest)</option>
-          </select>
-          <span class="sort-help" id="sortHelpIcon">ⓘ</span>
-        </div>
-        <div class="filter-group">
-          <div class="col-toggle-wrap">
-            <button class="col-toggle-btn" id="colToggleBtn" title="Show/hide table columns">Columns ▾</button>
-            <div class="col-toggle-menu" id="colToggleMenu"></div>
-          </div>
-          <button class="btn btn-icon${showHexHashes ? ' active' : ''}" id="hexHashToggle" title="Show raw hex hash prefixes instead of resolved node names in the path column">Hex Paths</button>
-        </div>
-      </div>
-      <table class="data-table" id="pktTable">
-        <thead><tr>
-          <th></th><th class="col-region">Region</th><th class="col-time">Time</th><th class="col-hash">Hash</th><th class="col-size">Size</th>
-          <th class="col-type">Type</th><th class="col-observer">First Observer</th><th class="col-path">Path</th><th class="col-rpt">Rpt</th><th class="col-details">Details</th>
-        </tr></thead>
-        <tbody id="pktBody"></tbody>
-      </table>
     `;
 
     // Init shared RegionFilter component
@@ -825,6 +864,9 @@
       if (!q) {
         fNodeDrop.classList.add('hidden');
         fNode.setAttribute('aria-expanded', 'false');
+        fNode.classList.remove('node-filter-active');
+        const chip = document.getElementById('activeNodeFilterChip');
+        if (chip) chip.innerHTML = '';
         if (filters.node) { filters.node = undefined; filters.nodeName = undefined; loadPackets(); }
         return;
       }
@@ -1316,7 +1358,6 @@
         <dt>Path</dt><dd>${pathHops.length ? renderPath(pathHops, pkt.observer_id) : '—'}</dd>
       </dl>
       <div class="detail-actions">
-        <button class="copy-link-btn" data-packet-hash="${pkt.hash || ''}" data-packet-id="${pkt.id}" title="Copy link to this packet">🔗 Copy Link</button>
         ${pathHops.length ? `<button class="detail-map-link" id="viewRouteBtn">🗺️ View route on map</button>` : ''}
         ${pkt.hash ? `<a href="/traces/${pkt.hash}" class="detail-map-link" style="text-decoration:none">🔍 Trace</a>` : ''}
         <button class="replay-live-btn" title="Replay this packet on the live map">▶ Replay</button>
@@ -1327,22 +1368,6 @@
 
       ${hasRawHex ? buildFieldTable(pkt, decoded, pathHops, ranges) : buildDecodedTable(decoded)}
     `;
-
-    // Wire up copy link button
-    const copyLinkBtn = panel.querySelector('.copy-link-btn');
-    if (copyLinkBtn) {
-      copyLinkBtn.addEventListener('click', () => {
-        const pktHash = copyLinkBtn.dataset.packetHash;
-        const obsParam = selectedObservationId ? `?obs=${selectedObservationId}` : '';
-        const url = pktHash ? `${location.origin}/#/packets/${pktHash}${obsParam}` : `${location.origin}/#/packets/${copyLinkBtn.dataset.packetId}${obsParam}`;
-        navigator.clipboard.writeText(url).then(() => {
-          copyLinkBtn.textContent = '✅ Copied!';
-          setTimeout(() => { copyLinkBtn.textContent = '🔗 Copy Link'; }, 1500);
-        }).catch(() => {
-          prompt('Copy this link:', url);
-        });
-      });
-    }
 
     // Wire up replay button
     const replayBtn = panel.querySelector('.replay-live-btn');
