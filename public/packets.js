@@ -1988,10 +1988,6 @@
               <span class="badge badge-${payloadTypeColor(pkt.payload_type)}">${typeName}</span>
               <span class="pkt-full-hash">${pkt.hash || 'Packet #' + pkt.id}</span>
             </div>
-            <div class="pkt-full-header-actions">
-              ${pkt.hash ? `<a href="/traces/${pkt.hash}" class="detail-map-link" style="text-decoration:none">🔍 Trace</a>` : ''}
-              <button class="replay-live-btn" id="pktFullReplayBtn">▶ Replay</button>
-            </div>
           </div>
           <div class="pkt-full-body" id="pktFullBody">
             ${messageHtml}
@@ -2009,7 +2005,11 @@
                   <dt>Location</dt><dd id="pktFullLocation">${locationHtml}</dd>
                   <dt>Path</dt><dd>${pathHops.length ? renderPath(pathHops, pkt.observer_id) : '—'}</dd>
                 </dl>
-                ${pathHops.length ? `<div class="pkt-meta-actions"><button class="detail-map-link" id="pktFullRouteBtn">🗺️ View route on map</button></div>` : ''}
+                <div class="detail-actions pkt-meta-actions">
+                  ${pathHops.length ? `<button class="detail-map-link" id="pktFullRouteBtn">🗺️ View route on map</button>` : ''}
+                  ${pkt.hash ? `<a href="/traces/${pkt.hash}" class="detail-map-link" style="text-decoration:none">🔍 Trace</a>` : ''}
+                  <button class="replay-live-btn" id="pktFullReplayBtn">▶ Replay</button>
+                </div>
               </div>
               ${hasMap ? `<div class="analytics-card pkt-map-card"><h3>Route Map</h3><div id="pktDetailMap" class="pkt-detail-map"></div></div>` : ''}
             </div>
