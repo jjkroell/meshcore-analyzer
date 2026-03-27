@@ -1798,7 +1798,7 @@
         await loadObservers();
         const data = await api(`/packets/${param}`);
         if (!data?.packet) {
-          app.innerHTML = `<div class="pkt-full-page"><div class="pkt-full-header"><button class="detail-back-btn pill-btn" onclick="history.back()">← Back</button></div><div class="pkt-full-body" style="align-items:center;justify-content:center;flex-direction:column;gap:12px"><h2>Packet not found</h2><p style="color:var(--text-muted)">Packet ${escapeHtml(param)} doesn't exist.</p></div></div>`;
+          app.innerHTML = `<div class="pkt-full-page"><div class="pkt-full-header"><button class="detail-back-btn pill-btn" onclick="goto('/packets')">← Back</button></div><div class="pkt-full-body" style="align-items:center;justify-content:center;flex-direction:column;gap:12px"><h2>Packet not found</h2><p style="color:var(--text-muted)">Packet ${escapeHtml(param)} doesn't exist.</p></div></div>`;
           return;
         }
 
@@ -1915,7 +1915,7 @@
         app.appendChild(page);
 
         // Back button
-        page.querySelector('#pktBackBtn').addEventListener('click', () => history.back());
+        page.querySelector('#pktBackBtn').addEventListener('click', () => goto('/packets'));
 
         // Replay button
         page.querySelector('#pktFullReplayBtn')?.addEventListener('click', () => {
@@ -2043,7 +2043,7 @@
         }
 
       } catch (e) {
-        app.innerHTML = `<div class="pkt-full-page"><div class="pkt-full-header"><button class="detail-back-btn pill-btn" onclick="history.back()">← Back</button></div><div class="pkt-full-body" style="align-items:center;justify-content:center;flex-direction:column;gap:12px"><h2>Error</h2><p style="color:var(--text-muted)">${escapeHtml(e.message)}</p></div></div>`;
+        app.innerHTML = `<div class="pkt-full-page"><div class="pkt-full-header"><button class="detail-back-btn pill-btn" onclick="goto('/packets')">← Back</button></div><div class="pkt-full-body" style="align-items:center;justify-content:center;flex-direction:column;gap:12px"><h2>Error</h2><p style="color:var(--text-muted)">${escapeHtml(e.message)}</p></div></div>`;
       }
     },
     destroy: () => {}
