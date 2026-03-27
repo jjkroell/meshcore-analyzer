@@ -166,12 +166,14 @@
     for (let i = 0; i < str.length; i++) h = ((h << 5) - h + str.charCodeAt(i)) | 0;
     return Math.abs(h);
   }
-  // Unique color from hash via golden-angle HSL — no palette, no collisions.
+  // Unique color from hash via HSL — no palette, no collisions.
   // Channel badges: lightness 38% for white text contrast (WCAG AA).
   // Sender names: lightness varies by theme — darker for light bg, lighter for dark bg.
+  // Using direct hash % 360 for hue: hash values are already well-distributed so
+  // simple mod spreads channels evenly. Golden-angle only helps for sequential integers.
   function _hslFromHash(str, saturation, lightness) {
-    const hue = (hashCode(String(str)) * 137.508) % 360;
-    return `hsl(${hue.toFixed(1)}, ${saturation}%, ${lightness}%)`;
+    const hue = hashCode(String(str)) % 360;
+    return `hsl(${hue}, ${saturation}%, ${lightness}%)`;
   }
   function getChannelColor(hash) { return _hslFromHash(hash, 60, 38); }
   function getSenderColor(name) {
