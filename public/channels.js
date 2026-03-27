@@ -179,7 +179,9 @@
   function getSenderColor(name) {
     const isDark = document.documentElement.getAttribute('data-theme') === 'dark' ||
       (!document.documentElement.getAttribute('data-theme') && window.matchMedia('(prefers-color-scheme: dark)').matches);
-    return _hslFromHash(name, 65, isDark ? 68 : 38);
+    const hue = hashCode(String(name)) % 360;
+    const sat = 40, l = isDark ? 52 : 42;
+    return { bg: `hsl(${hue},${sat}%,${l}%)`, border: `hsl(${hue},${sat}%,${l - 18}%)` };
   }
 
   function escapeHtml(str) {
@@ -656,7 +658,7 @@
     // Newest messages at top
     msgEl.innerHTML = [...messages].reverse().map(msg => {
       const sender = msg.sender || 'Unknown';
-      const senderColor = getSenderColor(sender);
+      const { bg: senderBg, border: senderBorder } = getSenderColor(sender);
       const senderLetter = sender.replace(/[^\w]/g, '').charAt(0).toUpperCase() || '?';
 
       let displayText;
@@ -674,9 +676,9 @@
 
       const safeId = btoa(encodeURIComponent(sender));
       return `<div class="ch-msg">
-        <div class="ch-avatar ch-tappable" style="background:${senderColor}" tabindex="0" role="button" data-node="${safeId}">${senderLetter}</div>
+        <div class="ch-avatar ch-tappable" style="background:${senderBg};box-shadow:0 0 0 2px ${senderBorder}" tabindex="0" role="button" data-node="${safeId}">${senderLetter}</div>
         <div class="ch-msg-content">
-          <div class="ch-msg-sender ch-sender-link ch-tappable" style="color:${senderColor}" tabindex="0" role="button" data-node="${safeId}">${escapeHtml(sender)}</div>
+          <div class="ch-msg-sender ch-sender-link ch-tappable" style="color:${senderBg}" tabindex="0" role="button" data-node="${safeId}">${escapeHtml(sender)}</div>
           <div class="ch-msg-bubble">${displayText}</div>
           <div class="ch-msg-meta">${meta.join(' · ')}${msg.packetHash ? ` · <a href="/packets/${msg.packetHash}" class="ch-analyze-link">View packet →</a>` : ''}</div>
         </div>
