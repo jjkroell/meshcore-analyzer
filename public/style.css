@@ -1501,6 +1501,40 @@ button.ch-item.ch-item-encrypted .ch-badge { filter: grayscale(0.6); }
 }
 .copy-link-btn:hover { background: rgba(59, 130, 246, 0.25); }
 
+/* === Full-page packet detail (/packet/:hash) === */
+.packet-detail-page {
+  max-width: 800px;
+  margin: 0 auto;
+  padding: 20px;
+  box-sizing: border-box;
+  width: 100%;
+}
+.pkt-detail-map-section { margin-top: 24px; }
+.pkt-detail-map-label {
+  font-weight: 600; margin-bottom: 8px;
+  color: var(--text); font-size: 14px;
+}
+.pkt-detail-map {
+  height: clamp(240px, 45vh, 420px);
+  border-radius: 8px; overflow: hidden;
+  border: 1px solid var(--border);
+}
+/* Wrap action buttons on narrow screens */
+.detail-actions { flex-wrap: wrap; }
+/* Scroll field breakdown table horizontally on small screens */
+.field-table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+
+@media (max-width: 640px) {
+  .packet-detail-page { padding: 12px; }
+  .pkt-detail-map { height: clamp(200px, 40vh, 300px); }
+  .detail-actions { gap: 6px; }
+  .detail-map-link, .replay-live-btn { font-size: 0.72rem; padding: 5px 10px; }
+}
+@media (max-width: 480px) {
+  .packet-detail-page { padding: 8px; }
+  .pkt-detail-map { height: 220px; }
+}
+
 /* Route tooltip on map */
 .route-tooltip {
   background: rgba(0,0,0,0.8) !important;

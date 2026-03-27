@@ -1367,7 +1367,7 @@
       ${hasRawHex ? `<div class="hex-legend">${buildHexLegend(ranges)}</div>
       <div class="hex-dump">${createColoredHexDump(pkt.raw_hex, ranges)}</div>` : ''}
 
-      ${hasRawHex ? buildFieldTable(pkt, decoded, pathHops, ranges) : buildDecodedTable(decoded)}
+      <div class="field-table-wrap">${hasRawHex ? buildFieldTable(pkt, decoded, pathHops, ranges) : buildDecodedTable(decoded)}</div>
     `;
 
     // Wire up replay button
@@ -1792,17 +1792,17 @@
   registerPage('packet-detail', {
     init: async (app, routeParam) => {
       const param = routeParam;
-      app.innerHTML = `<div style="max-width:800px;margin:0 auto;padding:20px"><div class="text-center text-muted" style="padding:40px">Loading packet…</div></div>`;
+      app.innerHTML = `<div class="packet-detail-page"><div class="text-center text-muted" style="padding:40px">Loading packet…</div></div>`;
       try {
         await loadObservers();
         const data = await api(`/packets/${param}`);
-        if (!data?.packet) { app.innerHTML = `<div style="max-width:800px;margin:0 auto;padding:40px;text-align:center"><h2>Packet not found</h2><p>Packet ${param} doesn't exist.</p><a href="/packets">← Back to packets</a></div>`; return; }
+        if (!data?.packet) { app.innerHTML = `<div class="packet-detail-page" style="text-align:center;padding-top:40px"><h2>Packet not found</h2><p>Packet ${param} doesn't exist.</p><a href="/packets">← Back to packets</a></div>`; return; }
         const hops = [];
         try { const ph = JSON.parse(data.packet.path_json || '[]'); hops.push(...ph); } catch {}
         const newHops = hops.filter(h => !(h in hopNameCache));
         if (newHops.length) await resolveHops(newHops);
         const container = document.createElement('div');
-        container.style.cssText = 'max-width:800px;margin:0 auto;padding:20px';
+        container.className = 'packet-detail-page';
         container.innerHTML = `<div style="margin-bottom:16px"><a href="/packets" style="color:var(--accent);text-decoration:none">← Back to packets</a></div>`;
         const detail = document.createElement('div');
         container.appendChild(detail);
@@ -1811,8 +1811,8 @@
         // Auto-render route map if packet has path hops
         if (hops.length > 0) {
           const mapSection = document.createElement('div');
-          mapSection.style.cssText = 'margin-top:24px';
-          mapSection.innerHTML = `<div style="font-weight:600;margin-bottom:8px;color:var(--text);font-size:14px">Route Map</div><div id="pktDetailMap" style="height:400px;border-radius:8px;overflow:hidden;border:1px solid var(--border)"></div>`;
+          mapSection.className = 'pkt-detail-map-section';
+          mapSection.innerHTML = `<div class="pkt-detail-map-label">Route Map</div><div id="pktDetailMap" class="pkt-detail-map"></div>`;
           container.appendChild(mapSection);
 
           app.innerHTML = '';
@@ -1912,7 +1912,7 @@
           app.appendChild(container);
         }
       } catch (e) {
-        app.innerHTML = `<div style="max-width:800px;margin:0 auto;padding:40px;text-align:center"><h2>Error</h2><p>${e.message}</p><a href="/packets">← Back to packets</a></div>`;
+        app.innerHTML = `<div class="packet-detail-page" style="text-align:center;padding-top:40px"><h2>Error</h2><p>${e.message}</p><a href="/packets">← Back to packets</a></div>`;
       }
     },
     destroy: () => {}
