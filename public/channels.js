@@ -475,7 +475,10 @@
         // Only update channels that already exist in the approved list from the API.
         // Never add new channels from WS events — channels are only added via /api/channels/add.
         if (ch) {
-          if (isFirstObservation) ch.messageCount = (ch.messageCount || 0) + 1;
+          if (isFirstObservation) {
+            ch.messageCount = (ch.messageCount || 0) + 1;
+            if (channelName !== selectedHash) ch.unread = (ch.unread || 0) + 1;
+          }
           ch.lastActivityMs = Date.now();
           ch.lastSender = sender;
           ch.lastMessage = truncate(displayText, 100);
@@ -598,7 +601,7 @@
         <div class="ch-badge" style="background:${color};box-shadow:0 0 0 3px ${color}22" aria-hidden="true"><svg viewBox="0 0 100 100" style="width:22px;height:22px;"><circle cx="50" cy="50" r="44" fill="none" stroke="white" stroke-width="1" opacity="0.15"/><circle cx="50" cy="50" r="30" fill="none" stroke="white" stroke-width="1.2" opacity="0.25"/><g stroke="white" stroke-width="1.8" opacity="0.55" stroke-linecap="round"><line x1="50" y1="50" x2="80" y2="50"/><line x1="50" y1="50" x2="65" y2="76"/><line x1="50" y1="50" x2="35" y2="76"/><line x1="50" y1="50" x2="20" y2="50"/><line x1="50" y1="50" x2="35" y2="24"/><line x1="50" y1="50" x2="65" y2="24"/></g><g stroke="white" stroke-width="1.2" opacity="0.3" stroke-linecap="round"><line x1="80" y1="50" x2="65" y2="76"/><line x1="65" y1="76" x2="35" y2="76"/><line x1="35" y1="76" x2="20" y2="50"/><line x1="20" y1="50" x2="35" y2="24"/><line x1="35" y1="24" x2="65" y2="24"/><line x1="65" y1="24" x2="80" y2="50"/></g><g fill="white" opacity="0.8"><circle cx="80" cy="50" r="4.5"/><circle cx="65" cy="76" r="4.5"/><circle cx="35" cy="76" r="4.5"/><circle cx="20" cy="50" r="4.5"/><circle cx="35" cy="24" r="4.5"/><circle cx="65" cy="24" r="4.5"/></g><circle cx="50" cy="50" r="14" fill="white" opacity="0.92"/><circle cx="50" cy="50" r="6" fill="white" opacity="0.3"/></svg></div>
         <div class="ch-item-body">
           <div class="ch-item-top">
-            <span class="ch-item-name">${escapeHtml(name)}</span>
+            <span class="ch-item-name">${escapeHtml(name)}${ch.unread && selectedHash !== ch.hash ? '<span class="ch-unread-dot" aria-label="New messages"></span>' : ''}</span>
             <span class="ch-item-time" data-channel-hash="${ch.hash}">${time}</span>
           </div>
           <div class="ch-item-preview">${escapeHtml(preview)}</div>
@@ -611,6 +614,8 @@
     selectedHash = hash;
     const slug = hash.startsWith('#') ? hash.slice(1) : hash;
     history.replaceState(null, '', `/channels/${encodeURIComponent(slug)}`);
+    const selCh = channels.find(c => c.hash === hash);
+    if (selCh) selCh.unread = 0;
     renderChannelList();
     const ch = channels.find(c => c.hash === hash);
     const name = ch?.name || `Channel ${hash}`;
