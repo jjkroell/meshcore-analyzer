@@ -565,7 +565,7 @@
         <table class="data-table" id="pktTable">
           <thead><tr>
             <th></th><th class="col-region">Region</th><th class="col-time">Time</th><th class="col-hash">Hash</th><th class="col-size">Size</th>
-            <th class="col-type">Type</th><th class="col-observer">First Observer</th><th class="col-path">Path</th><th class="col-rpt">Rpt</th><th class="col-details">Details</th>
+            <th class="col-type">Type</th><th class="col-observer">First Observer</th><th class="col-path">Path</th><th class="col-rpt">Repeats</th><th class="col-details">Details</th>
           </tr></thead>
           <tbody id="pktBody"></tbody>
         </table>
@@ -781,7 +781,7 @@
       { key: 'type', label: 'Type' },
       { key: 'observer', label: 'Observer' },
       { key: 'path', label: 'Path' },
-      { key: 'rpt', label: 'Rpt' },
+      { key: 'rpt', label: 'Repeats' },
       { key: 'details', label: 'Details' },
     ];
     const isMobile = window.innerWidth <= 640;
