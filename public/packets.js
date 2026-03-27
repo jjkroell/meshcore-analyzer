@@ -1962,7 +1962,6 @@
                 </dl>
                 <div class="detail-actions pkt-meta-actions">
                   ${pathHops.length ? `<button class="detail-map-link" id="pktFullRouteBtn">🗺️ View route on map</button>` : ''}
-                  ${pkt.hash ? `<a href="/traces/${pkt.hash}" class="detail-map-link" style="text-decoration:none">🔍 Trace</a>` : ''}
                   <button class="replay-live-btn" id="pktFullReplayBtn">▶ Replay</button>
                 </div>
               </div>
