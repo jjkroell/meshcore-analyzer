@@ -749,6 +749,8 @@ button.ch-item.selected .ch-badge {
   padding: 16px; margin-bottom: 16px;
 }
 .trace-section h3 { font-size: 14px; font-weight: 700; margin-bottom: 12px; }
+.trace-graph-wrap { width: 100%; overflow: hidden; border-radius: 4px; }
+.trace-path-svg { display: block; width: 100%; height: auto; user-select: none; }
 
 /* Path Visualization */
 .trace-path-viz {

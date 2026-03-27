@@ -1808,7 +1808,7 @@
     const legend = uniquePaths.length > 1
       ? `${uniquePaths.length} unique paths observed by ${allPaths.length} observer${allPaths.length !== 1 ? 's' : ''}`
       : `${allPaths[0].hops.length} hop${allPaths[0].hops.length !== 1 ? 's' : ''} in relay path`;
-    return `<div class="trace-section"><h3>Path Graph</h3><div style="overflow-x:auto"><svg width="${svgW}" height="${svgH}" style="display:block;margin:0 auto">${edgesSvg}${nodesSvg}</svg></div><div class="trace-path-info">${legend}</div></div>`;
+    return `<div class="trace-section"><h3>Path Graph</h3><div class="trace-graph-wrap"><svg class="trace-path-svg" viewBox="0 0 ${svgW} ${svgH}" data-vw="${svgW}" data-vh="${svgH}" preserveAspectRatio="xMidYMid meet" style="display:block;width:100%;height:auto;cursor:zoom-in">${edgesSvg}${nodesSvg}</svg></div><div class="trace-path-info">${legend}</div></div>`;
   }
 
   function _traceTimeline(traceData, t0, spreadMs) {
@@ -1852,6 +1852,33 @@
         </div>
         ${allPaths.length > 0 ? _tracePathGraph(allPaths) : ''}
         ${traceData.length > 0 ? _traceTimeline(traceData, t0, spreadMs) : ''}`;
+
+      // Wire up hover/touch zoom on the path graph SVG
+      const svg = card.querySelector('.trace-path-svg');
+      if (svg) {
+        const vw = +svg.dataset.vw, vh = +svg.dataset.vh;
+        const ZOOM = 2.5;
+        const zw = vw / ZOOM, zh = vh / ZOOM;
+        const toSvgCoords = (clientX, clientY) => {
+          const r = svg.getBoundingClientRect();
+          return [((clientX - r.left) / r.width) * vw, ((clientY - r.top) / r.height) * vh];
+        };
+        const applyZoom = (clientX, clientY) => {
+          const [sx, sy] = toSvgCoords(clientX, clientY);
+          const vx = Math.max(0, Math.min(vw - zw, sx - zw / 2));
+          const vy = Math.max(0, Math.min(vh - zh, sy - zh / 2));
+          svg.setAttribute('viewBox', `${vx} ${vy} ${zw} ${zh}`);
+          svg.style.cursor = 'move';
+        };
+        const resetZoom = () => {
+          svg.setAttribute('viewBox', `0 0 ${vw} ${vh}`);
+          svg.style.cursor = 'zoom-in';
+        };
+        svg.addEventListener('mousemove', e => applyZoom(e.clientX, e.clientY));
+        svg.addEventListener('mouseleave', resetZoom);
+        svg.addEventListener('touchmove', e => { e.preventDefault(); applyZoom(e.touches[0].clientX, e.touches[0].clientY); }, { passive: false });
+        svg.addEventListener('touchend', resetZoom);
+      }
     } catch (e) {
       card.querySelector('.trace-loading').textContent = 'Could not load trace data.';
     }
