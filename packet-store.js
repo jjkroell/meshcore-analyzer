@@ -66,17 +66,28 @@ class PacketStore {
 
   /** Load from normalized transmissions + observations tables */
   _loadNormalized() {
-    const rows = this.db.prepare(`
-      SELECT t.id AS transmission_id, t.raw_hex, t.hash, t.first_seen, t.route_type,
-             t.payload_type, t.payload_version, t.decoded_json,
-             o.id AS observation_id, o.observer_id, o.observer_name, o.direction,
-             o.snr, o.rssi, o.score, o.path_json, o.timestamp AS obs_timestamp
-      FROM transmissions t
-      LEFT JOIN observations o ON o.transmission_id = t.id
-      ORDER BY t.first_seen DESC, o.timestamp DESC
-    `).all();
+    // Detect v3 schema (observer_idx instead of observer_id in observations)
+    const obsCols = this.db.pragma('table_info(observations)').map(c => c.name);
+    const isV3 = obsCols.includes('observer_idx');
 
-    for (const row of rows) {
+    const sql = isV3
+      ? `SELECT t.id AS transmission_id, t.raw_hex, t.hash, t.first_seen, t.route_type,
+               t.payload_type, t.payload_version, t.decoded_json,
+               o.id AS observation_id, obs.id AS observer_id, obs.name AS observer_name, o.direction,
+               o.snr, o.rssi, o.score, o.path_json, datetime(o.timestamp, 'unixepoch') AS obs_timestamp
+          FROM transmissions t
+          LEFT JOIN observations o ON o.transmission_id = t.id
+          LEFT JOIN observers obs ON obs.rowid = o.observer_idx
+          ORDER BY t.first_seen DESC, o.timestamp DESC`
+      : `SELECT t.id AS transmission_id, t.raw_hex, t.hash, t.first_seen, t.route_type,
+               t.payload_type, t.payload_version, t.decoded_json,
+               o.id AS observation_id, o.observer_id, o.observer_name, o.direction,
+               o.snr, o.rssi, o.score, o.path_json, o.timestamp AS obs_timestamp
+          FROM transmissions t
+          LEFT JOIN observations o ON o.transmission_id = t.id
+          ORDER BY t.first_seen DESC, o.timestamp DESC`;
+
+    for (const row of this.db.prepare(sql).iterate()) {
       if (this.packets.length >= this.maxPackets && !this.byHash.has(row.hash)) break;
 
       let tx = this.byHash.get(row.hash);
@@ -110,6 +121,8 @@ class PacketStore {
       if (row.observation_id != null) {
         const obs = {
           id: row.observation_id,
+          transmission_id: tx.id,
+          hash: tx.hash,
           observer_id: row.observer_id,
           observer_name: row.observer_name,
           direction: row.direction,
@@ -118,12 +131,6 @@ class PacketStore {
           score: row.score,
           path_json: row.path_json,
           timestamp: row.obs_timestamp,
-          // Carry transmission fields for backward compat
-          hash: row.hash,
-          raw_hex: row.raw_hex,
-          payload_type: row.payload_type,
-          decoded_json: row.decoded_json,
-          route_type: row.route_type,
         };
 
         // Dedup: skip if same observer + same path already loaded
@@ -156,19 +163,24 @@ class PacketStore {
       }
     }
 
-    // Post-load: set each transmission's observer/path to the EARLIEST observation
+    // Post-load: set each transmission's display path to the LONGEST observation path
+    // (most representative of mesh topology — short paths are just nearby observers)
     for (const tx of this.packets) {
       if (tx.observations.length > 0) {
-        let earliest = tx.observations[0];
+        let best = tx.observations[0];
+        let bestLen = 0;
+        try { bestLen = JSON.parse(best.path_json || '[]').length; } catch {}
         for (let i = 1; i < tx.observations.length; i++) {
-          if (tx.observations[i].timestamp < earliest.timestamp) earliest = tx.observations[i];
+          let len = 0;
+          try { len = JSON.parse(tx.observations[i].path_json || '[]').length; } catch {}
+          if (len > bestLen) { best = tx.observations[i]; bestLen = len; }
         }
-        tx.observer_id = earliest.observer_id;
-        tx.observer_name = earliest.observer_name;
-        tx.snr = earliest.snr;
-        tx.rssi = earliest.rssi;
-        tx.path_json = earliest.path_json;
-        tx.direction = earliest.direction;
+        tx.observer_id = best.observer_id;
+        tx.observer_name = best.observer_name;
+        tx.snr = best.snr;
+        tx.rssi = best.rssi;
+        tx.path_json = best.path_json;
+        tx.direction = best.direction;
       }
     }
 
@@ -186,11 +198,9 @@ class PacketStore {
 
   /** Fallback: load from legacy packets table */
   _loadLegacy() {
-    const rows = this.db.prepare(
+    for (const row of this.db.prepare(
       'SELECT * FROM packets_v ORDER BY timestamp DESC'
-    ).all();
-
-    for (const row of rows) {
+    ).iterate()) {
       if (this.packets.length >= this.maxPackets) break;
       this._indexLegacy(row);
     }
@@ -232,9 +242,19 @@ class PacketStore {
       tx.observer_name = pkt.observer_name;
       tx.path_json = pkt.path_json;
     }
+    // Update display path if new observation has longer path
+    let newPathLen = 0, curPathLen = 0;
+    try { newPathLen = JSON.parse(pkt.path_json || '[]').length; } catch {}
+    try { curPathLen = JSON.parse(tx.path_json || '[]').length; } catch {}
+    if (newPathLen > curPathLen) {
+      tx.observer_id = pkt.observer_id;
+      tx.observer_name = pkt.observer_name;
+      tx.path_json = pkt.path_json;
+    }
 
     const obs = {
       id: pkt.id,
+      transmission_id: tx.id,
       observer_id: pkt.observer_id,
       observer_name: pkt.observer_name,
       direction: pkt.direction,
@@ -243,11 +263,6 @@ class PacketStore {
       score: pkt.score,
       path_json: pkt.path_json,
       timestamp: pkt.timestamp,
-      hash: pkt.hash,
-      raw_hex: pkt.raw_hex,
-      payload_type: pkt.payload_type,
-      decoded_json: pkt.decoded_json,
-      route_type: pkt.route_type,
     };
     // Dedup: skip if same observer + same path already recorded for this transmission
     const isDupe = tx.observations.some(o => o.observer_id === obs.observer_id && (o.path_json || '') === (obs.path_json || ''));
@@ -303,35 +318,6 @@ class PacketStore {
       }
     }
     return result;
-  }
-
-  /** Remove transmissions of a given payload_type older than maxAgeMs from memory + SQLite */
-  pruneOlderThan(maxAgeMs, payloadType) {
-    const cutoff = new Date(Date.now() - maxAgeMs).toISOString();
-    const toRemove = this.packets.filter(p => p.payload_type === payloadType && p.timestamp < cutoff);
-    if (!toRemove.length) return 0;
-    // Remove from memory indexes
-    for (const old of toRemove) {
-      this.byHash.delete(old.hash);
-      this.byTxId.delete(old.id);
-      for (const obs of (old.observations || [])) {
-        this.byId.delete(obs.id);
-        if (obs.observer_id && this.byObserver.has(obs.observer_id)) {
-          const arr = this.byObserver.get(obs.observer_id).filter(o => o.id !== obs.id);
-          if (arr.length) this.byObserver.set(obs.observer_id, arr); else this.byObserver.delete(obs.observer_id);
-        }
-      }
-    }
-    const removeHashes = new Set(toRemove.map(p => p.hash));
-    this.packets = this.packets.filter(p => !removeHashes.has(p.hash));
-    // Remove from SQLite — observations first (no cascade), then transmissions
-    const removeTxIds = toRemove.map(p => p.id).filter(Boolean);
-    if (removeTxIds.length) {
-      const placeholders = removeTxIds.map(() => '?').join(',');
-      this.db.prepare(`DELETE FROM observations WHERE transmission_id IN (${placeholders})`).run(...removeTxIds);
-      this.db.prepare(`DELETE FROM transmissions WHERE id IN (${placeholders})`).run(...removeTxIds);
-    }
-    return toRemove.length;
   }
 
   /** Remove oldest transmissions when over memory limit */
@@ -414,11 +400,22 @@ class PacketStore {
           tx.observer_name = row.observer_name;
           tx.path_json = row.path_json;
         }
+        // Update display path if new observation has longer path
+        let newPathLen = 0, curPathLen = 0;
+        try { newPathLen = JSON.parse(row.path_json || '[]').length; } catch {}
+        try { curPathLen = JSON.parse(tx.path_json || '[]').length; } catch {}
+        if (newPathLen > curPathLen) {
+          tx.observer_id = row.observer_id;
+          tx.observer_name = row.observer_name;
+          tx.path_json = row.path_json;
+        }
       }
 
       // Add observation
       const obs = {
         id: row.id,
+        transmission_id: tx.id,
+        hash: tx.hash,
         observer_id: row.observer_id,
         observer_name: row.observer_name,
         direction: row.direction,
@@ -427,11 +424,6 @@ class PacketStore {
         score: row.score,
         path_json: row.path_json,
         timestamp: row.timestamp,
-        hash: row.hash,
-        raw_hex: row.raw_hex,
-        payload_type: row.payload_type,
-        decoded_json: row.decoded_json,
-        route_type: row.route_type,
       };
       // Dedup: skip if same observer + same path already recorded for this transmission
       const isDupe = tx.observations.some(o => o.observer_id === obs.observer_id && (o.path_json || '') === (obs.path_json || ''));
@@ -590,9 +582,10 @@ class PacketStore {
     const seen = new Set();
     const result = [];
     for (const o of obs) {
-      if (!seen.has(o.hash)) {
-        seen.add(o.hash);
-        const tx = this.byHash.get(o.hash);
+      const txId = o.transmission_id;
+      if (!seen.has(txId)) {
+        seen.add(txId);
+        const tx = this.byTxId.get(txId);
         if (tx) result.push(tx);
       }
     }
@@ -613,6 +606,7 @@ class PacketStore {
     // Already grouped by hash — just format for backward compat
     const sorted = filtered.map(tx => ({
       hash: tx.hash,
+      first_seen: tx.first_seen || tx.timestamp,
       count: tx.observation_count,
       observer_count: new Set(tx.observations.map(o => o.observer_id).filter(Boolean)).size,
       latest: tx.observations.length ? tx.observations.reduce((max, o) => o.timestamp > max ? o.timestamp : max, tx.observations[0].timestamp) : tx.timestamp,
@@ -649,7 +643,8 @@ class PacketStore {
   /** Get a single packet by ID — checks observation IDs first (backward compat) */
   getById(id) {
     if (this.sqliteOnly) return this.db.prepare('SELECT * FROM packets_v WHERE id = ?').get(id) || null;
-    return this.byId.get(id) || null;
+    const obs = this.byId.get(id) || null;
+    return this._enrichObs(obs);
   }
 
   /** Get a transmission by its transmission table ID */
@@ -658,12 +653,12 @@ class PacketStore {
     return this.byTxId.get(id) || null;
   }
 
-  /** Get all siblings of a packet (same hash) — returns observations array */
+  /** Get all siblings of a packet (same hash) — returns enriched observations array */
   getSiblings(hash) {
     const h = hash.toLowerCase();
     if (this.sqliteOnly) return this.db.prepare('SELECT * FROM packets_v WHERE hash = ? ORDER BY timestamp DESC').all(h);
     const tx = this.byHash.get(h);
-    return tx ? tx.observations : [];
+    return tx ? tx.observations.map(o => this._enrichObs(o)) : [];
   }
 
   /** Get all transmissions (backward compat — returns packets array) */
@@ -676,6 +671,27 @@ class PacketStore {
   filter(fn) {
     if (this.sqliteOnly) return this.db.prepare('SELECT * FROM packets_v ORDER BY timestamp DESC').all().filter(fn);
     return this.packets.filter(fn);
+  }
+
+  /** Enrich a lean observation with transmission fields (for API responses) */
+  _enrichObs(obs) {
+    if (!obs) return null;
+    const tx = this.byTxId.get(obs.transmission_id);
+    if (!tx) return obs;
+    return {
+      ...obs,
+      hash: tx.hash,
+      raw_hex: tx.raw_hex,
+      payload_type: tx.payload_type,
+      decoded_json: tx.decoded_json,
+      route_type: tx.route_type,
+    };
+  }
+
+  /** Enrich an array of observations with transmission fields */
+  enrichObservations(observations) {
+    if (!observations || !observations.length) return observations;
+    return observations.map(o => this._enrichObs(o));
   }
 
   /** Memory stats */

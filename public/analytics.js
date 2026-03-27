@@ -3,7 +3,7 @@
 
 (function () {
   let _analyticsData = {};
-  const sf = (v, d) => (v != null && !isNaN(+v) ? (+v).toFixed(d) : '–'); // safe toFixed
+  const sf = (v, d) => (v != null ? v.toFixed(d) : '–'); // safe toFixed
   function esc(s) { return s ? String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;') : ''; }
 
   // --- Status color helpers (read from CSS variables for theme support) ---
@@ -110,7 +110,7 @@
     });
 
     // Deep-link: #/analytics?tab=collisions
-    const hashParams = location.search.slice(1);
+    const hashParams = location.hash.split('?')[1] || '';
     const urlTab = new URLSearchParams(hashParams).get('tab');
     if (urlTab) {
       const tabBtn = analyticsTabs.querySelector(`[data-tab="${urlTab}"]`);
@@ -166,26 +166,16 @@
     const el = document.getElementById('analyticsContent');
     if (!el) return;
     const d = _analyticsData;
-    // If data hasn't loaded yet, show a loading state and bail
-    if (!d || !d.rfData) {
-      el.innerHTML = '<div style="padding:40px;text-align:center;color:var(--text-muted)">Loading…</div>';
-      return;
-    }
-    try {
-      switch (tab) {
-        case 'overview': renderOverview(el, d); break;
-        case 'rf': renderRF(el, d.rfData); break;
-        case 'topology': renderTopology(el, d.topoData); break;
-        case 'channels': renderChannels(el, d.chanData); break;
-        case 'hashsizes': renderHashSizes(el, d.hashData); break;
-        case 'collisions': await renderCollisionTab(el, d.hashData); break;
-        case 'subpaths': await renderSubpaths(el); break;
-        case 'nodes': await renderNodesTab(el); break;
-        case 'distance': await renderDistanceTab(el); break;
-      }
-    } catch (e) {
-      console.error('[analytics] renderTab error for tab "' + tab + '":', e);
-      el.innerHTML = `<div style="padding:40px;text-align:center;color:var(--text-muted)">Failed to render tab: ${e.message}</div>`;
+    switch (tab) {
+      case 'overview': renderOverview(el, d); break;
+      case 'rf': renderRF(el, d.rfData); break;
+      case 'topology': renderTopology(el, d.topoData); break;
+      case 'channels': renderChannels(el, d.chanData); break;
+      case 'hashsizes': renderHashSizes(el, d.hashData); break;
+      case 'collisions': await renderCollisionTab(el, d.hashData); break;
+      case 'subpaths': await renderSubpaths(el); break;
+      case 'nodes': await renderNodesTab(el); break;
+      case 'distance': await renderDistanceTab(el); break;
     }
     // Auto-apply column resizing to all analytics tables
     requestAnimationFrame(() => {
@@ -195,7 +185,7 @@
       });
     });
     // Deep-link scroll to section within tab
-    const sectionId = new URLSearchParams((location.search.slice(1))).get('section');
+    const sectionId = new URLSearchParams((location.hash.split('?')[1] || '')).get('section');
     if (sectionId) {
       setTimeout(() => {
         const target = document.getElementById(sectionId);
@@ -316,10 +306,6 @@
 
   // ===================== RF / SIGNAL =====================
   function renderRF(el, rf) {
-    if (!rf || !rf.snr) {
-      el.innerHTML = '<div style="padding:40px;text-align:center;color:var(--text-muted)">No RF/signal data available.</div>';
-      return;
-    }
     const snrHist = histogram(rf.snrValues, 20, statusGreen());
     const rssiHist = histogram(rf.rssiValues, 20, accentColor());
 
@@ -838,27 +824,27 @@
   async function renderCollisionTab(el, data) {
     el.innerHTML = `
       <nav id="hashIssuesToc" style="display:flex;gap:12px;margin-bottom:12px;font-size:13px;flex-wrap:wrap">
-        <a href="/analytics?tab=collisions&section=inconsistentHashSection" style="color:var(--accent)">⚠️ Inconsistent Sizes</a>
+        <a href="#/analytics?tab=collisions&section=inconsistentHashSection" style="color:var(--accent)">⚠️ Inconsistent Sizes</a>
         <span style="color:var(--border)">|</span>
-        <a href="/analytics?tab=collisions&section=hashMatrixSection" style="color:var(--accent)">🔢 Hash Matrix</a>
+        <a href="#/analytics?tab=collisions&section=hashMatrixSection" style="color:var(--accent)">🔢 Hash Matrix</a>
         <span style="color:var(--border)">|</span>
-        <a href="/analytics?tab=collisions&section=collisionRiskSection" style="color:var(--accent)">💥 Collision Risk</a>
+        <a href="#/analytics?tab=collisions&section=collisionRiskSection" style="color:var(--accent)">💥 Collision Risk</a>
       </nav>
 
       <div class="analytics-card" id="inconsistentHashSection">
-        <div style="display:flex;justify-content:space-between;align-items:center"><h3 style="margin:0">⚠️ Inconsistent Hash Sizes</h3><a href="/analytics?tab=collisions" style="font-size:11px;color:var(--text-muted)">↑ top</a></div>
+        <div style="display:flex;justify-content:space-between;align-items:center"><h3 style="margin:0">⚠️ Inconsistent Hash Sizes</h3><a href="#/analytics?tab=collisions" style="font-size:11px;color:var(--text-muted)">↑ top</a></div>
         <p class="text-muted" style="margin:4px 0 8px;font-size:0.8em">Nodes sending adverts with varying hash sizes. Caused by a <a href="https://github.com/meshcore-dev/MeshCore/commit/fcfdc5f" target="_blank" style="color:var(--accent)">bug</a> where automatic adverts ignored the configured multibyte path setting. Fixed in <a href="https://github.com/meshcore-dev/MeshCore/releases/tag/repeater-v1.14.1" target="_blank" style="color:var(--accent)">repeater v1.14.1</a>.</p>
         <div id="inconsistentHashList"><div class="text-muted" style="padding:8px"><span class="spinner"></span> Loading…</div></div>
       </div>
 
       <div class="analytics-card" id="hashMatrixSection">
-        <div style="display:flex;justify-content:space-between;align-items:center"><h3 style="margin:0">🔢 1-Byte Hash Usage Matrix</h3><a href="/analytics?tab=collisions" style="font-size:11px;color:var(--text-muted)">↑ top</a></div>
+        <div style="display:flex;justify-content:space-between;align-items:center"><h3 style="margin:0">🔢 1-Byte Hash Usage Matrix</h3><a href="#/analytics?tab=collisions" style="font-size:11px;color:var(--text-muted)">↑ top</a></div>
         <p class="text-muted" style="margin:4px 0 8px;font-size:0.8em">Click a cell to see which nodes share that prefix. Green = available, yellow = taken, red = collision.</p>
         <div id="hashMatrix"></div>
       </div>
 
       <div class="analytics-card" id="collisionRiskSection">
-        <div style="display:flex;justify-content:space-between;align-items:center"><h3 style="margin:0">💥 1-Byte Collision Risk</h3><a href="/analytics?tab=collisions" style="font-size:11px;color:var(--text-muted)">↑ top</a></div>
+        <div style="display:flex;justify-content:space-between;align-items:center"><h3 style="margin:0">💥 1-Byte Collision Risk</h3><a href="#/analytics?tab=collisions" style="font-size:11px;color:var(--text-muted)">↑ top</a></div>
         <div id="collisionList"><div class="text-muted" style="padding:8px">Loading…</div></div>
       </div>
     `;
@@ -884,7 +870,7 @@
             }).join(' ');
             const stripe = i % 2 === 1 ? 'background:var(--row-stripe)' : '';
             return `<tr style="${stripe}">
-              <td><a href="/nodes/${encodeURIComponent(n.public_key)}?section=node-packets" style="font-weight:600;color:var(--accent)">${esc(n.name || n.public_key.slice(0, 12))}</a></td>
+              <td><a href="#/nodes/${encodeURIComponent(n.public_key)}?section=node-packets" style="font-weight:600;color:var(--accent)">${esc(n.name || n.public_key.slice(0, 12))}</a></td>
               <td><span class="badge" style="background:${roleColor}20;color:${roleColor}">${n.role}</span></td>
               <td><code style="font-family:var(--mono);font-weight:700">${prefix}</code> <span class="text-muted">(${n.hash_size || '?'}B)</span></td>
               <td>${sizeBadges}</td>
@@ -1515,10 +1501,10 @@
       html += `<div class="analytics-section"><h3>🏆 Top 20 Longest Hops</h3><table class="data-table"><thead><tr><th>#</th><th>From</th><th>To</th><th>Distance (km)</th><th>Type</th><th>SNR</th><th>Packet</th><th></th></tr></thead><tbody>`;
       const top20 = data.topHops.slice(0, 20);
       top20.forEach((h, i) => {
-        const fromLink = h.fromPk ? `<a href="/nodes/${encodeURIComponent(h.fromPk)}" class="analytics-link">${esc(h.fromName)}</a>` : esc(h.fromName || '?');
-        const toLink = h.toPk ? `<a href="/nodes/${encodeURIComponent(h.toPk)}" class="analytics-link">${esc(h.toName)}</a>` : esc(h.toName || '?');
+        const fromLink = h.fromPk ? `<a href="#/nodes/${encodeURIComponent(h.fromPk)}" class="analytics-link">${esc(h.fromName)}</a>` : esc(h.fromName || '?');
+        const toLink = h.toPk ? `<a href="#/nodes/${encodeURIComponent(h.toPk)}" class="analytics-link">${esc(h.toName)}</a>` : esc(h.toName || '?');
         const snr = h.snr != null ? h.snr + ' dB' : '<span class="text-muted">—</span>';
-        const pktLink = h.hash ? `<a href="/packet/${encodeURIComponent(h.hash)}" class="analytics-link mono" style="font-size:0.85em">${esc(h.hash.slice(0, 12))}…</a>` : '—';
+        const pktLink = h.hash ? `<a href="#/packet/${encodeURIComponent(h.hash)}" class="analytics-link mono" style="font-size:0.85em">${esc(h.hash.slice(0, 12))}…</a>` : '—';
         const mapBtn = h.fromPk && h.toPk ? `<button class="btn-icon dist-map-hop" data-from="${esc(h.fromPk)}" data-to="${esc(h.toPk)}" title="View on map">🗺️</button>` : '';
         html += `<tr><td>${i+1}</td><td>${fromLink}</td><td>${toLink}</td><td><strong>${h.dist}</strong></td><td>${esc(h.type)}</td><td>${snr}</td><td>${pktLink}</td><td>${mapBtn}</td></tr>`;
       });
@@ -1529,7 +1515,7 @@
         html += `<div class="analytics-section"><h3>🛤️ Top 10 Longest Multi-Hop Paths</h3><table class="data-table"><thead><tr><th>#</th><th>Total Distance (km)</th><th>Hops</th><th>Route</th><th>Packet</th><th></th></tr></thead><tbody>`;
         data.topPaths.slice(0, 10).forEach((p, i) => {
           const route = p.hops.map(h => esc(h.fromName)).concat(esc(p.hops[p.hops.length-1].toName)).join(' → ');
-          const pktLink = p.hash ? `<a href="/packet/${encodeURIComponent(p.hash)}" class="analytics-link mono" style="font-size:0.85em">${esc(p.hash.slice(0, 12))}…</a>` : '—';
+          const pktLink = p.hash ? `<a href="#/packet/${encodeURIComponent(p.hash)}" class="analytics-link mono" style="font-size:0.85em">${esc(p.hash.slice(0, 12))}…</a>` : '—';
           // Collect all unique pubkeys in path order
           const pathPks = [];
           p.hops.forEach(h => { if (h.fromPk && !pathPks.includes(h.fromPk)) pathPks.push(h.fromPk); });
@@ -1546,7 +1532,7 @@
       el.querySelectorAll('.dist-map-hop').forEach(btn => {
         btn.addEventListener('click', () => {
           sessionStorage.setItem('map-route-hops', JSON.stringify({ hops: [btn.dataset.from, btn.dataset.to] }));
-          goto('/map?route=1');
+          window.location.hash = '#/map?route=1';
         });
       });
       el.querySelectorAll('.dist-map-path').forEach(btn => {
@@ -1554,7 +1540,7 @@
           try {
             const hops = JSON.parse(btn.dataset.hops);
             sessionStorage.setItem('map-route-hops', JSON.stringify({ hops }));
-            goto('/map?route=1');
+            window.location.hash = '#/map?route=1';
           } catch {}
         });
       });

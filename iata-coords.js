@@ -42,12 +42,6 @@ const IATA_COORDS = {
   RDU: { lat: 35.8801, lon: -78.7880 },
   // Canada
   YVR: { lat: 49.1967, lon: -123.1815 },
-  YYJ: { lat: 48.6475, lon: -123.4258 },  // Victoria, BC
-  YCD: { lat: 49.0547, lon: -123.8700 },  // Nanaimo, BC
-  YQQ: { lat: 49.7108, lon: -124.9006 },  // Comox, BC
-  YKA: { lat: 50.7022, lon: -120.4440 },  // Kamloops, BC
-  YLW: { lat: 49.9561, lon: -119.3778 },  // Kelowna, BC
-  YPW: { lat: 49.8383, lon: -124.4975 },  // Powell River, BC
   YYZ: { lat: 43.6777, lon: -79.6248 },
   YYC: { lat: 51.1215, lon: -114.0076 },
   YEG: { lat: 53.3097, lon: -113.5800 },

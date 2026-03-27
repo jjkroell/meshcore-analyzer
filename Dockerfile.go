@@ -1,0 +1,57 @@
+FROM golang:1.22-alpine AS builder
+
+RUN apk add --no-cache build-base
+
+ARG APP_VERSION=unknown
+ARG GIT_COMMIT=unknown
+
+# Build server
+WORKDIR /build/server
+COPY cmd/server/go.mod cmd/server/go.sum ./
+RUN go mod download
+COPY cmd/server/ ./
+RUN go build -ldflags "-X main.Version=${APP_VERSION} -X main.Commit=${GIT_COMMIT}" -o /meshcore-server .
+
+# Build ingestor
+WORKDIR /build/ingestor
+COPY cmd/ingestor/go.mod cmd/ingestor/go.sum ./
+RUN go mod download
+COPY cmd/ingestor/ ./
+RUN go build -o /meshcore-ingestor .
+
+# Runtime image
+FROM alpine:3.20
+
+RUN apk add --no-cache mosquitto mosquitto-clients supervisor caddy wget
+
+WORKDIR /app
+
+# Go binaries
+COPY --from=builder /meshcore-server /meshcore-ingestor /app/
+
+# Frontend assets + config
+COPY public/ ./public/
+COPY config.example.json channel-rainbow.json ./
+
+# Bake git commit SHA (CI writes .git-commit before build; fallback for non-ldflags usage)
+COPY .git-commi[t] ./
+RUN if [ ! -f .git-commit ]; then echo "unknown" > .git-commit; fi
+
+# Supervisor + Mosquitto + Caddy config
+COPY docker/supervisord-go.conf /etc/supervisor/conf.d/supervisord.conf
+COPY docker/mosquitto.conf /etc/mosquitto/mosquitto.conf
+COPY docker/Caddyfile /etc/caddy/Caddyfile
+
+# Data directory
+RUN mkdir -p /app/data /var/lib/mosquitto /data/caddy && \
+    chown -R mosquitto:mosquitto /var/lib/mosquitto
+
+# Entrypoint
+COPY docker/entrypoint-go.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+EXPOSE 80 443 1883
+
+VOLUME ["/app/data", "/data/caddy"]
+
+ENTRYPOINT ["/entrypoint.sh"]

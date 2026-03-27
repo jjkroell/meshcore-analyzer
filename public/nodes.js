@@ -125,8 +125,11 @@
     // Returns HTML for: role badge, hash prefix badge, hash inconsistency link, status label
     const info = getStatusInfo(n);
     let html = `<span class="badge" style="background:${roleColor}20;color:${roleColor}">${n.role}</span>`;
+    if (n.hash_size) {
+      html += ` <span class="badge" style="background:var(--nav-bg);color:var(--nav-text);font-family:var(--mono)">${n.public_key.slice(0, n.hash_size * 2).toUpperCase()}</span>`;
+    }
     if (n.hash_size_inconsistent) {
-      html += ` <a href="/nodes/${encodeURIComponent(n.public_key)}?section=node-packets" class="badge" style="background:var(--status-yellow);color:#000;font-size:10px;cursor:pointer;text-decoration:none">⚠️ variable hash size</a>`;
+      html += ` <a href="#/nodes/${encodeURIComponent(n.public_key)}?section=node-packets" class="badge" style="background:var(--status-yellow);color:#000;font-size:10px;cursor:pointer;text-decoration:none">⚠️ variable hash size</a>`;
     }
     html += ` <span title="${info.statusTooltip}">${info.statusLabel}</span>`;
     return html;
@@ -183,7 +186,10 @@
         <div class="nodes-counts" id="nodeCounts"></div>
       </div>
       <div id="nodesRegionFilter" class="region-filter-container"></div>
-      <div class="nodes-list-wrap" id="nodesLeft"></div>
+      <div class="split-layout">
+        <div class="panel-left" id="nodesLeft"></div>
+        <div class="panel-right empty" id="nodesRight"><span>Select a node to view details</span></div>
+      </div>
     </div>`;
 
     RegionFilter.init(document.getElementById('nodesRegionFilter'));
@@ -195,7 +201,14 @@
     }, 250));
 
     loadNodes();
-    wsHandler = debouncedOnWS(function (msgs) { if (msgs.some(function (m) { return m.type === 'packet'; })) loadNodes(); });
+    // Auto-refresh when ADVERT packets arrive via WebSocket (fixes #131)
+    wsHandler = debouncedOnWS(function (msgs) {
+      if (msgs.some(isAdvertMessage)) {
+        _allNodes = null;
+        invalidateApiCache('/nodes');
+        loadNodes(true);
+      }
+    }, 5000);
   }
 
   async function loadFullNode(pubkey) {
@@ -207,6 +220,8 @@
       ]);
       const n = nodeData.node;
       const adverts = (nodeData.recentAdverts || []).sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+      const title = document.querySelector('.node-full-title');
+      if (title) title.textContent = n.name || pubkey.slice(0, 12);
 
       const hasLoc = n.lat != null && n.lon != null;
 
@@ -229,24 +244,18 @@
           <div class="node-detail-name" style="font-size:20px">${escapeHtml(n.name || '(unnamed)')}</div>
           <div style="margin:4px 0 6px">${renderNodeBadges(n, roleColor)}</div>
           ${renderHashInconsistencyWarning(n)}
-          <div style="margin-bottom:6px">
-            <span style="display:inline-block;font-size:13px;font-weight:600;letter-spacing:.7px;color:var(--accent);text-transform:uppercase;background:color-mix(in srgb,var(--accent) 12%,transparent);border:1px solid color-mix(in srgb,var(--accent) 30%,transparent);padding:2px 7px;border-radius:99px;margin-bottom:4px">Public Key</span>
-            <span class="node-detail-key mono">${(() => {
-              const key = n.public_key;
-              const prefixLen = (n.hash_size || 0) * 2;
-              if (!prefixLen) return key;
-              const prefix = key.slice(0, prefixLen).toUpperCase();
-              const rest = key.slice(prefixLen);
-              return '<span class="hash-prefix-tip" style="color:var(--accent);font-weight:700;letter-spacing:.5px;cursor:default" data-tip="' + n.hash_size + '-byte ID hash prefix">' + prefix + '</span>' + rest;
-            })()}</span>
+          <div class="node-detail-key mono" style="font-size:11px;word-break:break-all;margin-bottom:6px">${n.public_key}</div>
+          <div>
+            <button class="btn-primary" id="copyUrlBtn" style="font-size:12px;padding:4px 10px">📋 Copy URL</button>
+            <a href="#/nodes/${encodeURIComponent(n.public_key)}/analytics" class="btn-primary" style="display:inline-block;margin-left:6px;text-decoration:none;font-size:12px;padding:4px 10px">📊 Analytics</a>
           </div>
-          <div></div>
         </div>
 
         <div class="node-top-row">
-          ${hasLoc ? `<div class="node-map-wrap"><div id="nodeFullMap" class="node-detail-map" style="height:100%;min-height:200px;border-radius:8px;overflow:hidden"></div><button class="map-lock-pill" id="nodeMapLockBtn">🔒 Click to unlock</button></div>` : ''}
+          ${hasLoc ? `<div class="node-map-wrap"><div id="nodeFullMap" class="node-detail-map" style="height:100%;min-height:200px;border-radius:8px;overflow:hidden"></div></div>` : ''}
           <div class="node-qr-wrap${hasLoc ? '' : ' node-qr-wrap--full'}">
             <div class="node-qr" id="nodeFullQrCode"></div>
+            <div class="mono" style="font-size:10px;color:var(--text-muted);margin-top:8px;word-break:break-all;text-align:center;max-width:180px">${n.public_key.slice(0, 16)}…${n.public_key.slice(-8)}</div>
           </div>
         </div>
 
@@ -259,6 +268,7 @@
           ${stats.avgSnr != null ? `<tr><td>Avg SNR</td><td>${stats.avgSnr.toFixed(1)} dB</td></tr>` : ''}
           ${stats.avgHops ? `<tr><td>Avg Hops</td><td>${stats.avgHops}</td></tr>` : ''}
           ${hasLoc ? `<tr><td>Location</td><td>${n.lat.toFixed(5)}, ${n.lon.toFixed(5)}</td></tr>` : ''}
+          <tr><td>Hash Prefix</td><td>${n.hash_size ? '<code style="font-family:var(--mono);font-weight:700">' + n.public_key.slice(0, n.hash_size * 2).toUpperCase() + '</code> (' + n.hash_size + '-byte)' : 'Unknown'}${n.hash_size_inconsistent ? ' <span style="color:var(--status-yellow);cursor:help" title="Seen: ' + (n.hash_sizes_seen || []).join(', ') + '-byte">⚠️ varies</span>' : ''}</td></tr>
         </table>
 
         ${observers.length ? `<div class="node-full-card" id="node-observers">
@@ -277,8 +287,6 @@
             </tbody>
           </table>
         </div>` : ''}
-
-        <div class="node-full-card" id="nodeAnalyticsEmbed" style="padding:0"></div>
 
         <div class="node-full-card" id="fullPathsSection">
           <h4>Paths Through This Node</h4>
@@ -308,7 +316,7 @@
               return `<div class="node-activity-item">
                 <span class="node-activity-time">${timeAgo(p.timestamp)}</span>
                 <span>${typeLabel}${detail}${hashSizeBadge}${obsBadge}${obs ? ' via ' + escapeHtml(obs) : ''}${snr}${rssi}</span>
-                <a href="/packets/${p.hash}" class="ch-analyze-link" style="margin-left:8px;font-size:0.8em">Analyze →</a>
+                <a href="#/packets/${p.hash}" class="ch-analyze-link" style="margin-left:8px;font-size:0.8em">Analyze →</a>
               </div>`;
             }).join('') : '<div class="text-muted">No recent packets</div>'}
           </div>
@@ -353,9 +361,18 @@
         } catch {}
       }
 
+      // Copy URL
+      const nodeUrl = location.origin + '#/nodes/' + encodeURIComponent(n.public_key);
+      document.getElementById('copyUrlBtn')?.addEventListener('click', () => {
+        const btn = document.getElementById('copyUrlBtn');
+        window.copyToClipboard(nodeUrl, () => {
+          btn.textContent = '✅ Copied!';
+          setTimeout(() => btn.textContent = '📋 Copy URL', 2000);
+        });
+      });
 
       // Deep-link scroll: ?section=node-packets or ?section=node-packets
-      const hashParams = location.search.slice(1);
+      const hashParams = location.hash.split('?')[1] || '';
       const urlParams = new URLSearchParams(hashParams);
       const scrollTarget = urlParams.get('section') || (urlParams.has('highlight') ? 'node-packets' : null);
       if (scrollTarget) {
@@ -399,12 +416,12 @@
                 return isThis ? html.replace('class="', 'class="hop-current ') : html;
               }
               const name = escapeHtml(h.name || h.prefix);
-              const link = h.pubkey ? `<a href="/nodes/${encodeURIComponent(h.pubkey)}" style="${isThis ? 'font-weight:700;color:var(--accent, #3b82f6)' : ''}">${name}</a>` : `<span>${name}</span>`;
+              const link = h.pubkey ? `<a href="#/nodes/${encodeURIComponent(h.pubkey)}" style="${isThis ? 'font-weight:700;color:var(--accent, #3b82f6)' : ''}">${name}</a>` : `<span>${name}</span>`;
               return link;
             }).join(' → ');
             return `<div style="padding:6px 0;border-bottom:1px solid var(--border);font-size:12px">
               <div>${chain}</div>
-              <div style="color:var(--text-muted);margin-top:2px">${p.count}× · last ${timeAgo(p.lastSeen)} · <a href="/packets/${p.sampleHash}" class="ch-analyze-link">Analyze →</a></div>
+              <div style="color:var(--text-muted);margin-top:2px">${p.count}× · last ${timeAgo(p.lastSeen)} · <a href="#/packets/${p.sampleHash}" class="ch-analyze-link">Analyze →</a></div>
             </div>`;
           }).join('');
         }
@@ -433,14 +450,13 @@
     if (detailMap) { detailMap.remove(); detailMap = null; }
     if (regionChangeHandler) RegionFilter.offChange(regionChangeHandler);
     regionChangeHandler = null;
-    if (window.NodeAnalytics) NodeAnalytics.destroy();
     nodes = [];
     selectedKey = null;
   }
 
   let _allNodes = null; // cached full node list
 
-  async function loadNodes() {
+  async function loadNodes(refreshOnly) {
     try {
       // Fetch all nodes once, filter client-side
       if (!_allNodes) {
@@ -498,12 +514,10 @@
       }
 
       renderCounts();
-      const _wrap = document.querySelector('.nodes-table-wrap');
-      const _savedScroll = _wrap ? _wrap.scrollTop : 0;
-      renderLeft();
-      if (_savedScroll > 0) {
-        const _newWrap = document.querySelector('.nodes-table-wrap');
-        if (_newWrap) _newWrap.scrollTop = _savedScroll;
+      if (refreshOnly) {
+        renderRows();
+      } else {
+        renderLeft();
       }
     } catch (e) {
       console.error('Failed to load nodes:', e);
@@ -553,17 +567,16 @@
           </select>
         </div>
       </div>
-      <div class="nodes-table-wrap">
-        <table class="data-table" id="nodesTable">
-          <thead><tr>
-            <th class="sortable${sortState.column==='name'?' sort-active':''}" data-sort="name">Name${sortArrow('name')}</th>
-            <th class="sortable${sortState.column==='role'?' sort-active':''}" data-sort="role">Role${sortArrow('role')}</th>
-            <th class="sortable${sortState.column==='last_seen'?' sort-active':''}" data-sort="last_seen">Last Seen${sortArrow('last_seen')}</th>
-            <th class="sortable${sortState.column==='advert_count'?' sort-active':''}" data-sort="advert_count">Adverts${sortArrow('advert_count')}</th>
-          </tr></thead>
-          <tbody id="nodesBody"></tbody>
-        </table>
-      </div>`;
+      <table class="data-table" id="nodesTable">
+        <thead><tr>
+          <th class="sortable${sortState.column==='name'?' sort-active':''}" data-sort="name">Name${sortArrow('name')}</th>
+          <th class="sortable${sortState.column==='public_key'?' sort-active':''}" data-sort="public_key">Public Key${sortArrow('public_key')}</th>
+          <th class="sortable${sortState.column==='role'?' sort-active':''}" data-sort="role">Role${sortArrow('role')}</th>
+          <th class="sortable${sortState.column==='last_seen'?' sort-active':''}" data-sort="last_seen">Last Seen${sortArrow('last_seen')}</th>
+          <th class="sortable${sortState.column==='advert_count'?' sort-active':''}" data-sort="advert_count">Adverts${sortArrow('advert_count')}</th>
+        </tr></thead>
+        <tbody id="nodesBody"></tbody>
+      </table>`;
 
     // Tab clicks
     const nodeTabs = document.getElementById('nodeTabs');
@@ -641,12 +654,9 @@
       const lastSeenTime = n.last_heard || n.last_seen;
       const status = getNodeStatus(n.role || 'companion', lastSeenTime ? new Date(lastSeenTime).getTime() : 0);
       const lastSeenClass = status === 'active' ? 'last-seen-active' : 'last-seen-stale';
-      return `<tr data-key="${n.public_key}" data-action="select" data-value="${n.public_key}" tabindex="0" role="row" class="${isClaimed ? 'claimed-row' : ''}">
-        <td class="node-name-cell col-name">${favStar(n.public_key, 'node-fav')}${isClaimed ? '<span class="claimed-badge" title="My Mesh">★</span> ' : ''}<strong class="node-name-label" data-pubkey="${n.public_key}">${n.name || '(unnamed)'}</strong><span class="node-pubkey-tip mono">${(() => {
-              const prefixLen = (n.hash_size || 0) * 2;
-              if (!prefixLen) return n.public_key;
-              return '<span style="color:var(--accent);font-weight:700">' + n.public_key.slice(0, prefixLen).toUpperCase() + '</span>' + n.public_key.slice(prefixLen);
-            })()}</span></td>
+      return `<tr data-key="${n.public_key}" data-action="select" data-value="${n.public_key}" tabindex="0" role="row" class="${selectedKey === n.public_key ? 'selected' : ''}${isClaimed ? ' claimed-row' : ''}">
+        <td>${favStar(n.public_key, 'node-fav')}${isClaimed ? '<span class="claimed-badge" title="My Mesh">★</span> ' : ''}<strong>${n.name || '(unnamed)'}</strong></td>
+        <td class="mono">${truncate(n.public_key, 16)}</td>
         <td><span class="badge" style="background:${roleColor}20;color:${roleColor}">${n.role}</span></td>
         <td class="${lastSeenClass}">${timeAgo(n.last_heard || n.last_seen)}</td>
         <td>${n.advert_count || 0}</td>
@@ -699,10 +709,10 @@
 
     panel.innerHTML = `
       <div class="node-detail">
-        <button class="panel-close-btn" data-action="close-node-panel" title="Close" aria-label="Close detail panel">✕</button>
         <div class="node-detail-name">${escapeHtml(n.name || '(unnamed)')}</div>
         <div class="node-detail-role">${renderNodeBadges(n, roleColor)}
-          <a href="/nodes/${encodeURIComponent(n.public_key)}" class="btn-primary" style="display:inline-block;text-decoration:none;font-size:11px;padding:2px 8px;margin-left:8px">🔍 Details</a>
+          <a href="#/nodes/${encodeURIComponent(n.public_key)}" class="btn-primary" style="display:inline-block;text-decoration:none;font-size:11px;padding:2px 8px;margin-left:8px">🔍 Details</a>
+          <a href="#/nodes/${encodeURIComponent(n.public_key)}/analytics" class="btn-primary" style="display:inline-block;margin-left:4px;text-decoration:none;font-size:11px;padding:2px 8px">📊 Analytics</a>
         </div>
         ${renderStatusExplanation(n)}
 
@@ -712,7 +722,7 @@
         </div>` : `<div class="node-qr" id="nodeQrCode" style="margin:8px 0"></div>`}
 
         <div class="node-detail-section">
-          <div class="node-detail-key mono" style="font-size:11px;word-break:break-all;margin-bottom:4px">${renderPubkeyHtml(n.public_key, n.hash_size)}</div>
+          <div class="node-detail-key mono" style="font-size:11px;word-break:break-all;margin-bottom:4px">${n.public_key}</div>
         </div>
 
         <div class="node-detail-section">
@@ -738,8 +748,6 @@
             </div>`).join('')}
           </div>
         </div>` : ''}
-
-        <div class="node-detail-section" id="nodeAnalyticsEmbed"></div>
 
         <div class="node-detail-section" id="pathsSection">
           <h4>Paths Through This Node</h4>
@@ -832,12 +840,12 @@
           const chain = p.hops.map(h => {
             const isThis = h.pubkey === n.public_key;
             const name = escapeHtml(h.name || h.prefix);
-            const link = h.pubkey ? `<a href="/nodes/${encodeURIComponent(h.pubkey)}" style="${isThis ? 'font-weight:700;color:var(--accent, #3b82f6)' : ''}">${name}</a>` : `<span>${name}</span>`;
+            const link = h.pubkey ? `<a href="#/nodes/${encodeURIComponent(h.pubkey)}" style="${isThis ? 'font-weight:700;color:var(--accent, #3b82f6)' : ''}">${name}</a>` : `<span>${name}</span>`;
             return link;
           }).join(' → ');
           return `<div style="padding:6px 0;border-bottom:1px solid var(--border);font-size:12px">
             <div>${chain}</div>
-            <div style="color:var(--text-muted);margin-top:2px">${p.count}× · last ${timeAgo(p.lastSeen)} · <a href="/packets/${p.sampleHash}" class="ch-analyze-link">Analyze →</a></div>
+            <div style="color:var(--text-muted);margin-top:2px">${p.count}× · last ${timeAgo(p.lastSeen)} · <a href="#/packets/${p.sampleHash}" class="ch-analyze-link">Analyze →</a></div>
           </div>`;
         }).join('');
       }
@@ -856,5 +864,15 @@
     });
   }
 
+  function isAdvertMessage(m) {
+    if (m.type !== 'packet') return false;
+    if (m.data && m.data.packet && m.data.packet.payload_type === 4) return true;
+    if (m.data && m.data.decoded && m.data.decoded.header && m.data.decoded.header.payloadTypeName === 'ADVERT') return true;
+    return false;
+  }
+
   registerPage('nodes', { init, destroy });
+
+  // Test hooks
+  window._nodesIsAdvertMessage = isAdvertMessage;
 })();

@@ -90,4 +90,4 @@ First observation gets animation, subsequent same-hash observations silently log
 
 ## Status
 
-**Discussion phase** — no code changes yet. Iavor wants to finalize design before implementation. Live map changes tabled for later.
+**Discussion phase** — no code changes yet. User wants to finalize design before implementation. Live map changes tabled for later.

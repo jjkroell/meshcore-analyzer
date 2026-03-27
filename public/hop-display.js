@@ -38,7 +38,7 @@ window.HopDisplay = (function() {
       const name = escapeHtml(c.name || c.pubkey?.slice(0, 16) || '?');
       const dist = c.distKm != null ? `<span class="hop-conflict-dist">${c.distKm}km</span>` : '';
       const pk = c.pubkey ? c.pubkey.slice(0, 12) + '…' : '';
-      html += `<a href="/nodes/${encodeURIComponent(c.pubkey || '')}" class="hop-conflict-item">
+      html += `<a href="#/nodes/${encodeURIComponent(c.pubkey || '')}" class="hop-conflict-item">
         <span class="hop-conflict-name">${name}</span>
         ${dist}
         <span class="hop-conflict-pk">${pk}</span>
@@ -94,7 +94,7 @@ window.HopDisplay = (function() {
     ].filter(Boolean).join(' ');
 
     if (opts.link !== false) {
-      return `<a class="${cls} hop-link" href="/nodes/${encodeURIComponent(pubkey)}" title="${escapeHtml(title)}" data-hop-link="true">${display}</a>${warnBadge}`;
+      return `<a class="${cls} hop-link" href="#/nodes/${encodeURIComponent(pubkey)}" title="${escapeHtml(title)}" data-hop-link="true">${display}</a>${warnBadge}`;
     }
     return `<span class="${cls}" title="${escapeHtml(title)}">${display}</span>${warnBadge}`;
   }

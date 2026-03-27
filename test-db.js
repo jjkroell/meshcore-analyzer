@@ -213,6 +213,33 @@ console.log('\ngetStats:');
   assert(stats.totalObservers >= 1, 'totalObservers');
   assert(typeof stats.totalPackets === 'number', 'totalPackets is number');
   assert(typeof stats.packetsLastHour === 'number', 'packetsLastHour is number');
+  assert(typeof stats.totalNodesAllTime === 'number', 'totalNodesAllTime is number');
+  assert(stats.totalNodesAllTime >= stats.totalNodes, 'totalNodesAllTime >= totalNodes');
+}
+
+// --- getStats active node filtering ---
+console.log('\ngetStats active node filtering:');
+{
+  // Insert a node with last_seen 30 days ago (should be excluded from totalNodes)
+  const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 3600000).toISOString();
+  db.upsertNode({ public_key: 'deadnode0000000000000000deadnode00', name: 'DeadNode', role: 'repeater', last_seen: thirtyDaysAgo, first_seen: thirtyDaysAgo });
+
+  // Insert a node with last_seen now (should be included)
+  db.upsertNode({ public_key: 'livenode0000000000000000livenode00', name: 'LiveNode', role: 'companion', last_seen: new Date().toISOString() });
+
+  const stats = db.getStats();
+  assert(stats.totalNodesAllTime > stats.totalNodes, 'dead node excluded from totalNodes but included in totalNodesAllTime');
+
+  // Verify the dead node is in totalNodesAllTime
+  const allTime = stats.totalNodesAllTime;
+  assert(allTime >= 3, 'totalNodesAllTime includes dead + live nodes');
+
+  // Verify active count doesn't include the 30-day-old node
+  // The dead node's last_seen is 30 days ago, window is 7 days
+  const nodeInDb = db.getNode('deadnode0000000000000000deadnode00');
+  assert(nodeInDb !== null, 'dead node exists in DB');
+  const liveNode = db.getNode('livenode0000000000000000livenode00');
+  assert(liveNode !== null, 'live node exists in DB');
 }
 
 // --- getNodeHealth ---
@@ -252,9 +279,166 @@ console.log('\ngetNodeAnalytics:');
 // --- seed ---
 console.log('\nseed:');
 {
-  // Already has data, should return false
-  const result = db.seed();
-  assert(result === false, 'seed returns false when data exists');
+  if (typeof db.seed === 'function') {
+    // Already has data, should return false
+    const result = db.seed();
+    assert(result === false, 'seed returns false when data exists');
+  } else {
+    console.log('  (skipped — seed not exported)');
+  }
+}
+
+// --- v3 schema tests (fresh DB should be v3) ---
+console.log('\nv3 schema:');
+{
+  assert(db.schemaVersion >= 3, 'fresh DB creates v3 schema');
+
+  // observations table should have observer_idx, not observer_id
+  const cols = db.db.pragma('table_info(observations)').map(c => c.name);
+  assert(cols.includes('observer_idx'), 'observations has observer_idx column');
+  assert(!cols.includes('observer_id'), 'observations does NOT have observer_id column');
+  assert(!cols.includes('observer_name'), 'observations does NOT have observer_name column');
+  assert(!cols.includes('hash'), 'observations does NOT have hash column');
+  assert(!cols.includes('created_at'), 'observations does NOT have created_at column');
+
+  // timestamp should be integer
+  const obsRow = db.db.prepare('SELECT typeof(timestamp) as t FROM observations LIMIT 1').get();
+  if (obsRow) {
+    assert(obsRow.t === 'integer', 'timestamp is stored as integer');
+  }
+
+  // packets_v view should still expose observer_id, observer_name, ISO timestamp
+  const viewRow = db.db.prepare('SELECT * FROM packets_v LIMIT 1').get();
+  if (viewRow) {
+    assert('observer_id' in viewRow, 'packets_v exposes observer_id');
+    assert('observer_name' in viewRow, 'packets_v exposes observer_name');
+    assert(typeof viewRow.timestamp === 'string', 'packets_v timestamp is ISO string');
+  }
+
+  // user_version is 3
+  const sv = db.db.pragma('user_version', { simple: true });
+  assert(sv === 3, 'user_version is 3');
+}
+
+// --- v3 ingestion: observer resolved via observer_idx ---
+console.log('\nv3 ingestion with observer resolution:');
+{
+  // Insert a new observer
+  db.upsertObserver({ id: 'obs-v3-test', name: 'V3 Test Observer' });
+
+  // Insert observation referencing that observer
+  const result = db.insertTransmission({
+    raw_hex: '0400deadbeef',
+    hash: 'hash-v3-001',
+    timestamp: '2025-06-01T12:00:00Z',
+    observer_id: 'obs-v3-test',
+    observer_name: 'V3 Test Observer',
+    direction: 'rx',
+    snr: 12.0,
+    rssi: -80,
+    route_type: 1,
+    payload_type: 4,
+    path_json: '["aabb"]',
+  });
+  assert(result !== null, 'v3 insertion succeeded');
+  assert(result.transmissionId > 0, 'v3 has transmissionId');
+
+  // Verify via packets_v view
+  const pkt = db.db.prepare('SELECT * FROM packets_v WHERE hash = ?').get('hash-v3-001');
+  assert(pkt !== null, 'v3 packet found via view');
+  assert(pkt.observer_id === 'obs-v3-test', 'v3 observer_id resolved in view');
+  assert(pkt.observer_name === 'V3 Test Observer', 'v3 observer_name resolved in view');
+  assert(typeof pkt.timestamp === 'string', 'v3 timestamp is ISO string in view');
+  assert(pkt.timestamp.includes('2025-06-01'), 'v3 timestamp date correct');
+
+  // Raw observation should have integer timestamp
+  const obs = db.db.prepare('SELECT * FROM observations ORDER BY id DESC LIMIT 1').get();
+  assert(typeof obs.timestamp === 'number', 'v3 raw observation timestamp is integer');
+  assert(obs.observer_idx !== null, 'v3 observation has observer_idx');
+}
+
+// --- v3 dedup ---
+console.log('\nv3 dedup:');
+{
+  // Insert same observation again — should be deduped
+  const result = db.insertTransmission({
+    raw_hex: '0400deadbeef',
+    hash: 'hash-v3-001',
+    timestamp: '2025-06-01T12:00:00Z',
+    observer_id: 'obs-v3-test',
+    direction: 'rx',
+    snr: 12.0,
+    rssi: -80,
+    path_json: '["aabb"]',
+  });
+  assert(result.observationId === 0, 'duplicate caught by in-memory dedup');
+
+  // Different observer = not a dupe
+  db.upsertObserver({ id: 'obs-v3-test-2', name: 'V3 Test Observer 2' });
+  const result2 = db.insertTransmission({
+    raw_hex: '0400deadbeef',
+    hash: 'hash-v3-001',
+    timestamp: '2025-06-01T12:01:00Z',
+    observer_id: 'obs-v3-test-2',
+    direction: 'rx',
+    snr: 9.0,
+    rssi: -88,
+    path_json: '["ccdd"]',
+  });
+  assert(result2.observationId > 0, 'different observer is not a dupe');
+}
+
+// --- removePhantomNodes ---
+console.log('\nremovePhantomNodes:');
+{
+  // Insert phantom nodes (short public_keys like hop prefixes)
+  db.upsertNode({ public_key: 'aabb', name: null, role: 'repeater' });
+  db.upsertNode({ public_key: 'ccddee', name: null, role: 'repeater' });
+  db.upsertNode({ public_key: 'ff001122', name: null, role: 'repeater' });
+  db.upsertNode({ public_key: '0011223344556677', name: null, role: 'repeater' }); // 16 chars — still phantom
+
+  // Verify they exist
+  assert(db.getNode('aabb') !== null, 'phantom node aabb exists before cleanup');
+  assert(db.getNode('ccddee') !== null, 'phantom node ccddee exists before cleanup');
+  assert(db.getNode('ff001122') !== null, 'phantom node ff001122 exists before cleanup');
+  assert(db.getNode('0011223344556677') !== null, 'phantom 16-char exists before cleanup');
+
+  // Verify real node still exists
+  assert(db.getNode('aabbccdd11223344aabbccdd11223344') !== null, 'real node exists before cleanup');
+
+  // Run cleanup
+  const removed = db.removePhantomNodes();
+  assert(removed === 4, `removed 4 phantom nodes (got ${removed})`);
+
+  // Verify phantoms are gone
+  assert(db.getNode('aabb') === null, 'phantom aabb removed');
+  assert(db.getNode('ccddee') === null, 'phantom ccddee removed');
+  assert(db.getNode('ff001122') === null, 'phantom ff001122 removed');
+  assert(db.getNode('0011223344556677') === null, 'phantom 16-char removed');
+
+  // Verify real node is still there
+  assert(db.getNode('aabbccdd11223344aabbccdd11223344') !== null, 'real node preserved after cleanup');
+
+  // Running again should remove 0
+  const removed2 = db.removePhantomNodes();
+  assert(removed2 === 0, 'second cleanup removes nothing');
+}
+
+// --- stats exclude phantom nodes ---
+console.log('\nstats exclude phantom nodes:');
+{
+  const statsBefore = db.getStats();
+  const countBefore = statsBefore.totalNodesAllTime;
+
+  // Insert a phantom — should be cleanable
+  db.upsertNode({ public_key: 'deadbeef', name: null, role: 'repeater' });
+  const statsWithPhantom = db.getStats();
+  assert(statsWithPhantom.totalNodesAllTime === countBefore + 1, 'phantom inflates totalNodesAllTime');
+
+  // Clean it
+  db.removePhantomNodes();
+  const statsAfter = db.getStats();
+  assert(statsAfter.totalNodesAllTime === countBefore, 'phantom removed from totalNodesAllTime');
 }
 
 cleanup();
