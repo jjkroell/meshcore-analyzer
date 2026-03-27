@@ -1288,6 +1288,143 @@ console.log('\n=== style.css: version-badge link contrast ===');
 }
 
 // ===== SUMMARY =====
+console.log('\n=== channels.js: init + channel selection wiring ===');
+{
+  function makeChannelsSandbox() {
+    const ctx = makeSandbox();
+
+    const listeners = {};
+    function makeEl(id) {
+      return {
+        id,
+        innerHTML: '',
+        textContent: '',
+        style: {},
+        classList: { add() {}, remove() {}, toggle() {}, contains() { return false; } },
+        addEventListener(type, fn) { listeners[id + ':' + type] = fn; },
+        querySelector(sel) {
+          if (id === 'chHeader' && sel === '.ch-header-text') return { textContent: '' };
+          return null;
+        },
+        querySelectorAll() { return []; },
+        getBoundingClientRect() { return { width: 240 }; },
+        insertAdjacentElement() {},
+        remove() {},
+      };
+    }
+
+    const elements = {
+      chRegionFilter: makeEl('chRegionFilter'),
+      chList: makeEl('chList'),
+      chMessages: makeEl('chMessages'),
+      chScrollBtn: makeEl('chScrollBtn'),
+      chHeader: makeEl('chHeader'),
+      chAriaLive: makeEl('chAriaLive'),
+      chBackBtn: makeEl('chBackBtn'),
+    };
+
+    const app = {
+      innerHTML: '',
+      addEventListener() {},
+      querySelector(sel) {
+        if (sel === '.ch-layout') return { classList: { add() {}, contains() { return false; } } };
+        if (sel === '.ch-main' || sel === '.ch-sidebar') return makeEl(sel);
+        if (sel === '.ch-sidebar-resize') return makeEl('ch-sidebar-resize');
+        return null;
+      },
+    };
+
+    let lastHistoryUrl = null;
+    const apiCalls = [];
+    ctx.registerPage = (_, mod) => { ctx.__channelsPage = mod; };
+    ctx.RegionFilter = {
+      init: () => {},
+      onChange: () => () => {},
+      offChange: () => {},
+      getRegionParam: () => null,
+    };
+    ctx.CLIENT_TTL = { channels: 1, channelMessages: 1, nodeDetail: 1 };
+    ctx.api = async (path) => {
+      apiCalls.push(path);
+      if (path === '/channels') {
+        return {
+          channels: [{
+            channel_hash: '#test',
+            channel_name: '#test',
+            message_count: 1,
+            last_activity: new Date().toISOString(),
+            last_sender: 'nodeA',
+            last_message: 'hello',
+          }]
+        };
+      }
+      if (path.indexOf('/channels/%23test/messages') === 0) {
+        return { messages: [] };
+      }
+      if (path.indexOf('/nodes/search') === 0) return { nodes: [] };
+      return {};
+    };
+    ctx.onWS = () => {};
+    ctx.debouncedOnWS = (fn) => { if (typeof fn === 'function') fn([]); return () => {}; };
+    ctx.offWS = () => {};
+    ctx.formatSecondsAgo = () => '1s';
+    ctx.truncate = (s, n) => (s || '').length > n ? String(s).slice(0, n) + '…' : String(s || '');
+    ctx.escapeHtml = (v) => String(v == null ? '' : v);
+    ctx.timeAgo = () => '1s ago';
+    ctx.fetch = async () => ({ json: async () => ({ ok: true, name: '#test' }) });
+    ctx.history = { replaceState: (_, __, url) => { lastHistoryUrl = url; } };
+    ctx.localStorage = { getItem: () => null, setItem: () => {} };
+    ctx.document = {
+      ...ctx.document,
+      documentElement: {},
+      getElementById: (id) => elements[id] || null,
+      querySelector: (sel) => {
+        if (sel === '.ch-add-channel') return null; // regression: add controls absent
+        return null;
+      },
+      querySelectorAll: () => [],
+      createElement: () => makeEl('created'),
+      addEventListener: () => {},
+      body: { appendChild() {} },
+    };
+    ctx.window = { ...ctx.window, innerWidth: 1024 };
+    ctx.MutationObserver = function () { this.observe = () => {}; };
+    ctx.setInterval = () => 1;
+    ctx.clearInterval = () => {};
+
+    vm.createContext(ctx);
+    vm.runInContext(fs.readFileSync('public/channels.js', 'utf8'), ctx);
+
+    return { ctx, app, listeners, getLastHistoryUrl: () => lastHistoryUrl, getApiCalls: () => apiCalls };
+  }
+
+  test('init does not throw when add-channel controls are absent', () => {
+    const env = makeChannelsSandbox();
+    env.ctx.__channelsPage.init(env.app, null);
+  });
+
+  test('channel list click invokes selection and updates route', () => {
+    const env = makeChannelsSandbox();
+    env.ctx.__channelsPage.init(env.app, null);
+    const click = env.listeners['chList:click'];
+    assert.ok(click, 'channel click handler should be registered');
+    click({ target: { closest: (sel) => sel === '.ch-item[data-hash]' ? { dataset: { hash: '#test' } } : null } });
+    assert.strictEqual(env.getLastHistoryUrl(), '#/channels/%23test');
+    assert.ok(env.getApiCalls().some(p => p.indexOf('/channels/%23test/messages') === 0), 'should request selected channel messages');
+  });
+
+  test('channel list click outside item does not select or throw', () => {
+    const env = makeChannelsSandbox();
+    env.ctx.__channelsPage.init(env.app, null);
+    const click = env.listeners['chList:click'];
+    assert.ok(click, 'channel click handler should be registered');
+    click({ target: { closest: () => null } });
+    assert.strictEqual(env.getLastHistoryUrl(), null);
+    assert.ok(!env.getApiCalls().some(p => p.indexOf('/channels/%23test/messages') === 0), 'should not request messages without selection');
+  });
+}
+
+// ===== SUMMARY =====
 console.log(`\n${'═'.repeat(40)}`);
 console.log(`  Frontend helpers: ${passed} passed, ${failed} failed`);
 console.log(`${'═'.repeat(40)}\n`);

@@ -312,7 +312,9 @@
       if (!el) {
         el = document.createElement('div');
         el.id = 'chAddNotice';
-        document.querySelector('.ch-add-channel').insertAdjacentElement('afterend', el);
+        const addWrap = document.querySelector('.ch-add-channel');
+        if (!addWrap) return;
+        addWrap.insertAdjacentElement('afterend', el);
       }
       el.className = 'ch-add-notice ch-add-notice--' + type;
       el.textContent = msg;
@@ -344,8 +346,12 @@
         btn.disabled = false; btn.textContent = '+';
       }
     }
-    document.getElementById('chAddBtn').addEventListener('click', addChannel);
-    document.getElementById('chAddInput').addEventListener('keydown', e => { if (e.key === 'Enter') addChannel(); });
+    const addBtn = document.getElementById('chAddBtn');
+    const addInput = document.getElementById('chAddInput');
+    if (addBtn && addInput) {
+      addBtn.addEventListener('click', addChannel);
+      addInput.addEventListener('keydown', e => { if (e.key === 'Enter') addChannel(); });
+    }
 
     // Event delegation for channel selection (touch-friendly)
     document.getElementById('chList').addEventListener('click', (e) => {
