@@ -100,30 +100,6 @@ function truncate(str, len) {
   return str.length > len ? str.slice(0, len) + '…' : str;
 }
 
-function formatEngineBadge(engine) {
-  if (!engine) return '';
-  return ` <span class="engine-badge">${engine}</span>`;
-}
-
-function formatVersionBadge(version, commit, engine) {
-  if (!version && !commit && !engine) return '';
-  var port = (typeof location !== 'undefined' && location.port) || '';
-  var isProd = !port || port === '80' || port === '443';
-  var GH = 'https://github.com/Kpa-clawbot/meshcore-analyzer';
-  var parts = [];
-  if (version && isProd) {
-    var vTag = version.charAt(0) === 'v' ? version : 'v' + version;
-    parts.push('<a href="' + GH + '/releases/tag/' + vTag + '" target="_blank" rel="noopener">' + vTag + '</a>');
-  }
-  if (commit && commit !== 'unknown') {
-    var short = commit.length > 7 ? commit.slice(0, 7) : commit;
-    parts.push('<a href="' + GH + '/commit/' + commit + '" target="_blank" rel="noopener">' + short + '</a>');
-  }
-  if (engine) parts.push('[' + engine + ']');
-  if (parts.length === 0) return '';
-  return ' <span class="version-badge">' + parts.join(' · ') + '</span>';
-}
-
 // --- Favorites ---
 const FAV_KEY = 'meshcore-favorites';
 function getFavorites() {
@@ -300,13 +276,14 @@ function registerPage(name, mod) { pages[name] = mod; }
 let currentPage = null;
 
 function goto(path) {
-  location.hash = '#' + (path.startsWith('/') ? path : '/' + path);
+  history.pushState(null, '', path);
+  navigate();
 }
 window.goto = goto;
 
 function navigate() {
-  const hash = (location.hash || '').replace(/^#\/?/, '') || 'home';
-  const route = hash.split('?')[0];
+  const raw = location.pathname.replace(/^\//, '') || 'home';
+  const route = raw.split('?')[0];
 
   // Handle parameterized routes: nodes/<pubkey> → nodes page + select
   let basePage = route;
@@ -349,7 +326,7 @@ function navigate() {
   }
 }
 
-window.addEventListener('hashchange', navigate);
+window.addEventListener('popstate', navigate);
 let _themeRefreshTimer = null;
 window.addEventListener('theme-changed', () => {
   if (_themeRefreshTimer) clearTimeout(_themeRefreshTimer);
@@ -569,7 +546,7 @@ window.addEventListener('DOMContentLoaded', () => {
         const pktList = packets.packets || packets;
         if (Array.isArray(pktList)) {
           for (const p of pktList.slice(0, 5)) {
-            html += `<div class="search-result-item" onclick="location.hash='#/packets/${p.packet_hash || p.hash || p.id}';document.getElementById('searchOverlay').classList.add('hidden')">
+            html += `<div class="search-result-item" onclick="goto('/packets/${p.packet_hash || p.hash || p.id}');document.getElementById('searchOverlay').classList.add('hidden')">
               <span class="search-result-type">Packet</span>${truncate(p.packet_hash || '', 16)} — ${payloadTypeName(p.payload_type)}</div>`;
           }
         }
@@ -602,9 +579,15 @@ window.addEventListener('DOMContentLoaded', () => {
       const stats = await api('/stats', { ttl: CLIENT_TTL.stats });
       const el = document.getElementById('navStats');
       if (el) {
-        el.innerHTML = `<span class="stat-val">${stats.totalPackets}</span> pkts · <span class="stat-val">${stats.totalNodes}</span> nodes · <span class="stat-val">${stats.totalObservers}</span> obs${formatVersionBadge(stats.version, stats.commit, stats.engine)}`;
-        el.querySelectorAll('.stat-val').forEach(s => s.classList.add('updated'));
-        setTimeout(() => { el.querySelectorAll('.stat-val').forEach(s => s.classList.remove('updated')); }, 600);
+        const vals = el.querySelectorAll('.stat-val');
+        if (vals.length === 3) {
+          // Update text only — avoids innerHTML replacement which causes hover flicker on other elements
+          vals[0].textContent = stats.totalPackets;
+          vals[1].textContent = stats.totalNodes;
+          vals[2].textContent = stats.totalObservers;
+        } else {
+          el.innerHTML = `<span class="stat-val">${stats.totalPackets}</span> pkts <span class="stat-val">${stats.totalNodes}</span> nodes <span class="stat-val">${stats.totalObservers}</span> obs`;
+        }
       }
     } catch {}
   }
@@ -690,8 +673,13 @@ window.addEventListener('DOMContentLoaded', () => {
       }
     }
   }).catch(() => { window.SITE_CONFIG = null; }).finally(() => {
-    if (!location.hash || location.hash === '#/') location.hash = '#/home';
-    else navigate();
+    // Redirect legacy hash-based URLs (e.g. /#/packets/abc) to clean paths (/packets/abc)
+    if (location.hash && location.hash.startsWith('#/')) {
+      history.replaceState(null, '', location.hash.slice(1) + location.search);
+    } else if (location.pathname === '/' || location.pathname === '') {
+      history.replaceState(null, '', '/home');
+    }
+    navigate();
   });
 });
 

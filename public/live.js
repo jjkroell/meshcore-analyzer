@@ -16,15 +16,14 @@
   let showGhostHops = localStorage.getItem('live-ghost-hops') !== 'false';
   let realisticPropagation = localStorage.getItem('live-realistic-propagation') === 'true';
   let showOnlyFavorites = localStorage.getItem('live-favorites-only') === 'true';
-  let matrixMode = localStorage.getItem('live-matrix-mode') === 'true';
-  let matrixRain = localStorage.getItem('live-matrix-rain') === 'true';
+  const matrixMode = false;
+  const matrixRain = false;
   let rainCanvas = null, rainCtx = null, rainDrops = [], rainRAF = null;
   const propagationBuffer = new Map(); // hash -> {timer, packets[]}
   let _onResize = null;
   let _timelineRefreshInterval = null;
   let _lcdClockInterval = null;
   let _rateCounterInterval = null;
-  let _pruneInterval = null;
 
   // === VCR State Machine ===
   const VCR = {
@@ -130,11 +129,14 @@
     loadNodes(targetTs);
 
     // Fetch packets from scrub point forward (ASC order, no limit clipping from the wrong end)
-    fetch(`/api/packets?limit=10000&grouped=false&expand=observations&since=${encodeURIComponent(fetchFrom)}&order=asc`)
+    fetch(`/api/packets?limit=10000&grouped=false&since=${encodeURIComponent(fetchFrom)}&order=asc`)
       .then(r => r.json())
       .then(data => {
-        const pkts = data.packets || [];
-        const replayEntries = expandToBufferEntries(pkts);
+        const pkts = data.packets || []; // already ASC from server
+        const replayEntries = pkts.map(p => ({
+          ts: new Date(p.timestamp || p.created_at).getTime(),
+          pkt: dbPacketToLive(p)
+        }));
         if (replayEntries.length === 0) {
           vcrSetMode('PAUSED');
           return;
@@ -186,14 +188,16 @@
     // Fetch packets from DB for the time window
     const now = Date.now();
     const from = new Date(now - ms).toISOString();
-    fetch(`/api/packets?limit=2000&grouped=false&expand=observations&since=${encodeURIComponent(from)}`)
+    fetch(`/api/packets?limit=2000&grouped=false&since=${encodeURIComponent(from)}`)
       .then(r => r.json())
       .then(data => {
         const pkts = (data.packets || []).reverse(); // oldest first
         // Prepend to buffer (avoid duplicates by ID)
         const existingIds = new Set(VCR.buffer.map(b => b.pkt.id).filter(Boolean));
-        const filtered = pkts.filter(p => !existingIds.has(p.id));
-        const newEntries = expandToBufferEntries(filtered);
+        const newEntries = pkts.filter(p => !existingIds.has(p.id)).map(p => ({
+          ts: new Date(p.timestamp || p.created_at).getTime(),
+          pkt: dbPacketToLive(p)
+        }));
         VCR.buffer = [...newEntries, ...VCR.buffer];
         VCR.playhead = 0;
         VCR.speed = 1;
@@ -206,45 +210,30 @@
 
   function startReplay() {
     stopReplay();
-
-    // Pre-aggregate VCR buffer by hash so each tick renders a full tree
-    const hashGroups = new Map();
-    for (const entry of VCR.buffer) {
-      const hash = entry.pkt.hash || ('nohash-' + hashGroups.size);
-      if (hashGroups.has(hash)) {
-        hashGroups.get(hash).packets.push(entry.pkt);
-        if (entry.ts > hashGroups.get(hash).ts) hashGroups.get(hash).ts = entry.ts;
-      } else {
-        hashGroups.set(hash, { packets: [entry.pkt], ts: entry.ts });
-      }
-    }
-    const replayGroups = [...hashGroups.values()].sort((a, b) => a.ts - b.ts);
-    console.log('[vcr] ' + replayGroups.length + ' groups from ' + VCR.buffer.length + ' buffer entries. Top 3:', replayGroups.slice(0,3).map(g => g.packets.length + ' obs'));
-    let groupIdx = 0;
-
     function tick() {
       if (VCR.mode !== 'REPLAY') return;
-      if (groupIdx >= replayGroups.length) {
+      if (VCR.playhead >= VCR.buffer.length) {
+        // Try to fetch the next page before going live
         fetchNextReplayPage().then(hasMore => {
-          if (hasMore) vcrResumeLive();
+          if (hasMore) tick();
           else vcrResumeLive();
         });
         return;
       }
-      const group = replayGroups[groupIdx];
-      renderPacketTree(group.packets);
-      updateVCRClock(group.ts);
+      const entry = VCR.buffer[VCR.playhead];
+      animatePacket(entry.pkt);
+      updateVCRClock(entry.ts);
       updateVCRLcd();
-      VCR.playhead = Math.min(VCR.buffer.length, VCR.playhead + group.packets.length);
+      VCR.playhead++;
       updateVCRUI();
       updateTimelinePlayhead();
-      groupIdx++;
 
-      let delay = 300;
-      if (groupIdx < replayGroups.length) {
-        const nextGroup = replayGroups[groupIdx];
-        const realGap = nextGroup.ts - group.ts;
-        delay = Math.min(2000, Math.max(100, realGap)) / VCR.speed;
+      // Calculate delay to next packet
+      let delay = 150; // default
+      if (VCR.playhead < VCR.buffer.length) {
+        const nextEntry = VCR.buffer[VCR.playhead];
+        const realGap = nextEntry.ts - entry.ts;
+        delay = Math.min(2000, Math.max(80, realGap)) / VCR.speed;
       }
       VCR.replayTimer = setTimeout(tick, delay);
     }
@@ -256,12 +245,16 @@
     const last = VCR.buffer[VCR.buffer.length - 1];
     if (!last) return Promise.resolve(false);
     const since = new Date(last.ts + 1).toISOString(); // +1ms to avoid dupe
-    return fetch(`/api/packets?limit=10000&grouped=false&expand=observations&since=${encodeURIComponent(since)}&order=asc`)
+    return fetch(`/api/packets?limit=10000&grouped=false&since=${encodeURIComponent(since)}&order=asc`)
       .then(r => r.json())
       .then(data => {
         const pkts = data.packets || [];
         if (pkts.length === 0) return false;
-        const newEntries = expandToBufferEntries(pkts);
+        const newEntries = pkts.map(p => ({
+          ts: new Date(p.timestamp || p.created_at).getTime(),
+          pkt: dbPacketToLive(p)
+        }));
+        // Append to buffer, playhead stays where it is (at the end, about to read new entries)
         VCR.buffer = VCR.buffer.concat(newEntries);
         return true;
       })
@@ -417,32 +410,10 @@
     return {
       id: pkt.id, hash: pkt.hash,
       raw: pkt.raw_hex,
-      path_json: pkt.path_json,
       _ts: new Date(pkt.timestamp || pkt.created_at).getTime(),
       decoded: { header: { payloadTypeName: typeName }, payload: raw, path: { hops } },
       snr: pkt.snr, rssi: pkt.rssi, observer: pkt.observer_name
     };
-  }
-
-  // Expand a DB packet (with optional observations[]) into VCR buffer entries
-  function expandToBufferEntries(pkts) {
-    const entries = [];
-    for (const p of pkts) {
-      if (p.observations && p.observations.length > 0) {
-        for (const obs of p.observations) {
-          entries.push({
-            ts: new Date(obs.timestamp || p.timestamp || p.created_at).getTime(),
-            pkt: dbPacketToLive(Object.assign({}, p, obs, { hash: p.hash, raw_hex: p.raw_hex, decoded_json: p.decoded_json }))
-          });
-        }
-      } else {
-        entries.push({
-          ts: new Date(p.timestamp || p.created_at).getTime(),
-          pkt: dbPacketToLive(p)
-        });
-      }
-    }
-    return entries;
   }
 
   // Buffer a packet from WS
@@ -488,12 +459,12 @@
           const entry = { packets: [pkt], timer: setTimeout(() => {
             const buffered = propagationBuffer.get(hash);
             propagationBuffer.delete(hash);
-            if (buffered) renderPacketTree(buffered.packets);
+            if (buffered) animateRealisticPropagation(buffered.packets);
           }, PROPAGATION_BUFFER_MS) };
           propagationBuffer.set(hash, entry);
         }
       } else {
-        renderPacketTree([pkt]);
+        animatePacket(pkt);
       }
       updateTimeline();
     } else if (VCR.mode === 'PAUSED') {
@@ -644,20 +615,11 @@
             <div class="live-stat-pill rate-pill"><span id="livePktRate">0</span>/min</div>
           </div>
           <div class="live-toggles">
-            <label><input type="checkbox" id="liveHeatToggle" checked aria-describedby="heatDesc"> Heat</label>
-            <span id="heatDesc" class="sr-only">Overlay a density heat map on the mesh nodes</span>
-            <label><input type="checkbox" id="liveGhostToggle" checked aria-describedby="ghostDesc"> Ghosts</label>
-            <span id="ghostDesc" class="sr-only">Show interpolated ghost markers for unknown hops</span>
-            <label><input type="checkbox" id="liveRealisticToggle" aria-describedby="realisticDesc"> Realistic</label>
-            <span id="realisticDesc" class="sr-only">Buffer packets by hash and animate all paths simultaneously</span>
-            <label><input type="checkbox" id="liveMatrixToggle" aria-describedby="matrixDesc"> Matrix</label>
-            <span id="matrixDesc" class="sr-only">Animate packet hex bytes flowing along paths like the Matrix</span>
-            <label><input type="checkbox" id="liveMatrixRainToggle" aria-describedby="rainDesc"> Rain</label>
-            <span id="rainDesc" class="sr-only">Matrix rain overlay — packets fall as hex columns</span>
-            <label><input type="checkbox" id="liveAudioToggle" aria-describedby="audioDesc"> 🎵 Audio</label>
-            <span id="audioDesc" class="sr-only">Sonify packets — turn raw bytes into generative music</span>
-            <label><input type="checkbox" id="liveFavoritesToggle" aria-describedby="favDesc"> ⭐ Favorites</label>
-            <span id="favDesc" class="sr-only">Show only favorited and claimed nodes</span>
+            <label class="live-toggle-tip" data-tip="Overlays a colour density heatmap on the map — brighter areas indicate higher concentrations of active mesh nodes"><input type="checkbox" id="liveHeatToggle" checked> Heat</label>
+            <label class="live-toggle-tip" data-tip="When a packet travels through a relay node with no GPS position, a ghost marker is placed at an estimated midpoint along the path so the route can still be visualised"><input type="checkbox" id="liveGhostToggle" checked> Ghosts</label>
+            <label class="live-toggle-tip" data-tip="Groups packets by their unique hash and animates all observed relay paths at the same time — accurately shows how a single packet propagated across the entire mesh simultaneously"><input type="checkbox" id="liveRealisticToggle"> Realistic</label>
+            <label class="live-toggle-tip" data-tip="Converts incoming packet data into generative music in real time — each packet type and byte pattern produces a unique tone. Use the BPM and volume sliders to tune the sound"><input type="checkbox" id="liveAudioToggle"> 🎵 Audio</label>
+            <label class="live-toggle-tip" data-tip="Filters the map to show only nodes you have starred as favourites or claimed as your own — useful for monitoring specific devices"><input type="checkbox" id="liveFavoritesToggle"> ⭐ Favourites</label>
           </div>
           <div class="audio-controls hidden" id="audioControls">
             <label class="audio-slider-label">Voice <select id="audioVoiceSelect" class="audio-voice-select"></select></label>
@@ -721,8 +683,8 @@
       </div>`;
 
     // Fetch configurable map defaults (#115)
-    let mapCenter = [37.45, -122.0];
-    let mapZoom = 9;
+    let mapCenter = [49.59, -124.18];
+    let mapZoom = 7;
     try {
       const mapCfg = await (await fetch('/api/config/map')).json();
       if (Array.isArray(mapCfg.center) && mapCfg.center.length === 2) mapCenter = mapCfg.center;
@@ -779,10 +741,22 @@
         const parsed = JSON.parse(replayData);
         const packets = Array.isArray(parsed) ? parsed : [parsed];
         vcrPause(); // suppress live packets
-        setTimeout(() => renderPacketTree(packets, true), 1500);
+        if (packets.length > 1 && packets[0].hash) {
+          // Multiple observations — use realistic propagation (animate all paths at once)
+          setTimeout(() => {
+            if (typeof animateRealisticPropagation === 'function') {
+              animateRealisticPropagation(packets);
+            } else {
+              // Fallback: stagger animations
+              packets.forEach((p, i) => setTimeout(() => animatePacket(p), i * 400));
+            }
+          }, 1500);
+        } else {
+          setTimeout(() => animatePacket(packets[0]), 1500);
+        }
       } catch {}
     } else {
-      // replayRecent(); // disabled — live page starts empty, fills from WS
+      replayRecent();
     }
 
     map.on('zoomend', rescaleMarkers);
@@ -817,41 +791,6 @@
       localStorage.setItem('live-favorites-only', showOnlyFavorites);
       applyFavoritesFilter();
     });
-
-    const matrixToggle = document.getElementById('liveMatrixToggle');
-    matrixToggle.checked = matrixMode;
-    matrixToggle.addEventListener('change', (e) => {
-      matrixMode = e.target.checked;
-      localStorage.setItem('live-matrix-mode', matrixMode);
-      applyMatrixTheme(matrixMode);
-      if (matrixMode) {
-        hideHeatMap();
-        const ht = document.getElementById('liveHeatToggle');
-        if (ht) { ht.checked = false; ht.disabled = true; }
-      } else {
-        const ht = document.getElementById('liveHeatToggle');
-        if (ht) { ht.disabled = false; }
-      }
-    });
-    applyMatrixTheme(matrixMode);
-    if (matrixMode) {
-      hideHeatMap();
-      const ht = document.getElementById('liveHeatToggle');
-      if (ht) { ht.checked = false; ht.disabled = true; }
-    } else {
-      // Ensure heat toggle is enabled if matrix mode is off (recover from stale state)
-      const ht = document.getElementById('liveHeatToggle');
-      if (ht) { ht.disabled = false; }
-    }
-
-    const rainToggle = document.getElementById('liveMatrixRainToggle');
-    rainToggle.checked = matrixRain;
-    rainToggle.addEventListener('change', (e) => {
-      matrixRain = e.target.checked;
-      localStorage.setItem('live-matrix-rain', matrixRain);
-      if (matrixRain) startMatrixRain(); else stopMatrixRain();
-    });
-    if (matrixRain) startMatrixRain();
 
     // Audio toggle
     const audioToggle = document.getElementById('liveAudioToggle');
@@ -1106,10 +1045,7 @@
       if (VCR.mode === 'LIVE') updateVCRClock(Date.now());
     }, 1000);
 
-    // Prune stale nodes every 60 seconds
-    _pruneInterval = setInterval(pruneStaleNodes, 60000);
-
-    // Auto-hide nav with pin toggle (#62)
+    // Keep nav fixed so it overlays the map
     const topNav = document.querySelector('.top-nav');
     if (topNav) { topNav.style.position = 'fixed'; topNav.style.width = '100%'; topNav.style.zIndex = '1100'; }
   }
@@ -1186,7 +1122,7 @@
         const regions = [...new Set(observers.map(o => o.iata).filter(Boolean))];
         html += `<h4 style="font-size:12px;margin:12px 0 6px;color:var(--text-muted);">Heard By${regions.length ? ' — Regions: ' + regions.join(', ') : ''}</h4>
           <div style="font-size:11px;">` +
-          observers.map(o => `<div style="padding:2px 0;"><a href="#/observers/${encodeURIComponent(o.observer_id)}" style="color:var(--accent);text-decoration:none;">${escapeHtml(o.observer_name || o.observer_id.slice(0, 12))}${o.iata ? ' (' + escapeHtml(o.iata) + ')' : ''}</a> — ${o.packetCount || o.count || 0} pkts</div>`).join('') +
+          observers.map(o => `<div style="padding:2px 0;"><a href="/observers/${encodeURIComponent(o.observer_id)}" style="color:var(--accent);text-decoration:none;">${escapeHtml(o.observer_name || o.observer_id.slice(0, 12))}${o.iata ? ' (' + escapeHtml(o.iata) + ')' : ''}</a> — ${o.packetCount || o.count || 0} pkts</div>`).join('') +
           '</div>';
       }
 
@@ -1207,6 +1143,10 @@
       </div></div>`;
 
       content.innerHTML = html;
+      bindFavStars(content, () => {
+        // Refresh the favourite toggle filter if active
+        if (showOnlyFavorites) applyFavoritesFilter();
+      });
 
       // Fetch paths asynchronously
       api('/nodes/' + encodeURIComponent(n.public_key) + '/paths', { ttl: 300 }).then(pathData => {
@@ -1223,7 +1163,7 @@
               const isThis = h.pubkey === n.public_key || (h.prefix && n.public_key.toLowerCase().startsWith(h.prefix.toLowerCase()));
               const name = escapeHtml(h.name || h.prefix);
               if (isThis) return `<strong style="color:var(--accent)">${name}</strong>`;
-              return h.pubkey ? `<a href="#/nodes/${h.pubkey}" style="color:var(--text);text-decoration:none">${name}</a>` : name;
+              return h.pubkey ? `<a href="/nodes/${h.pubkey}" style="color:var(--text);text-decoration:none">${name}</a>` : name;
             }).join(' → ');
             return `<div style="padding:3px 0;font-size:11px;line-height:1.4">${chain} <span style="color:var(--text-muted)">(${p.count}×)</span></div>`;
           }).join('');
@@ -1267,18 +1207,14 @@
       const resp = await fetch(url);
       const nodes = await resp.json();
       const list = Array.isArray(nodes) ? nodes : (nodes.nodes || []);
-      var now = Date.now();
       list.forEach(n => {
-        if (n.lat != null && n.lon != null && !(n.lat === 0 && n.lon === 0)) {
-          n._fromAPI = true;
-          n._liveSeen = now;
+        if (n.lat != null && n.lon != null && !(n.lat === 0 && n.lon === 0) && isInBoundary(n.lat, n.lon)) {
+          if (obsIds.has((n.public_key || '').toLowerCase())) n.role = 'observer';
           nodeData[n.public_key] = n;
           addNodeMarker(n);
         }
       });
       const _el2 = document.getElementById('liveNodeCount'); if (_el2) _el2.textContent = Object.keys(nodeMarkers).length;
-      // Initialize shared HopResolver with loaded nodes
-      if (window.HopResolver) HopResolver.init(list);
     } catch (e) { console.error('Failed to load nodes:', e); }
   }
 
@@ -1288,7 +1224,6 @@
     nodeMarkers = {};
     nodeData = {};
     nodeActivity = {};
-    if (window.HopResolver) HopResolver.init([]);
     if (heatLayer) { map.removeLayer(heatLayer); heatLayer = null; }
   }
 
@@ -1334,79 +1269,42 @@
   function rebuildFeedList() {
     const feed = document.getElementById('liveFeed');
     if (!feed) return;
-    feed.querySelectorAll('.live-feed-item').forEach(el => el.remove());
-    feedDedup.clear();
-
-    // Aggregate VCR buffer by hash, then create one feed item per unique hash
-    const byHash = new Map();
-    for (const entry of VCR.buffer) {
+    const feedBody = document.getElementById('liveFeedBody') || feed;
+    // Remove all feed items but keep the hide button and resize handle
+    feedBody.querySelectorAll('.live-feed-item').forEach(el => el.remove());
+    // Re-add from VCR buffer (most recent first, up to 25)
+    const entries = VCR.buffer.slice(-100).reverse();
+    let count = 0;
+    for (const entry of entries) {
+      if (count >= 25) break;
       const pkt = entry.pkt;
-      const hash = pkt.hash;
-      if (hash && byHash.has(hash)) {
-        const existing = byHash.get(hash);
-        existing.packets.push(pkt);
-        existing.count++;
-        if (entry.ts > existing.latestTs) { existing.latestTs = entry.ts; existing.latestPkt = pkt; }
-      } else {
-        byHash.set(hash || ('nohash-' + byHash.size), { packets: [pkt], count: 1, latestTs: entry.ts, latestPkt: pkt, hash });
-      }
-    }
-
-    // Sort by latest timestamp desc, take top 25
-    const sorted = [...byHash.values()].sort((a, b) => b.latestTs - a.latestTs).slice(0, 25);
-
-    for (const group of sorted) {
-      const pkt = Object.assign({}, group.latestPkt, { observation_count: group.count });
+      if (showOnlyFavorites && !packetInvolvesFavorite(pkt)) continue;
+      if (!packetInBoundary(pkt)) continue;
       const decoded = pkt.decoded || {};
       const header = decoded.header || {};
       const payload = decoded.payload || {};
       const typeName = header.payloadTypeName || 'UNKNOWN';
       const icon = PAYLOAD_ICONS[typeName] || '📦';
+      const hops = decoded.path?.hops || [];
       const color = TYPE_COLORS[typeName] || '#6b7280';
-
-      // Find longest path across all observations for display
-      let longestHops = decoded.path?.hops || [];
-      for (const op of group.packets) {
-        let opHops = [];
-        if (op.path_json) {
-          try { opHops = typeof op.path_json === 'string' ? JSON.parse(op.path_json) : op.path_json; } catch {}
-        } else if (op.decoded?.path?.hops) {
-          opHops = op.decoded.path.hops;
-        }
-        if (opHops.length > longestHops.length) longestHops = opHops;
-      }
-
-      // Create feed item directly with correct count
-      const text = payload.text || payload.name || '';
-      const preview = text ? ' ' + (text.length > 35 ? text.slice(0, 35) + '…' : text) : '';
-      const hopStr = longestHops.length ? `<span class="feed-hops">${longestHops.length}⇢</span>` : '';
-      const obsBadge = group.count > 1 ? `<span class="badge badge-obs" style="font-size:10px;margin-left:4px">👁 ${group.count}</span>` : '';
-
-      const item = document.createElement('div');
-      item.className = 'live-feed-item';
-      item.setAttribute('tabindex', '0');
-      item.setAttribute('role', 'button');
-      if (group.hash) item.setAttribute('data-hash', group.hash);
-      item.style.cursor = 'pointer';
-      item.innerHTML = `
-        <span class="feed-icon" style="color:${color}">${icon}</span>
-        <span class="feed-type" style="color:${color}">${typeName}</span>
-        ${hopStr}${obsBadge}
-        <span class="feed-text">${escapeHtml(preview)}</span>
-        <span class="feed-time">${new Date(group.latestTs || Date.now()).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit',second:'2-digit'})}</span>
-      `;
-      item.addEventListener('click', () => showFeedCard(item, pkt, color));
-      feed.appendChild(item);
-
-      // Register in dedup map so replay and live updates work
-      if (group.hash) {
-        feedDedup.set(group.hash, { element: item, count: group.count, pkt, packets: group.packets, createdAt: Date.now() });
-      }
+      addFeedItemDOM(icon, typeName, payload, hops, color, pkt, feedBody);
+      count++;
     }
   }
 
   function applyFavoritesFilter() {
-    // Node markers always stay visible — only rebuild the feed list
+    const favs = getFavorites();
+    for (const [key, marker] of Object.entries(nodeMarkers)) {
+      const show = !showOnlyFavorites || favs.includes(key);
+      const isOnMap = nodesLayer.hasLayer(marker);
+      if (show && !isOnMap) {
+        marker.addTo(nodesLayer);
+        if (marker._glowMarker) marker._glowMarker.addTo(nodesLayer);
+      } else if (!show && isOnMap) {
+        nodesLayer.removeLayer(marker);
+        if (marker._glowMarker) nodesLayer.removeLayer(marker._glowMarker);
+      }
+    }
     rebuildFeedList();
   }
 
@@ -1438,6 +1336,12 @@
     marker._baseSize = size;
     nodeMarkers[n.public_key] = marker;
 
+    // Hide if favorites filter is active and node is not a favorite
+    if (showOnlyFavorites && !getFavorites().includes(n.public_key)) {
+      nodesLayer.removeLayer(marker);
+      nodesLayer.removeLayer(glow);
+    }
+
     // Apply matrix tint if active
     if (matrixMode) {
       marker._matrixPrevColor = color;
@@ -1462,109 +1366,19 @@
     }
   }
 
-  // Prune nodes not seen within their role's health threshold.
-  // API-loaded nodes (_fromAPI) are dimmed instead of removed — matches static map behavior.
-  // WS-only nodes (dynamically added from ADVERTs) are removed to prevent memory leaks.
-  function pruneStaleNodes() {
-    var now = Date.now();
-    var pruned = false;
-    for (var key in nodeMarkers) {
-      var n = nodeData[key];
-      if (!n) continue;
-      var lastSeen = n._liveSeen || (n.last_heard ? new Date(n.last_heard).getTime() : null) || (n.last_seen ? new Date(n.last_seen).getTime() : null);
-      if (lastSeen == null) continue;
-      var status = window.getNodeStatus ? getNodeStatus(n.role || 'unknown', lastSeen) : 'active';
-      var marker = nodeMarkers[key];
-      if (status === 'stale') {
-        if (n._fromAPI) {
-          // API-loaded nodes: dim instead of removing (consistent with static map)
-          if (marker && !marker._staleDimmed) {
-            marker._staleDimmed = true;
-            marker.setStyle({ fillOpacity: 0.25, opacity: 0.15 });
-            if (marker._glowMarker) marker._glowMarker.setStyle({ fillOpacity: 0.04 });
-          }
-        } else {
-          // WS-only nodes: remove to prevent unbounded memory growth
-          if (marker) {
-            if (nodesLayer) {
-              try { nodesLayer.removeLayer(marker); } catch (e) {}
-              if (marker._glowMarker) try { nodesLayer.removeLayer(marker._glowMarker); } catch (e) {}
-            }
-          }
-          delete nodeMarkers[key];
-          delete nodeData[key];
-          pruned = true;
-        }
-      } else if (marker && marker._staleDimmed) {
-        // Node became active again — restore full opacity
-        marker._staleDimmed = false;
-        var isRepeater = n.role === 'repeater';
-        marker.setStyle({ fillOpacity: 0.85, opacity: isRepeater ? 0.6 : 0.3 });
-        if (marker._glowMarker) marker._glowMarker.setStyle({ fillOpacity: 0.12 });
-      }
-    }
-    if (pruned) {
-      var _el2 = document.getElementById('liveNodeCount');
-      if (_el2) _el2.textContent = Object.keys(nodeMarkers).length;
-      if (window.HopResolver) HopResolver.init(Object.values(nodeData));
-    }
-  }
-
-  // Expose for testing
-  window._livePruneStaleNodes = pruneStaleNodes;
-  window._liveNodeMarkers = function() { return nodeMarkers; };
-  window._liveNodeData = function() { return nodeData; };
-
   async function replayRecent() {
     try {
-      const resp = await fetch('/api/packets?limit=8&groupByHash=true');
+      const resp = await fetch('/api/packets?limit=8&grouped=false');
       const data = await resp.json();
-      const groups = (data.packets || []).reverse();
-
-      // Fetch all observations first, then stagger rendering
-      const allGroups = [];
-      for (let i = 0; i < groups.length; i++) {
-        const group = groups[i];
-        let observations = [];
-        try {
-          const detail = await fetch('/api/packets/' + encodeURIComponent(group.hash));
-          const detailData = await detail.json();
-          observations = detailData.observations || [];
-        } catch {}
-
-        const livePackets = observations.map(obs => {
-          const livePkt = dbPacketToLive(Object.assign({}, group, obs, {
-            hash: group.hash,
-            raw_hex: group.raw_hex,
-            decoded_json: group.decoded_json,
-          }));
-          livePkt._ts = new Date(obs.timestamp || group.first_seen || Date.now()).getTime();
-          return livePkt;
-        });
-
-        if (livePackets.length === 0) {
-          const livePkt = dbPacketToLive(group);
-          livePkt._ts = new Date(group.first_seen || group.latest || Date.now()).getTime();
-          livePackets.push(livePkt);
-        }
-
-        livePackets.forEach(lp => VCR.buffer.push({ ts: lp._ts, pkt: lp }));
-        allGroups.push(livePackets);
-      }
-
-      // Render with real timing gaps between packets
-      // Sort by earliest timestamp
-      allGroups.sort((a, b) => (a[0]?._ts || 0) - (b[0]?._ts || 0));
-      let lastTs = allGroups[0]?.[0]?._ts || Date.now();
-      for (let i = 0; i < allGroups.length; i++) {
-        const groupTs = allGroups[i][0]?._ts || lastTs;
-        // Real gap between this packet and the previous, capped at 3s for UX
-        const gap = i === 0 ? 0 : Math.min(3000, Math.max(200, groupTs - lastTs));
-        await new Promise(resolve => setTimeout(resolve, gap));
-        renderPacketTree(allGroups[i]);
-        lastTs = groupTs;
-      }
-      updateTimeline();
+      const pkts = (data.packets || []).reverse();
+      pkts.forEach((pkt, i) => {
+        const livePkt = dbPacketToLive(pkt);
+        livePkt._ts = new Date(pkt.timestamp || pkt.created_at).getTime();
+        const ts = livePkt._ts;
+        VCR.buffer.push({ ts, pkt: livePkt });
+        setTimeout(() => animatePacket(livePkt), i * 400);
+      });
+      setTimeout(updateTimeline, pkts.length * 400 + 200);
     } catch {}
   }
 
@@ -1626,173 +1440,224 @@
     ws.onerror = () => {};
   }
 
-  // === UNIFIED PACKET RENDERER ===
-  // ONE function for all rendering: WS arrival, DB load, replay button, VCR playback.
-  // Takes an array of observations (same hash) and renders the complete path tree.
-  function renderPacketTree(packets, isReplay) {
-    if (!packets || !packets.length) return;
-    const first = packets[0];
-    const decoded = first.decoded || {};
+  function animatePacket(pkt) {
+    packetCount++;
+    pktTimestamps.push(Date.now());
+    const _el = document.getElementById('livePktCount'); if (_el) _el.textContent = packetCount;
+
+    const decoded = pkt.decoded || {};
     const header = decoded.header || {};
     const payload = decoded.payload || {};
     const typeName = header.payloadTypeName || 'UNKNOWN';
     const icon = PAYLOAD_ICONS[typeName] || '📦';
+    const hops = decoded.path?.hops || [];
     const color = TYPE_COLORS[typeName] || '#6b7280';
-    const obsCount = packets.length;
 
-    // --- Counters ---
-    if (!isReplay) {
-      packetCount += obsCount;
-      pktTimestamps.push(Date.now());
-      const _el = document.getElementById('livePktCount'); if (_el) _el.textContent = packetCount;
+    if (window.MeshAudio) MeshAudio.sonifyPacket(pkt);
+    addFeedItem(icon, typeName, payload, hops, color, pkt);
+    addRainDrop(pkt);
+    // Spawn extra rain columns for multiple observations with varied hop counts
+    const obsCount = pkt.observation_count || (pkt.packet && pkt.packet.observation_count) || 1;
+    const baseHops = (pkt.decoded?.path?.hops || []).length || 1;
+    for (let i = 1; i < obsCount; i++) {
+      const variedHops = Math.max(1, baseHops + Math.floor(Math.random() * 3) - 1); // ±1 hop
+      setTimeout(() => addRainDrop(pkt, variedHops), i * 150);
     }
 
-    // --- Favorites filter ---
-    if (showOnlyFavorites && !packets.some(function(p) { return packetInvolvesFavorite(p); })) return;
+    // Favorites filter: skip animation if packet doesn't involve a favorited node
+    if (showOnlyFavorites && !packetInvolvesFavorite(pkt)) return;
 
-    // --- Ensure ADVERT nodes appear on map ---
-    for (var pi = 0; pi < packets.length; pi++) {
-      var pkt = packets[pi];
-      var d = pkt.decoded || {};
-      var h = d.header || {};
-      var p = d.payload || {};
+    // Boundary filter: skip if packet doesn't involve any node inside boundary
+    if (!packetInBoundary(pkt)) return;
+
+    // If ADVERT, ensure node appears on map (only if inside boundary)
+    if (typeName === 'ADVERT' && payload.pubKey) {
+      const key = payload.pubKey;
+      if (!nodeMarkers[key] && payload.lat != null && payload.lon != null && !(payload.lat === 0 && payload.lon === 0) && isInBoundary(payload.lat, payload.lon)) {
+        const n = { public_key: key, name: payload.name || key.slice(0,8), role: payload.role || 'unknown', lat: payload.lat, lon: payload.lon };
+        nodeData[key] = n;
+        addNodeMarker(n);
+        const _el2 = document.getElementById('liveNodeCount'); if (_el2) _el2.textContent = Object.keys(nodeMarkers).length;
+      }
+    }
+
+    const hopPositions = resolveHopPositions(hops, payload);
+    if (hopPositions.length === 0) return;
+    if (hopPositions.length === 1) { pulseNode(hopPositions[0].key, hopPositions[0].pos, typeName); return; }
+    animatePath(hopPositions, typeName, color, pkt.raw);
+  }
+
+  function animateRealisticPropagation(packets) {
+    if (!packets.length) return;
+    const first = packets[0];
+    const decoded = first.decoded || {};
+    const header = decoded.header || {};
+    const typeName = header.payloadTypeName || 'UNKNOWN';
+    const color = TYPE_COLORS[typeName] || '#6b7280';
+    const icon = PAYLOAD_ICONS[typeName] || '📦';
+    const payload = decoded.payload || {};
+
+    packetCount += packets.length;
+    pktTimestamps.push(Date.now());
+    const _el = document.getElementById('livePktCount'); if (_el) _el.textContent = packetCount;
+
+    // Favorites filter: skip if none of the packets involve a favorite
+    if (showOnlyFavorites && !packets.some(p => packetInvolvesFavorite(p))) return;
+
+    // Boundary filter: skip if none of the packets involve a node inside boundary
+    if (!packets.some(p => packetInBoundary(p))) return;
+
+    const consolidated = Object.assign({}, first, { observation_count: packets.length });
+    if (window.MeshAudio) MeshAudio.sonifyPacket(consolidated);
+    // Add single consolidated feed item for the group
+    const allHops = (decoded.path?.hops) || [];
+    addFeedItem(icon, typeName, payload, allHops, color, consolidated);
+    // Rain drop per observation in the group
+    packets.forEach((p, i) => setTimeout(() => addRainDrop(p), i * 150));
+
+    // Ensure ADVERT nodes appear
+    for (const pkt of packets) {
+      const d = pkt.decoded || {};
+      const h = d.header || {};
+      const p = d.payload || {};
       if (h.payloadTypeName === 'ADVERT' && p.pubKey) {
-        var key = p.pubKey;
-        if (!nodeMarkers[key] && p.lat != null && p.lon != null && !(p.lat === 0 && p.lon === 0)) {
-          var n = { public_key: key, name: p.name || key.slice(0,8), role: p.role || 'unknown', lat: p.lat, lon: p.lon, _liveSeen: Date.now() };
+        const key = p.pubKey;
+        if (!nodeMarkers[key] && p.lat != null && p.lon != null && !(p.lat === 0 && p.lon === 0) && isInBoundary(p.lat, p.lon)) {
+          const n = { public_key: key, name: p.name || key.slice(0,8), role: p.role || 'unknown', lat: p.lat, lon: p.lon };
           nodeData[key] = n;
           addNodeMarker(n);
-          if (window.HopResolver) HopResolver.init(Object.values(nodeData));
-        } else if (nodeData[key]) {
-          nodeData[key]._liveSeen = Date.now();
         }
       }
     }
     const _el2 = document.getElementById('liveNodeCount'); if (_el2) _el2.textContent = Object.keys(nodeMarkers).length;
 
-    // --- Build consolidated packet for feed + audio ---
-    const consolidated = Object.assign({}, first, { observation_count: obsCount });
-
-    // --- Audio: sonify with correct observation count for multi-voice ---
-    if (window.MeshAudio) MeshAudio.sonifyPacket(consolidated);
-
-    // --- Feed item (one per hash group) ---
-    if (!isReplay) {
-      // Find longest path across all observations for display
-      let feedHops = decoded.path?.hops || [];
-      for (const fp of packets) {
-        let fpHops = [];
-        if (fp.path_json) {
-          try { fpHops = typeof fp.path_json === 'string' ? JSON.parse(fp.path_json) : fp.path_json; } catch {}
-        } else if (fp.decoded?.path?.hops) {
-          fpHops = fp.decoded.path.hops;
-        }
-        if (fpHops.length > feedHops.length) feedHops = fpHops;
-      }
-      addFeedItem(icon, typeName, payload, feedHops, color, consolidated);
-      // Store all observation packets in dedup entry for replay tree
-      if (consolidated.hash && feedDedup.has(consolidated.hash)) {
-        const entry = feedDedup.get(consolidated.hash);
-        // Append observations — don't overwrite (each renderPacketTree call may have 1 or many)
-        for (const p of packets) {
-          if (!entry.packets.some(ep => ep.path_json === p.path_json && ep.observer === p.observer)) {
-            entry.packets.push(p);
-          }
-        }
-      }
-    }
-
-    // --- Rain drops: one per observation ---
-    var baseHops = (decoded.path?.hops || []).length || 1;
-    packets.forEach(function(rp, i) {
-      if (i === 0) { addRainDrop(rp); return; }
-      var variedHops = Math.max(1, baseHops + Math.floor(Math.random() * 3) - 1);
-      setTimeout(function() { addRainDrop(rp, variedHops); }, i * 150);
-    });
-
-    // --- Extract all unique paths from observations ---
-    // Prefer path_json (per-observer unique path) over decoded.path.hops (same for all)
-    var allPaths = [];
-    var seenPathKeys = new Set();
-    for (var qi = 0; qi < packets.length; qi++) {
-      var qpkt = packets[qi];
-      var qd = qpkt.decoded || {};
-      var qp = qd.payload || {};
-      var hops;
-      if (qpkt.path_json) {
-        try { hops = typeof qpkt.path_json === 'string' ? JSON.parse(qpkt.path_json) : qpkt.path_json; } catch (e) { hops = qd.path?.hops || []; }
-      } else {
-        hops = qd.path?.hops || [];
-      }
-      var pathKey = hops.join(',');
+    // Resolve all unique paths
+    const allPaths = [];
+    const seenPathKeys = new Set();
+    const observers = new Set();
+    for (const pkt of packets) {
+      const d = pkt.decoded || {};
+      const p = d.payload || {};
+      const hops = d.path?.hops || [];
+      if (pkt.observer) observers.add(pkt.observer);
+      const pathKey = hops.join(',');
       if (seenPathKeys.has(pathKey)) continue;
       seenPathKeys.add(pathKey);
-      var hopPositions = resolveHopPositions(hops, qp);
-      if (hopPositions.length >= 2) {
-        allPaths.push({ hopPositions: hopPositions, raw: qpkt.raw || first.raw });
-      } else if (hopPositions.length === 1) {
-        pulseNode(hopPositions[0].key, hopPositions[0].pos, typeName);
-      }
+      const hopPositions = resolveHopPositions(hops, p);
+      if (hopPositions.length >= 2) allPaths.push(hopPositions);
     }
 
-    // If no multi-hop paths found, try the decoded path as fallback
+    // Consolidated feed item
+    const hops0 = decoded.path?.hops || [];
+    const text = payload.text || payload.name || '';
+    const preview = text ? ' ' + (text.length > 35 ? text.slice(0, 35) + '…' : text) : '';
+    const feed = document.getElementById('liveFeedBody') || document.getElementById('liveFeed');
+    if (feed) {
+      const item = document.createElement('div');
+      item.className = 'live-feed-item live-feed-enter';
+      item.setAttribute('tabindex', '0');
+      item.setAttribute('role', 'button');
+      item.style.cursor = 'pointer';
+      item.innerHTML = `
+        <span class="feed-icon" style="color:${color}">${icon}</span>
+        <span class="feed-type" style="color:${color}">${typeName}</span>
+        <span class="feed-hops">${allPaths.length}⇢ ${observers.size}👁</span>
+        <span class="feed-text">${escapeHtml(preview)}</span>
+        <span class="feed-time">${new Date(first._ts || Date.now()).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit',second:'2-digit'})}</span>
+      `;
+      item.addEventListener('click', () => showFeedCard(item, first, color));
+      feed.prepend(item);
+      requestAnimationFrame(() => { requestAnimationFrame(() => item.classList.remove('live-feed-enter')); });
+      while (feed.children.length > 25) feed.removeChild(feed.lastChild);
+    }
+
     if (allPaths.length === 0) {
-      var fallbackHops = decoded.path?.hops || [];
-      var fallbackPositions = resolveHopPositions(fallbackHops, payload);
-      if (fallbackPositions.length >= 2) {
-        allPaths.push({ hopPositions: fallbackPositions, raw: first.raw });
-      } else if (fallbackPositions.length === 1) {
-        pulseNode(fallbackPositions[0].key, fallbackPositions[0].pos, typeName);
-      }
+      // Single hop or unresolvable — just pulse origin if possible
+      const hp0 = resolveHopPositions(decoded.path?.hops || [], payload);
+      if (hp0.length >= 1) pulseNode(hp0[0].key, hp0[0].pos, typeName);
+      return;
     }
 
-    // --- Animate all unique paths simultaneously ---
-    // First path gets audio sync hook, rest are visual-only
-    var firstPathDone = false;
-    for (var ai = 0; ai < allPaths.length; ai++) {
-      var onHop = null;
-      if (!firstPathDone && obsCount === 1 && window.MeshAudio) {
-        // For single observation, try sync voice on the first path
-        var voice = window._meshAudioVoices && window._meshAudioVoices[MeshAudio.getVoiceName()];
-        if (voice && voice.createSync && MeshAudio.isEnabled()) {
-          var audioSync = voice.createSync(consolidated);
-          if (audioSync) onHop = audioSync.playHop;
-        }
-      }
-      firstPathDone = true;
-      animatePath(allPaths[ai].hopPositions, typeName, color, allPaths[ai].raw, onHop);
+    // Animate all paths simultaneously
+    for (const hopPositions of allPaths) {
+      animatePath(hopPositions, typeName, color, first.raw);
     }
   }
 
   function resolveHopPositions(hops, payload) {
-    // Delegate to shared HopResolver (from hop-resolver.js) instead of reimplementing
-    const originLat = payload.lat != null && !(payload.lat === 0 && payload.lon === 0) ? payload.lat : null;
-    const originLon = payload.lon != null && !(payload.lon === 0 && payload.lon === 0) ? payload.lon : null;
-
-    // Use HopResolver if available and initialized, otherwise fall back to simple lookup
-    const resolvedMap = (window.HopResolver && HopResolver.ready())
-      ? HopResolver.resolve(hops, originLat, originLon, null, null, null)
-      : {};
-
-    // Convert HopResolver's map format to the array format live.js expects: {key, pos, name, known}
+    const known = Object.values(nodeData);
+    
+    // First pass: find all candidates per hop
     const raw = hops.map(hop => {
-      const r = resolvedMap[hop];
-      if (r && r.name && r.pubkey && !r.unreliable) {
-        // Look up coordinates from nodeData (HopResolver resolves name/pubkey but doesn't return lat/lon directly)
-        const node = nodeData[r.pubkey];
-        if (node && node.lat != null && node.lon != null && !(node.lat === 0 && node.lon === 0)) {
-          return { key: r.pubkey, pos: [node.lat, node.lon], name: r.name, known: true };
-        }
-        return { key: r.pubkey, pos: null, name: r.name, known: false };
+      const hopLower = hop.toLowerCase();
+      const candidates = known.filter(n =>
+        n.public_key.toLowerCase().startsWith(hopLower) &&
+        n.lat != null && n.lon != null && !(n.lat === 0 && n.lon === 0) &&
+        n.role !== 'companion'
+      );
+      if (candidates.length === 1) {
+        return { key: candidates[0].public_key, pos: [candidates[0].lat, candidates[0].lon], name: candidates[0].name || hop, known: true };
+      } else if (candidates.length > 1) {
+        return { key: 'ambig-' + hop, pos: null, name: hop, known: false, candidates };
       }
       return { key: 'hop-' + hop, pos: null, name: hop, known: false };
     });
 
-    // Add sender position as anchor if available
-    if (payload.pubKey && originLat != null) {
+    // Add sender position if available
+    if (payload.pubKey && payload.lat != null && !(payload.lat === 0 && payload.lon === 0)) {
       const existing = raw.find(p => p.key === payload.pubKey);
       if (!existing) {
         raw.unshift({ key: payload.pubKey, pos: [payload.lat, payload.lon], name: payload.name || payload.pubKey.slice(0, 8), known: true });
+      }
+    }
+
+    // Sequential disambiguation: each hop nearest to previous (like server-side)
+    const dist = (lat1, lon1, lat2, lon2) => Math.sqrt((lat1 - lat2) ** 2 + (lon1 - lon2) ** 2);
+
+    // Forward pass: resolve ambiguous hops using previous hop's position
+    let lastPos = null;
+    for (const hop of raw) {
+      if (hop.known && hop.pos) { lastPos = hop.pos; continue; }
+      if (!hop.candidates) continue;
+      if (lastPos) {
+        hop.candidates.sort((a, b) => dist(a.lat, a.lon, lastPos[0], lastPos[1]) - dist(b.lat, b.lon, lastPos[0], lastPos[1]));
+      }
+      const best = hop.candidates[0];
+      hop.key = best.public_key; hop.pos = [best.lat, best.lon];
+      hop.name = best.name || best.public_key.slice(0, 8);
+      hop.known = true; lastPos = hop.pos;
+    }
+
+    // Backward pass: catch any remaining from the tail
+    let nextPos = null;
+    for (let i = raw.length - 1; i >= 0; i--) {
+      const hop = raw[i];
+      if (hop.known && hop.pos) { nextPos = hop.pos; continue; }
+      if (!hop.candidates || !nextPos) continue;
+      hop.candidates.sort((a, b) => dist(a.lat, a.lon, nextPos[0], nextPos[1]) - dist(b.lat, b.lon, nextPos[0], nextPos[1]));
+      const best = hop.candidates[0];
+      hop.key = best.public_key; hop.pos = [best.lat, best.lon];
+      hop.name = best.name || best.public_key.slice(0, 8);
+      hop.known = true; nextPos = hop.pos;
+    }
+
+    // Sanity check: drop hops impossibly far from their nearest known neighbor (>200km ≈ 1.8°)
+    // Look past unknown hops to find the nearest known position on each side so that
+    // unknown relays between two distant known positions don't hide the impossible gap.
+    for (let i = 0; i < raw.length; i++) {
+      if (!raw[i].known || !raw[i].pos) continue;
+      let prev = null, next = null;
+      for (let j = i - 1; j >= 0; j--) { if (raw[j].known && raw[j].pos) { prev = raw[j].pos; break; } }
+      for (let j = i + 1; j < raw.length; j++) { if (raw[j].known && raw[j].pos) { next = raw[j].pos; break; } }
+      if (!prev && !next) continue; // lone hop, keep it
+      const dPrev = prev ? dist(raw[i].pos[0], raw[i].pos[1], prev[0], prev[1]) : 0;
+      const dNext = next ? dist(raw[i].pos[0], raw[i].pos[1], next[0], next[1]) : 0;
+      if ((prev && dPrev > MAX_HOP_DIST) && (next && dNext > MAX_HOP_DIST)) {
+        raw[i].known = false; raw[i].pos = null; // too far from both neighbors
+      } else if (prev && !next && dPrev > MAX_HOP_DIST) {
+        raw[i].known = false; raw[i].pos = null; // endpoint too far from only neighbor
+      } else if (!prev && next && dNext > MAX_HOP_DIST) {
+        raw[i].known = false; raw[i].pos = null;
       }
     }
 
@@ -1821,7 +1686,7 @@
     return raw.filter(h => h.pos != null);
   }
 
-  function animatePath(hopPositions, typeName, color, rawHex, onHop) {
+  function animatePath(hopPositions, typeName, color, rawHex) {
     if (!animLayer || !pathsLayer) return;
     activeAnims++;
     document.getElementById('liveAnimCount').textContent = activeAnims;
@@ -1833,8 +1698,6 @@
         document.getElementById('liveAnimCount').textContent = activeAnims;
         return;
       }
-      // Audio hook: notify per-hop callback
-      if (onHop) try { onHop(hopIndex, hopPositions.length, hopPositions[hopIndex]); } catch (e) {}
       const hp = hopPositions[hopIndex];
       const isGhost = hp.ghost;
 
@@ -2298,7 +2161,6 @@
     item.className = 'live-feed-item';
     item.setAttribute('tabindex', '0');
     item.setAttribute('role', 'button');
-    if (hash) item.setAttribute('data-hash', hash);
     item.style.cursor = 'pointer';
     item.innerHTML = `
       <span class="feed-icon" style="color:${color}">${icon}</span>
@@ -2311,56 +2173,52 @@
     feed.appendChild(item);
   }
 
-  // Dedup: hash → {element, count, pkt, packets[], createdAt}
-  // First packet with hash A creates a feed item.
-  // Any packet with hash A arriving within 30s updates that item's count.
-  // packets[] stores all observations for replay.
-  const feedDedup = new Map();
-  const DEDUP_WINDOW = 30000;
+  // Track recent feed items by hash for deduplication (hash -> {element, count, pkt})
+  const feedHashMap = new Map();
+  const FEED_DEDUP_WINDOW_MS = 30000; // merge duplicates within 30s
 
   function addFeedItem(icon, typeName, payload, hops, color, pkt) {
-    const feed = document.getElementById('liveFeed');
+    const feed = document.getElementById('liveFeedBody') || document.getElementById('liveFeed');
     if (!feed) return;
+
+    // Favorites filter: skip feed item if packet doesn't involve a favorite
     if (showOnlyFavorites && !packetInvolvesFavorite(pkt)) return;
 
     const hash = pkt.hash;
-    const incomingObs = pkt.observation_count || 1;
 
-    // Dedup: same hash within window → update existing entry
-    if (hash && feedDedup.has(hash)) {
-      const entry = feedDedup.get(hash);
-      if ((Date.now() - entry.createdAt) < DEDUP_WINDOW) {
-        entry.count += incomingObs;
-        entry.packets.push(pkt);
-        // Ensure badge exists
+    // Hash-based deduplication: if a feed item with the same hash exists and is recent, update it
+    if (hash && feedHashMap.has(hash)) {
+      const entry = feedHashMap.get(hash);
+      if (entry.element.parentNode && (Date.now() - entry.addedAt) < FEED_DEDUP_WINDOW_MS) {
+        entry.count++;
+        // Update the observation badge
         let badge = entry.element.querySelector('.badge-obs');
         if (!badge) {
           badge = document.createElement('span');
           badge.className = 'badge badge-obs';
           badge.style.cssText = 'font-size:10px;margin-left:4px';
-          const ref = entry.element.querySelector('.feed-hops') || entry.element.querySelector('.feed-type');
-          if (ref) ref.after(badge); else entry.element.appendChild(badge);
+          // Insert after feed-hops or feed-type
+          const anchor = entry.element.querySelector('.feed-hops') || entry.element.querySelector('.feed-type');
+          if (anchor) anchor.after(badge);
+          else entry.element.prepend(badge);
         }
         badge.textContent = '👁 ' + entry.count;
-        // Flash + move to top
-        entry.element.classList.remove('live-feed-enter');
-        void entry.element.offsetWidth; // force reflow
+        // Flash the item to indicate update
         entry.element.classList.add('live-feed-enter');
-        requestAnimationFrame(() => requestAnimationFrame(() => entry.element.classList.remove('live-feed-enter')));
-        // Re-add to DOM top (works even if it was trimmed out)
+        requestAnimationFrame(() => { requestAnimationFrame(() => entry.element.classList.remove('live-feed-enter')); });
+        // Move to top of feed
         feed.prepend(entry.element);
+        // Update stored pkt with merged observation count
         entry.pkt.observation_count = entry.count;
         return;
       }
-      // Window expired — fall through to create new entry
-      feedDedup.delete(hash);
     }
 
-    // Create new feed item
     const text = payload.text || payload.name || '';
     const preview = text ? ' ' + (text.length > 35 ? text.slice(0, 35) + '…' : text) : '';
     const hopStr = hops.length ? `<span class="feed-hops">${hops.length}⇢</span>` : '';
-    const obsBadge = incomingObs > 1 ? `<span class="badge badge-obs" style="font-size:10px;margin-left:4px">👁 ${incomingObs}</span>` : '';
+    const obsCount = pkt.observation_count || 1;
+    const obsBadge = obsCount > 1 ? `<span class="badge badge-obs" style="font-size:10px;margin-left:4px">👁 ${obsCount}</span>` : '';
 
     const item = document.createElement('div');
     item.className = 'live-feed-item live-feed-enter';
@@ -2377,17 +2235,17 @@
     `;
     item.addEventListener('click', () => showFeedCard(item, pkt, color));
     feed.prepend(item);
-    requestAnimationFrame(() => requestAnimationFrame(() => item.classList.remove('live-feed-enter')));
+    requestAnimationFrame(() => { requestAnimationFrame(() => item.classList.remove('live-feed-enter')); });
     while (feed.children.length > 25) feed.removeChild(feed.lastChild);
 
-    // Register
+    // Register in dedup map
     if (hash) {
-      feedDedup.set(hash, { element: item, count: incomingObs, pkt, packets: [pkt], createdAt: Date.now() });
-      // Prune stale entries
-      if (feedDedup.size > 100) {
-        const cutoff = Date.now() - DEDUP_WINDOW;
-        for (const [k, v] of feedDedup) {
-          if (v.createdAt < cutoff) feedDedup.delete(k);
+      feedHashMap.set(hash, { element: item, count: obsCount, pkt, addedAt: Date.now() });
+      // Prune old entries periodically
+      if (feedHashMap.size > 50) {
+        const cutoff = Date.now() - FEED_DEDUP_WINDOW_MS;
+        for (const [k, v] of feedHashMap) {
+          if (v.addedAt < cutoff) feedHashMap.delete(k);
         }
       }
     }
@@ -2424,18 +2282,11 @@
         ${rssi != null ? `<span>📡 ${rssi} dBm</span>` : ''}
         ${observer ? `<span>👁 ${escapeHtml(observer)}</span>` : ''}
       </div>
-      ${pkt.hash ? `<a class="fdc-link" href="#/packets/${pkt.hash.toLowerCase()}">View in packets →</a>` : ''}
+      ${pkt.hash ? `<a class="fdc-link" href="/packets/${pkt.hash.toLowerCase()}">View in packets →</a>` : ''}
       <button class="fdc-replay">↻ Replay</button>
     `;
     card.querySelector('.fdc-close').addEventListener('click', (e) => { e.stopPropagation(); card.remove(); });
-    card.querySelector('.fdc-replay').addEventListener('click', (e) => {
-      e.stopPropagation();
-      const dedupEntry = pkt.hash && feedDedup.get(pkt.hash);
-      const replayPkts = (dedupEntry && dedupEntry.packets.length > 1) ? dedupEntry.packets : [pkt];
-      const uniquePaths = new Set(replayPkts.map(p => p.path_json || JSON.stringify(p.decoded?.path?.hops || [])));
-      console.log('[replay] hash=' + pkt.hash + ' pkts=' + replayPkts.length + ' uniquePaths=' + uniquePaths.size, [...uniquePaths].slice(0, 3));
-      renderPacketTree(replayPkts, true);
-    });
+    card.querySelector('.fdc-replay').addEventListener('click', (e) => { e.stopPropagation(); animatePacket(pkt); });
     document.addEventListener('click', function dismiss(e) {
       if (!card.contains(e.target) && !anchor.contains(e.target)) { card.remove(); document.removeEventListener('click', dismiss); }
     });
@@ -2448,7 +2299,6 @@
     if (_timelineRefreshInterval) { clearInterval(_timelineRefreshInterval); _timelineRefreshInterval = null; }
     if (_lcdClockInterval) { clearInterval(_lcdClockInterval); _lcdClockInterval = null; }
     if (_rateCounterInterval) { clearInterval(_rateCounterInterval); _rateCounterInterval = null; }
-    if (_pruneInterval) { clearInterval(_pruneInterval); _pruneInterval = null; }
     if (ws) { ws.onclose = null; ws.close(); ws = null; }
     if (map) { map.remove(); map = null; }
     if (_onResize) {
@@ -2467,7 +2317,7 @@
     recentPaths = [];
     packetCount = 0; activeAnims = 0;
     nodeActivity = {}; pktTimestamps = [];
-    feedDedup.clear();
+    feedHashMap.clear();
     VCR.buffer = []; VCR.playhead = -1; VCR.mode = 'LIVE'; VCR.missedCount = 0; VCR.speed = 1;
   }
 

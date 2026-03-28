@@ -103,11 +103,11 @@
       <section class="home-footer">
         <div class="home-footer-links">
           ${homeCfg?.footerLinks ? homeCfg.footerLinks.map(l => `<a href="${escapeAttr(l.url)}" class="home-footer-link" target="_blank" rel="noopener">${escapeHtml(l.label)}</a>`).join('') : `
-          <a href="#/packets" class="home-footer-link">📦 Packets</a>
-          <a href="#/map" class="home-footer-link">🗺️ Network Map</a>
-          <a href="#/live" class="home-footer-link">🔴 Live</a>
-          <a href="#/nodes" class="home-footer-link">📡 All Nodes</a>
-          <a href="#/channels" class="home-footer-link">💬 Channels</a>`}
+          <a href="/packets" class="home-footer-link">📦 Packets</a>
+          <a href="/map" class="home-footer-link">🗺️ Network Map</a>
+          <a href="/live" class="home-footer-link">🔴 Live</a>
+          <a href="/nodes" class="home-footer-link">📡 All Nodes</a>
+          <a href="/channels" class="home-footer-link">💬 Channels</a>`}
         </div>
         <div class="home-level-toggle">
           <small>${exp ? 'Want setup guides? ' : 'Already know MeshCore? '}

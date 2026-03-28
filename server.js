@@ -9,32 +9,35 @@ const path = require('path');
 const fs = require('fs');
 const helpers = require('./server-helpers');
 const { loadConfigFile, loadThemeFile, buildHealthConfig, getHealthMs: _getHealthMs,
-        isHashSizeFlipFlop, computeContentHash, geoDist, deriveHashtagChannelKey,
+        isHashSizeFlipFlop, computeContentHash, geoDist, isPointInPolygon, deriveHashtagChannelKey,
         buildBreakdown: _buildBreakdown, disambiguateHops: _disambiguateHops,
         updateHashSizeForPacket: _updateHashSizeForPacket,
         rebuildHashSizeMap: _rebuildHashSizeMap,
         requireApiKey: _requireApiKeyFactory,
+        anonymizeNodeLocation: _anonymizeNodeLocation,
         CONFIG_PATHS, THEME_PATHS } = helpers;
 const config = loadConfigFile();
+const configBoundary = Array.isArray(config.boundary?.coords) && config.boundary.coords.length >= 3
+  ? config.boundary.coords : null;
 const decoder = require('./decoder');
 const PAYLOAD_TYPES = decoder.PAYLOAD_TYPES;
 const { nodeNearRegion, IATA_COORDS } = require('./iata-coords');
-const { execSync } = require('child_process');
 
-// Version + git commit for /api/stats and /api/health
-const APP_VERSION = (() => {
-  try { return require('./package.json').version; } catch { return 'unknown'; }
-})();
-const GIT_COMMIT = (() => {
-  // 1. .git-commit file (baked by Docker / CI)
-  try {
-    const c = fs.readFileSync(path.join(__dirname, '.git-commit'), 'utf8').trim();
-    if (c && c !== 'unknown') return c;
-  } catch { /* ignore */ }
-  // 2. git rev-parse at runtime
-  try { return execSync('git rev-parse --short HEAD', { encoding: 'utf8', timeout: 3000 }).trim(); } catch { /* ignore */ }
-  return 'unknown';
-})();
+// Location anonymization — jitters node coordinates by up to 200m
+const anonEnabled = !!config.anonymizeLocation;
+function anonNode(n) { return anonEnabled ? _anonymizeNodeLocation(n) : n; }
+// Anonymize lat/lon inside a decoded ADVERT payload before WebSocket broadcast
+function anonAdvertPayload(payload) {
+  if (!anonEnabled || !payload) return payload;
+  const pk = payload.pubKey || payload.pub_key || payload.public_key;
+  if (!pk || (payload.lat == null && payload.lon == null)) return payload;
+  const a = _anonymizeNodeLocation({ public_key: pk, lat: payload.lat ?? payload.latitude ?? null, lon: payload.lon ?? payload.lng ?? payload.longitude ?? null });
+  const out = { ...payload, lat: a.lat, lon: a.lon };
+  if ('latitude'  in payload) out.latitude  = a.lat;
+  if ('longitude' in payload) out.longitude = a.lon;
+  if ('lng'       in payload) out.lng       = a.lon;
+  return out;
+}
 
 // Health thresholds — configurable with sensible defaults
 const HEALTH = buildHealthConfig(config);
@@ -99,7 +102,7 @@ const NODES_CACHE_MS = 30000;
 function getCachedNodes(includeRole) {
   const now = Date.now();
   if (!_cachedAllNodes || now - _cachedAllNodesTs > NODES_CACHE_MS) {
-    _cachedAllNodes = db.db.prepare('SELECT public_key, name, lat, lon FROM nodes WHERE name IS NOT NULL').all();
+    _cachedAllNodes = db.db.prepare('SELECT public_key, name, lat, lon, role FROM nodes WHERE name IS NOT NULL').all();
     _cachedAllNodesWithRole = db.db.prepare('SELECT public_key, name, lat, lon, role FROM nodes WHERE name IS NOT NULL').all();
     _cachedAllNodesTs = now;
     // Clear prefix index so disambiguateHops rebuilds it on fresh data
@@ -141,11 +144,43 @@ try {
 
 // Merge: rainbow (lowest priority) -> derived from hashChannels -> explicit config (highest priority)
 const channelKeys = { ...rainbowKeys, ...derivedHashChannelKeys, ...configuredChannelKeys };
+// Only channels explicitly configured in hashChannels (or added via /api/channels/add) are allowed on the channels page
+const approvedChannels = new Set([...Object.keys(derivedHashChannelKeys), ...Object.keys(configuredChannelKeys)]);
 
 const totalKeys = Object.keys(channelKeys).length;
 const derivedCount = Object.keys(derivedHashChannelKeys).length;
 const rainbowCount = Object.keys(rainbowKeys).length;
 console.log(`[channels] ${totalKeys} channel key(s) (${derivedCount} derived from hashChannels, ${rainbowCount} from rainbow table)`);
+
+// Auto-learn new channel names: when a channel name is seen for the first time,
+// add it to hashChannels config and derive its key in memory so raw packets are decryptable.
+const configPath = path.join(__dirname, 'config.json');
+function autoLearnChannel(channelName, { persist = false } = {}) {
+  if (!channelName || typeof channelName !== 'string') return;
+  const name = channelName.trim().startsWith('#') ? channelName.trim() : `#${channelName.trim()}`;
+  if (blockedChannels.has(name.toLowerCase())) return;
+  // Auto-learning from MQTT is disabled — only explicit adds via /api/channels/add
+  if (!persist) return;
+  // Add key if not already known (rainbow table channels skip derivation)
+  if (!channelKeys[name]) {
+    const key = deriveHashtagChannelKey(name);
+    channelKeys[name] = key;
+    derivedHashChannelKeys[name] = key;
+  }
+  approvedChannels.add(name);
+  // Persist to config.json
+  try {
+    const cfg = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+    if (!Array.isArray(cfg.hashChannels)) cfg.hashChannels = [];
+    if (!cfg.hashChannels.includes(name)) {
+      cfg.hashChannels.push(name);
+      fs.writeFileSync(configPath, JSON.stringify(cfg, null, 2) + '\n');
+      console.log(`[channels] Added channel: ${name}`);
+    }
+  } catch (e) {
+    console.warn('[channels] Failed to persist channel:', e.message);
+  }
+}
 
 // --- Cache TTL config (seconds → ms) ---
 const _ttlCfg = config.cacheTTL || {};
@@ -223,6 +258,12 @@ class TTLCache {
   get size() { return this.store.size; }
 }
 const cache = new TTLCache();
+
+
+// Seed DB only when explicitly requested via --seed flag or SEED_DB=true env var
+if (process.argv.includes('--seed') || process.env.SEED_DB === 'true') {
+  db.seed();
+}
 
 const app = express();
 
@@ -329,6 +370,10 @@ app.get('/api/config/regions', (req, res) => {
   res.json(regions);
 });
 
+app.get('/api/config/boundary', (req, res) => {
+  res.json(config.boundary || null);
+});
+
 // Helper: get set of observer IDs matching region filter (comma-separated IATA codes)
 function getObserverIdsForRegions(regionParam) {
   if (!regionParam) return null; // null = no filter
@@ -342,12 +387,32 @@ function getObserverIdsForRegions(regionParam) {
   return ids;
 }
 
+// Helper: get set of observer IDs whose location falls within the config boundary polygon
+function getBoundaryObserverIds() {
+  if (!configBoundary) return null; // null = no filter
+  const nodeMap = new Map();
+  for (const n of db.db.prepare('SELECT public_key, lat, lon FROM nodes WHERE lat IS NOT NULL AND lon IS NOT NULL AND lat != 0 AND lon != 0').all()) {
+    nodeMap.set(n.public_key?.toLowerCase(), n);
+  }
+  const ids = new Set();
+  for (const o of db.getObservers()) {
+    const node = nodeMap.get(o.id?.toLowerCase());
+    if (node && isPointInPolygon(node.lat, node.lon, configBoundary)) {
+      ids.add(o.id);
+    } else if (!node && o.iata && IATA_COORDS[o.iata]) {
+      const { lat, lon } = IATA_COORDS[o.iata];
+      if (isPointInPolygon(lat, lon, configBoundary)) ids.add(o.id);
+    }
+  }
+  return ids;
+}
+
 app.get('/api/config/theme', (req, res) => {
   const cfg = loadConfigFile();
   const theme = loadThemeFile();
   res.json({
     branding: {
-      siteName: 'MeshCore Analyzer',
+      siteName: 'SWBC/Salish Mesh',
       tagline: 'Real-time MeshCore LoRa mesh network analyzer',
       ...(cfg.branding || {}),
       ...(theme.branding || {})
@@ -386,8 +451,8 @@ app.get('/api/config/theme', (req, res) => {
 app.get('/api/config/map', (req, res) => {
   const defaults = config.mapDefaults || {};
   res.json({
-    center: defaults.center || [37.45, -122.0],
-    zoom: defaults.zoom || 9
+    center: defaults.center || [49.59, -124.18],
+    zoom: defaults.zoom || 7
   });
 });
 
@@ -415,28 +480,6 @@ app.get('/api/perf', (req, res) => {
     slowQueries: perfStats.slowQueries.slice(-20),
     cache: { size: cache.size, hits: cache.hits, misses: cache.misses, staleHits: cache.staleHits, recomputes: cache.recomputes, hitRate: cache.hits + cache.misses > 0 ? Math.round(cache.hits / (cache.hits + cache.misses) * 1000) / 10 : 0 },
     packetStore: pktStore.getStats(),
-    sqlite: (() => {
-      try {
-        const walInfo = db.db.pragma('wal_checkpoint(PASSIVE)');
-        const pageSize = db.db.pragma('page_size', { simple: true });
-        const pageCount = db.db.pragma('page_count', { simple: true });
-        const freelistCount = db.db.pragma('freelist_count', { simple: true });
-        const dbSizeMB = Math.round(pageSize * pageCount / 1048576 * 10) / 10;
-        const freelistMB = Math.round(pageSize * freelistCount / 1048576 * 10) / 10;
-        const fs = require('fs');
-        const dbPath = process.env.DB_PATH || require('path').join(__dirname, 'data', 'meshcore.db');
-        let walSizeMB = 0;
-        try { walSizeMB = Math.round(fs.statSync(dbPath + '-wal').size / 1048576 * 10) / 10; } catch {}
-        const stats = db.getStats();
-        return {
-          dbSizeMB,
-          walSizeMB,
-          freelistMB,
-          walPages: walInfo[0] ? { total: walInfo[0].busy + walInfo[0].checkpointed, checkpointed: walInfo[0].checkpointed, busy: walInfo[0].busy } : null,
-          rows: { transmissions: stats.totalTransmissions, observations: stats.totalObservations, nodes: stats.totalNodes, observers: stats.totalObservers },
-        };
-      } catch (e) { return { error: e.message }; }
-    })(),
   });
 });
 
@@ -457,6 +500,53 @@ setInterval(() => {
   _elLast = now;
 }, EL_INTERVAL).unref();
 
+// Prune channel messages (payload_type=5) older than 18 hours — runs hourly
+const CHANNEL_MAX_AGE_MS = 18 * 60 * 60 * 1000;
+function pruneOldChannelMessages() {
+  try {
+    const count = pktStore.pruneOlderThan(CHANNEL_MAX_AGE_MS, 5);
+    if (count > 0) {
+      cache.debouncedInvalidateAll();
+      console.log(`[cleanup] Pruned ${count} channel messages older than 18h`);
+    }
+  } catch (e) { console.error('[cleanup] Channel prune error:', e.message); }
+}
+pruneOldChannelMessages(); // run once at startup
+setInterval(pruneOldChannelMessages, 60 * 60 * 1000).unref(); // then hourly
+
+// Remove approved channels with no DB activity in the last 7 days — runs every 24 hours
+const CHANNEL_IDLE_EXPIRE_MS = 7 * 24 * 60 * 60 * 1000;
+function pruneIdleChannels() {
+  try {
+    const cutoff = new Date(Date.now() - CHANNEL_IDLE_EXPIRE_MS).toISOString();
+    const stmt = db.db.prepare(
+      `SELECT MAX(first_seen) AS last_seen FROM transmissions WHERE payload_type=5 AND json_extract(decoded_json,'$.channel')=?`
+    );
+    const removed = [];
+    for (const ch of [...approvedChannels]) {
+      const row = stmt.get(ch);
+      if (!row || !row.last_seen || row.last_seen < cutoff) {
+        approvedChannels.delete(ch);
+        delete channelKeys[ch];
+        delete derivedHashChannelKeys[ch];
+        removed.push(ch);
+      }
+    }
+    if (removed.length > 0) {
+      try {
+        const cfg = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+        cfg.hashChannels = (cfg.hashChannels || []).filter(c => !removed.includes(c));
+        fs.writeFileSync(configPath, JSON.stringify(cfg, null, 2) + '\n');
+      } catch (e) {
+        console.warn('[channels] Failed to persist channel removal:', e.message);
+      }
+      cache.invalidate('channels');
+      console.log(`[channels] Removed ${removed.length} idle channel(s): ${removed.join(', ')}`);
+    }
+  } catch (e) { console.error('[channels] Idle prune error:', e.message); }
+}
+setInterval(pruneIdleChannels, 24 * 60 * 60 * 1000).unref(); // every 24 hours
+
 // Manual WAL checkpoint every 5 minutes (auto-checkpoint disabled to avoid random event loop spikes)
 setInterval(() => {
   try {
@@ -466,19 +556,6 @@ setInterval(() => {
     if (ms > 50) console.log(`[wal] checkpoint: ${ms}ms`);
   } catch (e) { console.error('[wal] checkpoint error:', e.message); }
 }, 300000).unref();
-
-// Daily TRUNCATE checkpoint at 2:00 AM UTC — reclaims WAL file space
-setInterval(() => {
-  const h = new Date().getUTCHours();
-  const m = new Date().getUTCMinutes();
-  if (h === 2 && m === 0) {
-    try {
-      const t0 = Date.now();
-      db.db.pragma('wal_checkpoint(TRUNCATE)');
-      console.log(`[wal] daily TRUNCATE checkpoint: ${Date.now() - t0}ms`);
-    } catch (e) { console.error('[wal] TRUNCATE checkpoint error:', e.message); }
-  }
-}, 60000).unref();
 
 // --- Health / Telemetry Endpoint ---
 app.get('/api/health', (req, res) => {
@@ -491,9 +568,6 @@ app.get('/api/health', (req, res) => {
 
   res.json({
     status: 'ok',
-    engine: 'node',
-    version: APP_VERSION,
-    commit: GIT_COMMIT,
     uptime: Math.round(uptime),
     uptimeHuman: `${Math.floor(uptime / 3600)}h ${Math.floor((uptime % 3600) / 60)}m`,
     memory: {
@@ -541,57 +615,97 @@ function broadcast(msg) {
   wss.clients.forEach(c => { if (c.readyState === 1) c.send(data); });
 }
 
-// Resolve path hops to known nodes (≥2 bytes / 4 hex chars) — never creates phantom nodes.
-// Hops that can't be resolved are displayed as raw hex prefixes by the hop-resolver.
+// Auto-create stub nodes from path hops (≥2 bytes / 4 hex chars)
+// When an advert arrives later with a full pubkey matching the prefix, upsertNode will upgrade it
 const hopNodeCache = new Set(); // Avoid repeated DB lookups for known hops
-// Track when nodes were last seen as relay hops in packet paths (full pubkey → ISO timestamp)
-const lastPathSeenMap = new Map();
 
-// Sequential hop disambiguation — delegates to server-helpers.js (single source of truth)
+// Sequential hop disambiguation: resolve 1-byte prefixes to best-matching nodes
+// Returns array of {hop, name, lat, lon, pubkey, ambiguous, unreliable} per hop
 function disambiguateHops(hops, allNodes) {
-  return _disambiguateHops(hops, allNodes, MAX_HOP_DIST_SERVER);
-}
+  const MAX_HOP_DIST = MAX_HOP_DIST_SERVER;
 
-// Cache hop prefix → full pubkey for lastPathSeenMap resolution
-const hopPrefixToKey = new Map();
-// Negative cache: prefixes known to be ambiguous (match multiple nodes) — never resolve these
-const ambiguousHopPrefixes = new Set();
+  // Build prefix index on first call (cached on allNodes array)
+  if (!allNodes._prefixIdx) {
+    allNodes._prefixIdx = {};
+    allNodes._prefixIdxName = {};
+    for (const n of allNodes) {
+      if (n.role === 'companion') continue; // companions are not routing infrastructure
+      const pk = n.public_key.toLowerCase();
+      for (let len = 1; len <= 3; len++) {
+        const p = pk.slice(0, len * 2);
+        if (!allNodes._prefixIdx[p]) allNodes._prefixIdx[p] = [];
+        allNodes._prefixIdx[p].push(n);
+        if (!allNodes._prefixIdxName[p]) allNodes._prefixIdxName[p] = n;
+      }
+    }
+  }
 
-// Check if a hop prefix uniquely resolves to a single node. Returns the public_key or null.
-function resolveUniquePrefixMatch(hopLower) {
-  if (ambiguousHopPrefixes.has(hopLower)) return null;
-  if (hopPrefixToKey.has(hopLower)) return hopPrefixToKey.get(hopLower);
-  // Count matches — only use if exactly one node matches
-  const matches = db.db.prepare("SELECT public_key FROM nodes WHERE LOWER(public_key) LIKE ? LIMIT 2").all(hopLower + '%');
-  if (matches.length === 1) {
-    hopPrefixToKey.set(hopLower, matches[0].public_key);
-    return matches[0].public_key;
+  // First pass: find candidates per hop
+  const resolved = hops.map(hop => {
+    const h = hop.toLowerCase();
+    const withCoords = (allNodes._prefixIdx[h] || []).filter(n => n.lat && n.lon && !(n.lat === 0 && n.lon === 0));
+    if (withCoords.length === 1) {
+      return { hop, name: withCoords[0].name, lat: withCoords[0].lat, lon: withCoords[0].lon, pubkey: withCoords[0].public_key, known: true };
+    } else if (withCoords.length > 1) {
+      return { hop, name: hop, lat: null, lon: null, pubkey: null, known: false, candidates: withCoords };
+    }
+    const nameMatch = allNodes._prefixIdxName[h];
+    return { hop, name: nameMatch?.name || hop, lat: null, lon: null, pubkey: nameMatch?.public_key || null, known: false };
+  });
+
+  // Forward pass: resolve ambiguous hops by distance to previous
+  let lastPos = null;
+  for (const r of resolved) {
+    if (r.known && r.lat) { lastPos = [r.lat, r.lon]; continue; }
+    if (!r.candidates) continue;
+    if (lastPos) r.candidates.sort((a, b) => geoDist(a.lat, a.lon, lastPos[0], lastPos[1]) - geoDist(b.lat, b.lon, lastPos[0], lastPos[1]));
+    const best = r.candidates[0];
+    r.name = best.name; r.lat = best.lat; r.lon = best.lon; r.pubkey = best.public_key; r.known = true;
+    lastPos = [r.lat, r.lon];
   }
-  if (matches.length > 1) {
-    ambiguousHopPrefixes.add(hopLower);
+
+  // Backward pass
+  let nextPos = null;
+  for (let i = resolved.length - 1; i >= 0; i--) {
+    const r = resolved[i];
+    if (r.known && r.lat) { nextPos = [r.lat, r.lon]; continue; }
+    if (!r.candidates || !nextPos) continue;
+    r.candidates.sort((a, b) => geoDist(a.lat, a.lon, nextPos[0], nextPos[1]) - geoDist(b.lat, b.lon, nextPos[0], nextPos[1]));
+    const best = r.candidates[0];
+    r.name = best.name; r.lat = best.lat; r.lon = best.lon; r.pubkey = best.public_key; r.known = true;
+    nextPos = [r.lat, r.lon];
   }
-  return null;
+
+  // Distance sanity check
+  for (let i = 0; i < resolved.length; i++) {
+    const r = resolved[i];
+    if (!r.lat) continue;
+    const prev = i > 0 && resolved[i-1].lat ? resolved[i-1] : null;
+    const next = i < resolved.length-1 && resolved[i+1].lat ? resolved[i+1] : null;
+    if (!prev && !next) continue;
+    const dPrev = prev ? geoDist(r.lat, r.lon, prev.lat, prev.lon) : 0;
+    const dNext = next ? geoDist(r.lat, r.lon, next.lat, next.lon) : 0;
+    if ((prev && dPrev > MAX_HOP_DIST) && (next && dNext > MAX_HOP_DIST)) { r.unreliable = true; r.lat = null; r.lon = null; }
+    else if (prev && !next && dPrev > MAX_HOP_DIST) { r.unreliable = true; r.lat = null; r.lon = null; }
+    else if (!prev && next && dNext > MAX_HOP_DIST) { r.unreliable = true; r.lat = null; r.lon = null; }
+  }
+
+  return resolved.map(r => ({ hop: r.hop, name: r.name, lat: r.lat, lon: r.lon, pubkey: r.pubkey, ambiguous: !!r.candidates, unreliable: !!r.unreliable }));
 }
 
 function autoLearnHopNodes(hops, now) {
   for (const hop of hops) {
     if (hop.length < 4) continue; // Skip 1-byte hops — too ambiguous
     if (hopNodeCache.has(hop)) continue;
-    resolveUniquePrefixMatch(hop.toLowerCase());
-    // Cache either way to avoid repeated DB lookups — but never create phantom nodes.
-    // Unresolved hops are displayed as raw prefixes by the hop-resolver.
-    hopNodeCache.add(hop);
-  }
-}
-
-// Update lastPathSeenMap for all hops in a packet path (including 1-byte hops)
-function updatePathSeenTimestamps(hops, now) {
-  for (const hop of hops) {
     const hopLower = hop.toLowerCase();
-    const fullKey = resolveUniquePrefixMatch(hopLower);
-    if (fullKey) {
-      lastPathSeenMap.set(fullKey, now);
+    const existing = db.db.prepare("SELECT public_key FROM nodes WHERE LOWER(public_key) LIKE ?").get(hopLower + '%');
+    if (existing) {
+      hopNodeCache.add(hop);
+      continue;
     }
+    // Create stub node — role is likely repeater (most hops are)
+    db.upsertNode({ public_key: hopLower, name: null, role: 'repeater', lat: null, lon: null, last_seen: now });
+    hopNodeCache.add(hop);
   }
 }
 
@@ -609,9 +723,6 @@ if (config.mqttSources && Array.isArray(config.mqttSources)) {
   });
 }
 
-if (process.env.NODE_ENV === 'test') {
-  console.log('[mqtt] Skipping MQTT connections in test mode');
-} else {
 for (const source of mqttSources) {
   try {
     const opts = { reconnectPeriod: 5000 };
@@ -705,8 +816,6 @@ for (const source of mqttSources) {
         if (decoded.path.hops.length > 0) {
           // Auto-create stub nodes from 2+ byte path hops
           autoLearnHopNodes(decoded.path.hops, now);
-          // Track when each resolved hop node was last seen relaying
-          updatePathSeenTimestamps(decoded.path.hops, now);
         }
 
         if (decoded.header.payloadTypeName === 'ADVERT' && decoded.payload.pubKey) {
@@ -741,12 +850,13 @@ for (const source of mqttSources) {
         const fullPacket = pktStore.getById(packetId) || pktStore.byHash.get(pktData.hash) || pktData;
         const tx = pktStore.byHash.get(pktData.hash);
         const observation_count = tx ? tx.observation_count : 1;
-        const broadcastData = { id: packetId, raw: msg.raw, decoded, snr: msg.SNR, rssi: msg.RSSI, hash: pktData.hash, observer: observerId, observer_name: msg.origin || null, path_json: pktData.path_json, packet: fullPacket, observation_count };
+        const _bDecoded = (anonEnabled && decoded?.payload) ? { ...decoded, payload: anonAdvertPayload(decoded.payload) } : decoded;
+        const broadcastData = { id: packetId, raw: msg.raw, decoded: _bDecoded, snr: msg.SNR, rssi: msg.RSSI, hash: pktData.hash, observer: observerId, packet: fullPacket, observation_count };
         broadcast({ type: 'packet', data: broadcastData });
 
         if (decoded.header.payloadTypeName === 'GRP_TXT') {
           const _ch = decoded.payload?.channel;
-          if (_ch) {
+          if (_ch && approvedChannels.has(_ch)) {
             broadcast({ type: 'message', data: broadcastData });
           }
         }
@@ -807,7 +917,7 @@ for (const source of mqttSources) {
           };
           const packetId = pktStore.insert(advertPktData); _updateHashSizeForPacketLocal(advertPktData);
           try { db.insertTransmission(advertPktData); } catch (e) { console.error('[dual-write] transmission insert error:', e.message); }
-          broadcast({ type: 'packet', data: { id: packetId, hash: advertPktData.hash, raw: advertPktData.raw_hex, decoded: { header: { payloadTypeName: 'ADVERT' }, payload: advert } } });
+          broadcast({ type: 'packet', data: { id: packetId, hash: advertPktData.hash, raw: advertPktData.raw_hex, decoded: { header: { payloadTypeName: 'ADVERT' }, payload: anonAdvertPayload(advert) } } });
         }
         return;
       }
@@ -823,6 +933,8 @@ for (const source of mqttSources) {
         channelMsg.channel = resolvedChannelName;
         // Drop blocked channels
         if (blockedChannels.has(resolvedChannelName.toLowerCase())) return;
+        // Auto-learn if it's a proper named channel
+        if (resolvedChannelName.startsWith('#')) autoLearnChannel(resolvedChannelName);
         // Extract sender name from "Name: message" format
         const senderName = channelMsg.text?.split(':')[0] || null;
         // Create/update node for sender
@@ -906,7 +1018,6 @@ for (const source of mqttSources) {
     console.error(`MQTT [${source.name || source.broker}] connection failed (non-fatal):`, e.message);
   }
 }
-} // end NODE_ENV !== 'test'
 
 // --- Express ---
 app.use(express.json());
@@ -915,23 +1026,28 @@ app.use(express.json());
 
 app.get('/api/stats', (req, res) => {
   const stats = db.getStats();
-  // Get role counts (active nodes only — same 7-day window as totalNodes)
-  const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 3600000).toISOString();
+  // Get role counts
   const counts = {};
   for (const role of ['repeater', 'room', 'companion', 'sensor']) {
-    const r = db.db.prepare(`SELECT COUNT(*) as count FROM nodes WHERE role = ? AND last_seen > ?`).get(role, sevenDaysAgo);
+    const r = db.db.prepare(`SELECT COUNT(*) as count FROM nodes WHERE role = ?`).get(role);
     counts[role + 's'] = r.count;
   }
-  res.json({ ...stats, engine: 'node', version: APP_VERSION, commit: GIT_COMMIT, counts });
+  res.json({ ...stats, counts });
 });
 
 app.get('/api/packets', (req, res) => {
   const { limit = 50, offset = 0, type, route, region, observer, hash, since, until, groupByHash, node, nodes } = req.query;
   const order = req.query.order === 'asc' ? 'ASC' : 'DESC';
-  const bObs = null;
+  const bObs = getBoundaryObserverIds();
 
-  // Boundary filtering removed — outsideNodes always null
+  // Build set of node pubkeys with coordinates OUTSIDE the boundary — used to exclude relayed foreign packets
   let outsideNodes = null;
+  if (configBoundary) {
+    outsideNodes = new Set();
+    for (const n of db.db.prepare('SELECT public_key, lat, lon FROM nodes WHERE lat IS NOT NULL AND lon IS NOT NULL AND lat != 0 AND lon != 0').all()) {
+      if (!isPointInPolygon(n.lat, n.lon, configBoundary)) outsideNodes.add(n.public_key?.toLowerCase());
+    }
+  }
 
   // inBoundary: packet must be received by an in-boundary observer AND not originate from a known outside-boundary node
   const inBoundary = bObs ? (p => {
@@ -1013,10 +1129,25 @@ app.get('/api/packets/:id', (req, res) => {
   const param = req.params.id;
   const isHash = /^[0-9a-f]{16}$/i.test(param);
   let packet;
+  let siblingObservations = [];
+  let observation_count = 1;
+
   if (isHash) {
-    // Hash-based lookup
+    // Hash-based lookup — check memory first, fall back to SQLite
     const tx = pktStore.byHash.get(param.toLowerCase());
-    packet = tx || null;
+    if (tx) {
+      packet = tx;
+      siblingObservations = tx.observations || [];
+      observation_count = tx.observation_count || 1;
+    } else {
+      // Evicted from memory — query SQLite directly
+      const rows = db.db.prepare('SELECT * FROM packets_v WHERE hash = ? ORDER BY timestamp ASC').all(param.toLowerCase());
+      if (rows.length > 0) {
+        packet = rows[0];
+        siblingObservations = rows;
+        observation_count = rows.length;
+      }
+    }
   }
   if (!packet) {
     const id = Number(param);
@@ -1027,7 +1158,7 @@ app.get('/api/packets/:id', (req, res) => {
   }
   if (!packet) return res.status(404).json({ error: 'Not found' });
 
-    // Note: packet.path_json reflects the first observer's path (earliest first_seen).
+  // Note: packet.path_json reflects the first observer's path (earliest first_seen).
   // Individual observation paths are in siblingObservations below.
 
   const pathHops = packet.paths || [];
@@ -1037,10 +1168,14 @@ app.get('/api/packets/:id', (req, res) => {
   // Build byte breakdown
   const breakdown = buildBreakdown(packet.raw_hex, decoded);
 
-  // Include sibling observations for this transmission
-  const transmission = packet.hash ? pktStore.byHash.get(packet.hash) : null;
-  const siblingObservations = transmission ? pktStore.enrichObservations(transmission.observations) : [];
-  const observation_count = transmission ? transmission.observation_count : 1;
+  // If observations not yet populated (non-hash path), get from memory
+  if (!siblingObservations.length && packet.hash) {
+    const transmission = pktStore.byHash.get(packet.hash);
+    if (transmission) {
+      siblingObservations = transmission.observations || [];
+      observation_count = transmission.observation_count || 1;
+    }
+  }
 
   res.json({ packet, path: pathHops, breakdown, observation_count, observations: siblingObservations });
 });
@@ -1086,9 +1221,7 @@ app.post('/api/packets', requireApiKey, (req, res) => {
     try { db.insertTransmission(apiPktData); } catch (e) { console.error('[dual-write] transmission insert error:', e.message); }
 
     if (decoded.path.hops.length > 0) {
-      const _now = new Date().toISOString();
-      autoLearnHopNodes(decoded.path.hops, _now);
-      updatePathSeenTimestamps(decoded.path.hops, _now);
+      autoLearnHopNodes(decoded.path.hops, new Date().toISOString());
     }
 
     if (decoded.header.payloadTypeName === 'ADVERT' && decoded.payload.pubKey) {
@@ -1133,11 +1266,20 @@ app.get('/api/nodes', (req, res) => {
     if (ms) { where.push('last_seen > @since'); params.since = new Date(Date.now() - ms).toISOString(); }
   }
 
-  // Region filtering: if region param is set, only include nodes whose ADVERTs were seen by regional observers
+  // Region + boundary filtering: intersect observer sets
   const regionObsIds = getObserverIdsForRegions(region);
+  const boundaryObsIds = getBoundaryObserverIds();
+  let effectiveObsIds = null;
+  if (regionObsIds && boundaryObsIds) {
+    effectiveObsIds = new Set([...regionObsIds].filter(id => boundaryObsIds.has(id)));
+  } else {
+    effectiveObsIds = regionObsIds || boundaryObsIds;
+  }
   let regionNodeKeys = null;
-  if (regionObsIds && regionObsIds.size > 0) {
-    regionNodeKeys = pktStore.getNodesByAdvertObservers(regionObsIds);
+  if (effectiveObsIds) {
+    regionNodeKeys = effectiveObsIds.size > 0
+      ? pktStore.getNodesByAdvertObservers(effectiveObsIds)
+      : new Set();
   }
 
   const clause = where.length ? 'WHERE ' + where.join(' AND ') : '';
@@ -1148,12 +1290,29 @@ app.get('/api/nodes', (req, res) => {
   if (regionNodeKeys) {
     const allNodes = db.db.prepare(`SELECT * FROM nodes ${clause} ORDER BY ${order}`).all(params);
     filteredAll = allNodes.filter(n => regionNodeKeys.has(n.public_key));
+    // Exclude nodes with no coordinates or outside the boundary
+    if (configBoundary) {
+      filteredAll = filteredAll.filter(n =>
+        n.lat && n.lon && !(n.lat === 0 && n.lon === 0) &&
+        isPointInPolygon(n.lat, n.lon, configBoundary)
+      );
+    }
     total = filteredAll.length;
     nodes = filteredAll.slice(Number(offset), Number(offset) + Number(limit));
   } else {
-    nodes = db.db.prepare(`SELECT * FROM nodes ${clause} ORDER BY ${order} LIMIT @limit OFFSET @offset`).all({ ...params, limit: Number(limit), offset: Number(offset) });
-    total = db.db.prepare(`SELECT COUNT(*) as count FROM nodes ${clause}`).get(params).count;
-    filteredAll = null;
+    if (configBoundary) {
+      const allNodes = db.db.prepare(`SELECT * FROM nodes ${clause} ORDER BY ${order}`).all(params);
+      filteredAll = allNodes.filter(n =>
+        n.lat && n.lon && !(n.lat === 0 && n.lon === 0) &&
+        isPointInPolygon(n.lat, n.lon, configBoundary)
+      );
+      total = filteredAll.length;
+      nodes = filteredAll.slice(Number(offset), Number(offset) + Number(limit));
+    } else {
+      nodes = db.db.prepare(`SELECT * FROM nodes ${clause} ORDER BY ${order} LIMIT @limit OFFSET @offset`).all({ ...params, limit: Number(limit), offset: Number(offset) });
+      total = db.db.prepare(`SELECT COUNT(*) as count FROM nodes ${clause}`).get(params).count;
+      filteredAll = null;
+    }
   }
 
   const counts = {};
@@ -1182,21 +1341,22 @@ app.get('/api/nodes', (req, res) => {
       }
       if (latest) node.last_heard = latest;
     }
-    // Also check if this node was seen as a relay hop in any packet path
-    const pathSeen = lastPathSeenMap.get(node.public_key);
-    if (pathSeen && (!node.last_heard || pathSeen > node.last_heard)) {
-      node.last_heard = pathSeen;
-    }
   }
 
-  res.json({ nodes, total, counts });
+  res.json({ nodes: nodes.map(anonNode), total, counts });
 });
 
 app.get('/api/nodes/search', (req, res) => {
   const q = req.query.q || '';
   if (!q.trim()) return res.json({ nodes: [] });
   let nodes = db.searchNodes(q.trim());
-  res.json({ nodes });
+  if (configBoundary) {
+    nodes = nodes.filter(n =>
+      n.lat && n.lon && !(n.lat === 0 && n.lon === 0) &&
+      isPointInPolygon(n.lat, n.lon, configBoundary)
+    );
+  }
+  res.json({ nodes: nodes.map(anonNode) });
 });
 
 // Bulk health summary for analytics — single query approach (MUST be before :pubkey routes)
@@ -1266,7 +1426,7 @@ app.get('/api/nodes/bulk-health', (req, res) => {
       }))
       .sort((a, b) => b.packetCount - a.packetCount);
 
-    const _an = node;
+    const _an = anonNode(node);
     results.push({
       public_key: node.public_key, name: node.name, role: node.role,
       lat: _an.lat, lon: _an.lon,
@@ -1332,7 +1492,7 @@ app.get('/api/nodes/:pubkey', (req, res) => {
   node.hash_size_inconsistent = _isHashSizeFlipFlop(pubkey);
   if (allSizes && allSizes.size > 1) node.hash_sizes_seen = [...allSizes].sort();
   const recentAdverts = (pktStore.byNode.get(pubkey) || []).slice(-20).reverse();
-  const _nResult = { node: node, recentAdverts };
+  const _nResult = { node: anonNode(node), recentAdverts };
   cache.set(_ck, _nResult, TTL.nodeDetail);
   res.json(_nResult);
 });
@@ -1380,10 +1540,9 @@ app.get('/api/analytics/rf', (req, res) => {
   const seenSizeHashes = new Set();
   const packetSizes = [];
   for (const p of allRegional) {
-    const raw = p.raw_hex || (p.transmission_id ? (pktStore.byTxId.get(p.transmission_id) || {}).raw_hex : null);
-    if (raw && p.hash && !seenSizeHashes.has(p.hash)) {
+    if (p.raw_hex && p.hash && !seenSizeHashes.has(p.hash)) {
       seenSizeHashes.add(p.hash);
-      packetSizes.push(raw.length / 2);
+      packetSizes.push(p.raw_hex.length / 2);
     }
   }
 
@@ -2222,9 +2381,50 @@ app.get('/api/resolve-hops', (req, res) => {
 
 // channelHashNames removed — we only use decoded channel names now
 
+app.post('/api/channels/add', (req, res) => {
+  const { name } = req.body || {};
+  if (!name || typeof name !== 'string') return res.status(400).json({ error: 'name required' });
+  const channelName = name.trim().startsWith('#') ? name.trim() : `#${name.trim()}`;
+  if (blockedChannels.has(channelName.toLowerCase())) return res.status(400).json({ error: 'channel is blocked' });
+  autoLearnChannel(channelName, { persist: true });
+
+  // Retroactively re-decode any encrypted packets in pktStore that match this channel's key
+  const { ChannelCrypto } = require('@michaelhart/meshcore-decoder/dist/crypto/channel-crypto');
+  const key = channelKeys[channelName];
+  let redecoded = 0;
+  if (key) {
+    for (const pkt of pktStore.all()) {
+      if (pkt.payload_type !== 5) continue;
+      let decoded;
+      try { decoded = JSON.parse(pkt.decoded_json); } catch { continue; }
+      if (decoded.channel) continue; // already decoded
+      if (!decoded.encryptedData || !decoded.mac) continue;
+      const result = ChannelCrypto.decryptGroupTextMessage(decoded.encryptedData, decoded.mac, key);
+      if (result.success && result.data) {
+        const newDecoded = {
+          type: 'CHAN', channel: channelName, channelHash: decoded.channelHash,
+          sender: result.data.sender || null,
+          text: result.data.sender && result.data.message ? `${result.data.sender}: ${result.data.message}` : result.data.message || '',
+          sender_timestamp: result.data.timestamp, flags: result.data.flags,
+        };
+        pkt.decoded_json = JSON.stringify(newDecoded);
+        // Update DB too
+        try { db.db.prepare('UPDATE transmissions SET decoded_json=? WHERE hash=?').run(pkt.decoded_json, pkt.hash); } catch {}
+        redecoded++;
+      }
+    }
+  }
+
+  // Invalidate immediately so the client re-fetch sees the new channel right away
+  cache.invalidate('channels');
+  console.log(`[channels] Added ${channelName}, re-decoded ${redecoded} existing packets`);
+  res.json({ ok: true, name: channelName, redecoded });
+});
+
 app.get('/api/channels', (req, res) => {
   const { region } = req.query;
   const regionObsIds = getObserverIdsForRegions(region);
+  const channelBoundaryObs = getBoundaryObserverIds();
   const _ck = 'channels' + (region ? ':' + region : '');
   const _c = cache.get(_ck); if (_c) return res.json(_c);
   // Single pass: only scan type-5 packets via filter (already in memory)
@@ -2233,13 +2433,15 @@ app.get('/api/channels', (req, res) => {
   for (const pkt of pktStore.all()) {
     if (pkt.payload_type !== 5) continue;
     if (regionObsIds && !regionObsIds.has(pkt.observer_id)) continue;
+    if (channelBoundaryObs && !channelBoundaryObs.has(pkt.observer_id)) continue;
     let decoded;
     try { decoded = JSON.parse(pkt.decoded_json); } catch { continue; }
 
-    // Only show decrypted messages — skip encrypted garbage
-    if (decoded.type !== 'CHAN') continue;
-
-    const channelName = decoded.channel || 'unknown';
+    // Only show messages with a known named channel (must be in hashChannels, starts with '#')
+    if (!decoded.channel || !decoded.channel.startsWith('#')) continue;
+    const channelName = decoded.channel;
+    if (blockedChannels.has(channelName.toLowerCase())) continue;
+    if (!approvedChannels.has(channelName)) continue; // not a configured channel — skip
     const key = channelName;
     
     if (!channelMap[key]) {
@@ -2271,16 +2473,26 @@ app.get('/api/channels/:hash/messages', (req, res) => {
   const _ck = 'channels:' + channelHash + ':' + (req.query.limit||100) + ':' + (req.query.offset||0);
   const _c = cache.get(_ck); if (_c) return res.json(_c);
   const { limit = 100, offset = 0 } = req.query;
-  const packets = pktStore.filter(p => p.payload_type === 5).sort((a,b) => a.timestamp > b.timestamp ? 1 : -1);
+  const msgBoundaryObs = getBoundaryObserverIds();
+  const packets = pktStore.filter(p => p.payload_type === 5 && (!msgBoundaryObs || msgBoundaryObs.has(p.observer_id))).sort((a,b) => a.timestamp > b.timestamp ? 1 : -1);
+
+  // Build sender name → location map for boundary filtering (case-insensitive)
+  const senderLocMap = new Map();
+  if (configBoundary) {
+    for (const n of db.db.prepare('SELECT name, lat, lon FROM nodes WHERE name IS NOT NULL AND lat IS NOT NULL AND lon IS NOT NULL AND lat != 0 AND lon != 0').all()) {
+      senderLocMap.set(n.name.toLowerCase(), { lat: n.lat, lon: n.lon });
+    }
+  }
 
   // Group by message content + timestamp to deduplicate repeats
   const msgMap = new Map();
   for (const pkt of packets) {
     let decoded;
     try { decoded = JSON.parse(pkt.decoded_json); } catch { continue; }
-    // Only decrypted messages
+    // Only decrypted, named channel messages
     if (decoded.type !== 'CHAN') continue;
-    const ch = decoded.channel || 'unknown';
+    const ch = decoded.channel || '';
+    if (!ch.startsWith('#') || !approvedChannels.has(ch)) continue;
     if (ch !== channelHash) continue;
 
     const sender = decoded.sender || (decoded.text ? decoded.text.split(': ')[0] : null) || pkt.observer_name || pkt.observer_id || 'Unknown';
@@ -2305,6 +2517,11 @@ app.get('/api/channels/:hash/messages', (req, res) => {
           displaySender = decoded.text.slice(0, colonIdx);
           displayText = decoded.text.slice(colonIdx + 2);
         }
+      }
+      // Filter by sender location — if sender has a known location outside the boundary, skip
+      if (configBoundary && senderLocMap.size > 0) {
+        const senderLoc = senderLocMap.get(displaySender.toLowerCase());
+        if (senderLoc && !isPointInPolygon(senderLoc.lat, senderLoc.lon, configBoundary)) continue;
       }
       msgMap.set(dedupeKey, {
         sender: displaySender,
@@ -2340,17 +2557,25 @@ app.get('/api/observers', (req, res) => {
   const allNodes = db.db.prepare("SELECT public_key, lat, lon, role FROM nodes").all();
   const nodeMap = new Map();
   for (const n of allNodes) nodeMap.set(n.public_key?.toLowerCase(), n);
-  const result = observers.map(o => {
+  let result = observers.map(o => {
     const obsPackets = pktStore.byObserver.get(o.id) || [];
-    // byObserver is sorted newest-first, so count from front until we pass the cutoff
-    let count = 0;
-    for (let i = 0; i < obsPackets.length; i++) {
-      if (obsPackets[i].timestamp > oneHourAgo) count++;
-      else break;
-    }
+    const count = obsPackets.filter(p => p.timestamp > oneHourAgo).length;
     const node = nodeMap.get(o.id?.toLowerCase());
     return { ...o, packetsLastHour: count, lat: node?.lat || null, lon: node?.lon || null, nodeRole: node?.role || null };
   });
+  // Filter by boundary if configured
+  if (configBoundary) {
+    result = result.filter(o => {
+      if (o.lat && o.lon && !(o.lat === 0 && o.lon === 0)) {
+        return isPointInPolygon(o.lat, o.lon, configBoundary);
+      }
+      if (o.iata && IATA_COORDS[o.iata]) {
+        const { lat, lon } = IATA_COORDS[o.iata];
+        return isPointInPolygon(lat, lon, configBoundary);
+      }
+      return false; // no location info → exclude when boundary is active
+    });
+  }
   const _oResult = { observers: result, server_time: new Date().toISOString() };
   cache.set('observers', _oResult, TTL.observers);
   res.json(_oResult);
@@ -2372,7 +2597,7 @@ app.get('/api/observers/:id/analytics', (req, res) => {
   const id = req.params.id;
   const days = parseInt(req.query.days) || 7;
   const since = new Date(Date.now() - days * 86400000).toISOString();
-  const obsPackets = pktStore.enrichObservations((pktStore.byObserver.get(id) || []).filter(p => p.timestamp >= since)).sort((a, b) => b.timestamp.localeCompare(a.timestamp));
+  const obsPackets = (pktStore.byObserver.get(id) || []).filter(p => p.timestamp >= since).sort((a, b) => b.timestamp.localeCompare(a.timestamp));
 
   // Timeline: packets per hour (last N days, bucketed)
   const bucketMs = days <= 1 ? 3600000 : days <= 7 ? 3600000 * 4 : 86400000;
@@ -2443,7 +2668,9 @@ app.get('/api/observers/:id/analytics', (req, res) => {
 });
 
 app.get('/api/traces/:hash', (req, res) => {
+  const traceBoundaryObs = getBoundaryObserverIds();
   let packets = (pktStore.getSiblings(req.params.hash) || []).sort((a,b) => a.timestamp > b.timestamp ? 1 : -1);
+  if (traceBoundaryObs) packets = packets.filter(p => traceBoundaryObs.has(p.observer_id));
   const traces = packets.map(p => ({
     observer: p.observer_id,
     observer_name: p.observer_name || null,
@@ -2508,7 +2735,7 @@ app.get('/api/nodes/:pubkey/health', (req, res) => {
   });
 
   const result = {
-    node: (node.node || node), observers,
+    node: anonNode(node.node || node), observers,
     stats: {
       totalTransmissions: counts.transmissions,
       totalObservations: counts.observations,
@@ -2708,7 +2935,7 @@ app.get('/api/nodes/:pubkey/analytics', (req, res) => {
   const relayPct = totalWithPath > 0 ? Math.round(relayedCount / totalWithPath * 1000) / 10 : 0;
 
   const result = {
-    node: (node.node || node),
+    node: anonNode(node.node || node),
     timeRange: { from: fromISO, to: toISO, days },
     activityTimeline, snrTrend, packetTypeBreakdown, observerCoverage, hopDistribution, peerInteractions, uptimeHeatmap,
     computedStats: {
@@ -2994,8 +3221,6 @@ app.get('/{*splat}', (req, res) => {
 // --- Start ---
 const listenPort = process.env.PORT || config.port;
 if (require.main === module) {
-// Clean up phantom nodes created by the old autoLearnHopNodes behavior (fixes #133)
-db.removePhantomNodes();
 server.listen(listenPort, () => {
   const protocol = isHttps ? 'https' : 'http';
   console.log(`MeshCore Analyzer running on ${protocol}://localhost:${listenPort}`);
@@ -3083,4 +3308,4 @@ function shutdown(signal) {
 process.on('SIGTERM', () => shutdown('SIGTERM'));
 process.on('SIGINT',  () => shutdown('SIGINT'));
 
-module.exports = { app, server, wss, pktStore, db, cache, lastPathSeenMap, hopPrefixToKey, ambiguousHopPrefixes, resolveUniquePrefixMatch };
+module.exports = { app, server, wss, pktStore, db, cache };

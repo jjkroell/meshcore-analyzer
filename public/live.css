@@ -82,6 +82,9 @@
   font-weight: 700;
   font-variant-numeric: tabular-nums;
   color: var(--accent);
+  display: inline-block;
+  min-width: 3ch;
+  text-align: right;
 }
 
 .live-stat-pill.anim-pill span { color: var(--status-yellow); }

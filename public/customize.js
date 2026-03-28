@@ -5,7 +5,7 @@
 (function () {
   let styleEl = null;
   let originalValues = {};
-  let activeTab = 'branding';
+  let activeTab = 'theme';
 
   const DEFAULTS = {
     branding: {
@@ -57,11 +57,11 @@
       ],
       checklist: [],
       footerLinks: [
-        { label: '📦 Packets', url: '#/packets' },
-        { label: '🗺️ Network Map', url: '#/map' },
-        { label: '🔴 Live', url: '#/live' },
-        { label: '📡 All Nodes', url: '#/nodes' },
-        { label: '💬 Channels', url: '#/channels' }
+        { label: '📦 Packets', url: '/packets' },
+        { label: '🗺️ Network Map', url: '/map' },
+        { label: '🔴 Live', url: '/live' },
+        { label: '📡 All Nodes', url: '/nodes' },
+        { label: '💬 Channels', url: '/channels' }
       ]
     }
   };
@@ -543,7 +543,6 @@
       .cust-header h2 { margin: 0; font-size: 15px; }
       .cust-close { background: none; border: none; font-size: 18px; cursor: pointer; color: var(--text-muted); padding: 4px 8px; border-radius: 4px; }
       .cust-close:hover { background: var(--surface-3); color: var(--text); }
-      .cust-inner { flex: 1; display: flex; flex-direction: column; overflow: hidden; min-height: 0; }
       .cust-body { flex: 1; overflow-y: auto; min-height: 0; }
       .cust-tabs { display: flex; gap: 0; border-bottom: 1px solid var(--border); flex-shrink: 0; }
       .cust-tab { padding: 8px 10px; cursor: pointer; border: none; background: none; color: var(--text-muted);
@@ -626,10 +625,10 @@
 
   function renderTabs() {
     var tabs = [
-      { id: 'branding', label: '🏷️', title: 'Branding' },
       { id: 'theme', label: '🎨', title: 'Theme Colors' },
       { id: 'nodes', label: '🎯', title: 'Colors' },
       { id: 'home', label: '🏠', title: 'Home Page' },
+      { id: 'audio-lab', label: '🎵', title: 'Audio Lab' },
       { id: 'export', label: '📤', title: 'Export / Save' }
     ];
     return '<div class="cust-tabs">' +
@@ -885,7 +884,6 @@
     container.innerHTML =
       renderTabs() +
       '<div class="cust-body">' +
-      renderBranding() +
       renderTheme() +
       renderNodes() +
       renderHome() +
@@ -898,6 +896,11 @@
     // Tab switching
     container.querySelectorAll('.cust-tab').forEach(function (btn) {
       btn.addEventListener('click', function () {
+        if (btn.dataset.tab === 'audio-lab') {
+          goto('/audio-lab');
+          document.querySelector('.cust-overlay')?.classList.add('hidden');
+          return;
+        }
         activeTab = btn.dataset.tab;
         render(container);
       });
@@ -1132,7 +1135,12 @@
     if (copyBtn) copyBtn.addEventListener('click', function () {
       var ta = document.getElementById('custExportJson');
       if (ta) {
-        window.copyToClipboard(ta.value, function () {
+        navigator.clipboard.writeText(ta.value).then(function () {
+          copyBtn.textContent = '✓ Copied!';
+          setTimeout(function () { copyBtn.textContent = '📋 Copy to Clipboard'; }, 2000);
+        }).catch(function () {
+          ta.select();
+          document.execCommand('copy');
           copyBtn.textContent = '✓ Copied!';
           setTimeout(function () { copyBtn.textContent = '📋 Copy to Clipboard'; }, 2000);
         });

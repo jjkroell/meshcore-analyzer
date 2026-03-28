@@ -11,7 +11,9 @@ const CONFIG_PATHS = [
 ];
 
 function loadConfigFile(configPaths) {
-  const paths = configPaths || CONFIG_PATHS;
+  const paths = process.env.CONFIG_PATH
+    ? [process.env.CONFIG_PATH]
+    : (configPaths || CONFIG_PATHS);
   for (const p of paths) {
     try { return JSON.parse(fs.readFileSync(p, 'utf8')); } catch {}
   }
@@ -36,10 +38,10 @@ function loadThemeFile(themePaths) {
 function buildHealthConfig(config) {
   const _ht = (config && config.healthThresholds) || {};
   return {
-    infraDegradedMs: _ht.infraDegradedMs || 86400000,
+    infraDegradedMs: _ht.infraDegradedMs || 172800000,
     infraSilentMs:   _ht.infraSilentMs   || 259200000,
-    nodeDegradedMs:  _ht.nodeDegradedMs  || 3600000,
-    nodeSilentMs:    _ht.nodeSilentMs    || 86400000
+    nodeDegradedMs:  _ht.nodeDegradedMs  || 86400000,
+    nodeSilentMs:    _ht.nodeSilentMs    || 172800000
   };
 }
 
@@ -81,6 +83,22 @@ function computeContentHash(rawHex) {
 // Distance helper (degrees)
 function geoDist(lat1, lon1, lat2, lon2) {
   return Math.sqrt((lat1 - lat2) ** 2 + (lon1 - lon2) ** 2);
+}
+
+// Point-in-polygon: ray-casting algorithm
+// coords: array of [lat, lon] pairs
+function isPointInPolygon(lat, lon, coords) {
+  if (!coords || coords.length < 3) return false;
+  let inside = false;
+  const n = coords.length;
+  for (let i = 0, j = n - 1; i < n; j = i++) {
+    const yi = coords[i][0], xi = coords[i][1];
+    const yj = coords[j][0], xj = coords[j][1];
+    if ((yi > lat) !== (yj > lat) && lon < (xj - xi) * (lat - yi) / (yj - yi) + xi) {
+      inside = !inside;
+    }
+  }
+  return inside;
 }
 
 // Derive hashtag channel key
@@ -153,6 +171,7 @@ function disambiguateHops(hops, allNodes, maxHopDist) {
     allNodes._prefixIdx = {};
     allNodes._prefixIdxName = {};
     for (const n of allNodes) {
+      if (n.role === 'companion') continue; // companions are not routing infrastructure
       const pk = n.public_key.toLowerCase();
       for (let len = 1; len <= 3; len++) {
         const p = pk.slice(0, len * 2);
@@ -205,12 +224,12 @@ function disambiguateHops(hops, allNodes, maxHopDist) {
     if (!prev && !next) continue;
     const dPrev = prev ? geoDist(r.lat, r.lon, prev.lat, prev.lon) : 0;
     const dNext = next ? geoDist(r.lat, r.lon, next.lat, next.lon) : 0;
-    if ((prev && dPrev > MAX_HOP_DIST) && (next && dNext > MAX_HOP_DIST)) { r.unreliable = true; r.lat = null; r.lon = null; }
-    else if (prev && !next && dPrev > MAX_HOP_DIST) { r.unreliable = true; r.lat = null; r.lon = null; }
-    else if (!prev && next && dNext > MAX_HOP_DIST) { r.unreliable = true; r.lat = null; r.lon = null; }
+    if ((prev && dPrev > MAX_HOP_DIST) || (next && dNext > MAX_HOP_DIST)) {
+      r.unreliable = true;
+    }
   }
 
-  return resolved.map(r => ({ hop: r.hop, name: r.name, lat: r.lat, lon: r.lon, pubkey: r.pubkey, known: !!r.known, ambiguous: !!r.candidates, unreliable: !!r.unreliable }));
+  return resolved;
 }
 
 // Update hash_size maps for a single packet
@@ -293,6 +312,45 @@ function rebuildHashSizeMap(packets, hashSizeMap, hashSizeAllMap, hashSizeSeqMap
   }
 }
 
+// Deterministic location anonymization — consistent per-node, ~200m radius
+// Uses the public key as a seed so the same node always gets the same offset.
+function _locHash(pk, salt) {
+  let h = (salt >>> 0) ^ 0x12345678;
+  for (let i = 0; i < Math.min(pk.length, 32); i++) {
+    h = Math.imul(h ^ pk.charCodeAt(i), 0x9e3779b9) >>> 0;
+  }
+  h = Math.imul(h ^ (h >>> 16), 0x85ebca6b) >>> 0;
+  h = Math.imul(h ^ (h >>> 13), 0xc2b2ae35) >>> 0;
+  return ((h ^ (h >>> 16)) >>> 0) / 0xFFFFFFFF; // [0, 1]
+}
+
+function anonymizeNodeLocation(node) {
+  if (!node) return node;
+  const lat = node.lat, lon = node.lon;
+  if (!lat || !lon || (lat === 0 && lon === 0)) return node;
+  const pk = (node.public_key || '').toLowerCase();
+  if (!pk) return node;
+
+  // ~100 m in degrees: 0.0009° lat, lon scaled by cos(lat) for accuracy
+  const MAX_M = 100;
+  const DEG_PER_M_LAT = 1 / 111320;
+  const DEG_PER_M_LON = 1 / (111320 * Math.cos(lat * Math.PI / 180));
+
+  // Map [0,1] floats to [-1, 1]
+  const latFrac = _locHash(pk, 0xA1B2C3D4) * 2 - 1;
+  const lonFrac = _locHash(pk, 0xDEADBEEF) * 2 - 1;
+
+  // Clamp to circle: scale down if outside unit circle
+  const mag = Math.sqrt(latFrac * latFrac + lonFrac * lonFrac);
+  const scale = mag > 1 ? 1 / mag : 1;
+
+  return {
+    ...node,
+    lat: lat + latFrac * scale * MAX_M * DEG_PER_M_LAT,
+    lon: lon + lonFrac * scale * MAX_M * DEG_PER_M_LON
+  };
+}
+
 // API key middleware factory
 function requireApiKey(apiKey) {
   return function(req, res, next) {
@@ -311,12 +369,14 @@ module.exports = {
   isHashSizeFlipFlop,
   computeContentHash,
   geoDist,
+  isPointInPolygon,
   deriveHashtagChannelKey,
   buildBreakdown,
   disambiguateHops,
   updateHashSizeForPacket,
   rebuildHashSizeMap,
   requireApiKey,
+  anonymizeNodeLocation,
   CONFIG_PATHS,
   THEME_PATHS
 };

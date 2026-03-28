@@ -96,6 +96,7 @@
             <legend class="mc-label">Display</legend>
             <label for="mcHeatmap"><input type="checkbox" id="mcHeatmap"> Heat map</label>
             <label for="mcHashLabels"><input type="checkbox" id="mcHashLabels"> Hash prefix labels</label>
+            <label for="mcBoundaryShow"><input type="checkbox" id="mcBoundaryShow"> Show boundary</label>
           </fieldset>
           <fieldset class="mc-section">
             <legend class="mc-label">Status</legend>
@@ -130,8 +131,8 @@
       </div>`;
 
     // Init Leaflet — restore saved position or use configurable defaults (#115)
-    let defaultCenter = [37.6, -122.1];
-    let defaultZoom = 9;
+    let defaultCenter = [49.59, -124.18];
+    let defaultZoom = 7;
     try {
       const mapCfg = await (await fetch('/api/config/map')).json();
       if (Array.isArray(mapCfg.center) && mapCfg.center.length === 2) defaultCenter = mapCfg.center;
@@ -140,7 +141,7 @@
     let initCenter = defaultCenter;
     let initZoom = defaultZoom;
     // Check URL query params first (from packet detail links)
-    const urlParams = new URLSearchParams(location.hash.split('?')[1] || '');
+    const urlParams = new URLSearchParams(location.search.slice(1));
     if (urlParams.get('lat') && urlParams.get('lon')) {
       initCenter = [parseFloat(urlParams.get('lat')), parseFloat(urlParams.get('lon'))];
       initZoom = parseInt(urlParams.get('zoom')) || 12;
@@ -239,6 +240,23 @@
         document.querySelectorAll('#mcStatusFilter .btn').forEach(b => b.classList.toggle('active', b.dataset.status === filters.statusFilter));
         renderMarkers();
       });
+    });
+
+    // Boundary: load from config
+    try {
+      const bCfg = await (await fetch('/api/config/boundary')).json();
+      if (bCfg && Array.isArray(bCfg.coords) && bCfg.coords.length >= 3) {
+        boundaryCoords = bCfg.coords;
+      }
+    } catch {}
+    const boundaryShowEl = document.getElementById('mcBoundaryShow');
+    const savedBoundaryShow = localStorage.getItem('meshcore-boundary-show');
+    const showBoundary = boundaryCoords.length >= 3 && (savedBoundaryShow === null ? true : savedBoundaryShow === 'true');
+    boundaryShowEl.checked = showBoundary;
+    if (showBoundary) drawBoundaryLayer();
+    boundaryShowEl.addEventListener('change', e => {
+      localStorage.setItem('meshcore-boundary-show', e.target.checked);
+      if (e.target.checked) drawBoundaryLayer(); else { if (boundaryLayer) { map.removeLayer(boundaryLayer); boundaryLayer = null; } }
     });
 
     // WS for live advert updates
@@ -708,9 +726,7 @@
     const lastAdvert = node.last_seen ? timeAgo(node.last_seen) : '—';
     const roleBadge = `<span style="display:inline-block;padding:2px 8px;border-radius:12px;font-size:11px;font-weight:600;background:${ROLE_COLORS[node.role] || '#4b5563'};color:#fff;">${(node.role || 'unknown').toUpperCase()}</span>`;
     const hs = node.hash_size || 1;
-    const hashPrefix = node.public_key ? node.public_key.slice(0, hs * 2).toUpperCase() : '—';
-    const hashPrefixRow = `<dt style="color:var(--text-muted);float:left;clear:left;width:80px;padding:2px 0;">Hash Prefix</dt>
-          <dd style="font-family:var(--mono);font-size:11px;font-weight:700;margin-left:88px;padding:2px 0;">${safeEsc(hashPrefix)} <span style="font-weight:400;color:var(--text-muted);">(${hs}B)</span></dd>`;
+    const hashPrefixRow = '';
 
     return `
       <div class="map-popup" style="font-family:var(--font);min-width:180px;">

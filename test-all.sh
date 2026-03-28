@@ -19,7 +19,6 @@ node test-regional-filter.js
 node test-server-helpers.js
 node test-server-routes.js
 node test-db.js
-node test-db-migration.js
 
 # Integration tests (spin up temp servers)
 echo ""

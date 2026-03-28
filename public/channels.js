@@ -42,8 +42,7 @@
     tip.setAttribute('role', 'tooltip');
     const roleKey = node.role || (node.is_repeater ? 'repeater' : node.is_room ? 'room' : node.is_sensor ? 'sensor' : 'companion');
     const role = (ROLE_EMOJI[roleKey] || '●') + ' ' + (ROLE_LABELS[roleKey] || roleKey);
-    const lastActivity = node.last_heard || node.last_seen;
-    const lastSeen = lastActivity ? timeAgo(lastActivity) : 'unknown';
+    const lastSeen = node.last_seen ? timeAgo(node.last_seen) : 'unknown';
     tip.innerHTML = `<div class="ch-tooltip-name">${escapeHtml(node.name)}</div>
       <div class="ch-tooltip-role">${role}</div>
       <div class="ch-tooltip-meta">Last seen: ${lastSeen}</div>
@@ -117,8 +116,7 @@
       const adverts = detail.recentAdverts || [];
       const roleKey = n.role || (n.is_repeater ? 'repeater' : n.is_room ? 'room' : n.is_sensor ? 'sensor' : 'companion');
       const role = (ROLE_EMOJI[roleKey] || '●') + ' ' + (ROLE_LABELS[roleKey] || roleKey);
-      const lastActivity = n.last_heard || n.last_seen;
-      const lastSeen = lastActivity ? timeAgo(lastActivity) : 'unknown';
+      const lastSeen = n.last_seen ? timeAgo(n.last_seen) : 'unknown';
 
       panel.innerHTML = `<div class="ch-node-panel-header">
           <strong>${escapeHtml(n.name || 'Unknown')}</strong>
@@ -240,6 +238,10 @@
           <div class="ch-sidebar-title"><span class="ch-icon">💬</span> Channels</div>
         </div>
         <div id="chRegionFilter" class="region-filter-container" style="padding:0 8px"></div>
+        <div class="ch-add-channel">
+          <input type="text" id="chAddInput" placeholder="#channel-name" aria-label="Add channel by name">
+          <button id="chAddBtn" title="Add channel">+</button>
+        </div>
         <div class="ch-channel-list" id="chList" role="listbox" aria-label="Channels">
           <div class="ch-loading">Loading channels…</div>
         </div>
@@ -446,7 +448,8 @@
         var payload = m.data?.decoded?.payload;
         if (!payload) continue;
 
-        var channelName = payload.channel || 'unknown';
+        var channelName = payload.channel;
+        if (!channelName || !channelName.startsWith('#')) continue;
         var rawText = payload.text || '';
         var sender = payload.sender || null;
         var displayText = rawText;
@@ -477,22 +480,16 @@
         if (pktHash) seenHashes.add(pktHash + ':' + channelName);
 
         var ch = channels.find(function (c) { return c.hash === channelName; });
+        // Only update channels that already exist in the approved list from the API.
+        // Never add new channels from WS events — channels are only added via /api/channels/add.
         if (ch) {
-          if (isFirstObservation) ch.messageCount = (ch.messageCount || 0) + 1;
+          if (isFirstObservation) {
+            ch.messageCount = (ch.messageCount || 0) + 1;
+            if (channelName !== selectedHash) ch.unread = (ch.unread || 0) + 1;
+          }
           ch.lastActivityMs = Date.now();
           ch.lastSender = sender;
           ch.lastMessage = truncate(displayText, 100);
-          channelListDirty = true;
-        } else if (isFirstObservation) {
-          // New channel we haven't seen
-          channels.push({
-            hash: channelName,
-            name: channelName,
-            messageCount: 1,
-            lastActivityMs: Date.now(),
-            lastSender: sender,
-            lastMessage: truncate(displayText, 100),
-          });
           channelListDirty = true;
         }
 
@@ -524,7 +521,7 @@
       }
 
       if (channelListDirty) {
-        channels.sort(function (a, b) { return (b.lastActivityMs || 0) - (a.lastActivityMs || 0); });
+        channels.sort(function (a, b) { return (a.name || a.hash || '').localeCompare(b.name || b.hash || ''); });
         renderChannelList();
       }
       if (messagesDirty) {
@@ -533,10 +530,10 @@
         var ch2 = channels.find(function (c) { return c.hash === selectedHash; });
         var header = document.getElementById('chHeader');
         if (header && ch2) {
-          header.querySelector('.ch-header-text').textContent = (ch2.name || 'Channel ' + selectedHash) + ' — ' + messages.length + ' messages';
+          header.querySelector('.ch-header-text').textContent = ch2.name || 'Channel ' + selectedHash;
         }
         var msgEl = document.getElementById('chMessages');
-        if (msgEl && autoScroll) scrollToBottom();
+        if (msgEl && autoScroll) scrollToTop();
         else {
           document.getElementById('chScrollBtn')?.classList.remove('hidden');
           var liveEl = document.getElementById('chAriaLive');
@@ -579,11 +576,11 @@
     try {
       const rp = RegionFilter.getRegionParam();
       const qs = rp ? '?region=' + encodeURIComponent(rp) : '';
-      const data = await api('/channels' + qs, { ttl: CLIENT_TTL.channels });
+      const data = await api('/channels' + qs, { ttl: bustCache ? 0 : CLIENT_TTL.channels });
       channels = (data.channels || []).map(ch => {
         ch.lastActivityMs = ch.lastActivity ? new Date(ch.lastActivity).getTime() : 0;
         return ch;
-      }).sort((a, b) => (b.lastActivityMs || 0) - (a.lastActivityMs || 0));
+      }).sort((a, b) => (a.name || a.hash || '').localeCompare(b.name || b.hash || ''));
       renderChannelList();
     } catch (e) {
       if (!silent) {
@@ -598,10 +595,7 @@
     if (!el) return;
     if (channels.length === 0) { el.innerHTML = '<div class="ch-empty">No channels found</div>'; return; }
 
-    // Sort by message count desc
-    const sorted = [...channels].sort((a, b) => {
-      return (b.messageCount || 0) - (a.messageCount || 0);
-    });
+    const sorted = [...channels].sort((a, b) => (a.name || a.hash || '').localeCompare(b.name || b.hash || ''));
 
     el.innerHTML = sorted.map(ch => {
       const name = ch.name || `Channel ${ch.hash}`;
@@ -609,15 +603,13 @@
       const time = ch.lastActivityMs ? formatSecondsAgo(Math.floor((Date.now() - ch.lastActivityMs) / 1000)) : '';
       const preview = ch.lastSender && ch.lastMessage
         ? `${ch.lastSender}: ${truncate(ch.lastMessage, 28)}`
-        : `${ch.messageCount} messages`;
+        : '';
       const sel = selectedHash === ch.hash ? ' selected' : '';
-      const abbr = name.startsWith('#') ? name.slice(0, 3) : name.slice(0, 2).toUpperCase();
-
       return `<button class="ch-item${sel}" data-hash="${ch.hash}" type="button" role="option" aria-selected="${selectedHash === ch.hash ? 'true' : 'false'}" aria-label="${escapeHtml(name)}">
-        <div class="ch-badge" style="background:${color}" aria-hidden="true">${escapeHtml(abbr)}</div>
+        <div class="ch-badge" style="background:${color};box-shadow:0 0 0 3px ${color}22" aria-hidden="true"><svg viewBox="0 0 100 100" style="width:22px;height:22px;"><circle cx="50" cy="50" r="44" fill="none" stroke="white" stroke-width="1" opacity="0.15"/><circle cx="50" cy="50" r="30" fill="none" stroke="white" stroke-width="1.2" opacity="0.25"/><g stroke="white" stroke-width="1.8" opacity="0.55" stroke-linecap="round"><line x1="50" y1="50" x2="80" y2="50"/><line x1="50" y1="50" x2="65" y2="76"/><line x1="50" y1="50" x2="35" y2="76"/><line x1="50" y1="50" x2="20" y2="50"/><line x1="50" y1="50" x2="35" y2="24"/><line x1="50" y1="50" x2="65" y2="24"/></g><g stroke="white" stroke-width="1.2" opacity="0.3" stroke-linecap="round"><line x1="80" y1="50" x2="65" y2="76"/><line x1="65" y1="76" x2="35" y2="76"/><line x1="35" y1="76" x2="20" y2="50"/><line x1="20" y1="50" x2="35" y2="24"/><line x1="35" y1="24" x2="65" y2="24"/><line x1="65" y1="24" x2="80" y2="50"/></g><g fill="white" opacity="0.8"><circle cx="80" cy="50" r="4.5"/><circle cx="65" cy="76" r="4.5"/><circle cx="35" cy="76" r="4.5"/><circle cx="20" cy="50" r="4.5"/><circle cx="35" cy="24" r="4.5"/><circle cx="65" cy="24" r="4.5"/></g><circle cx="50" cy="50" r="14" fill="white" opacity="0.92"/><circle cx="50" cy="50" r="6" fill="white" opacity="0.3"/></svg></div>
         <div class="ch-item-body">
           <div class="ch-item-top">
-            <span class="ch-item-name">${escapeHtml(name)}</span>
+            <span class="ch-item-name">${escapeHtml(name)}${ch.unread && selectedHash !== ch.hash ? `<span class="ch-unread-dot" aria-label="New messages" style="background:${color}"></span>` : ''}</span>
             <span class="ch-item-time" data-channel-hash="${ch.hash}">${time}</span>
           </div>
           <div class="ch-item-preview">${escapeHtml(preview)}</div>
@@ -628,7 +620,10 @@
 
   async function selectChannel(hash) {
     selectedHash = hash;
-    history.replaceState(null, '', `#/channels/${encodeURIComponent(hash)}`);
+    const slug = hash.startsWith('#') ? hash.slice(1) : hash;
+    history.replaceState(null, '', `/channels/${encodeURIComponent(slug)}`);
+    const selCh = channels.find(c => c.hash === hash);
+    if (selCh) selCh.unread = 0;
     renderChannelList();
     const ch = channels.find(c => c.hash === hash);
     const name = ch?.name || `Channel ${hash}`;
