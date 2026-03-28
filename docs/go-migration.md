@@ -27,7 +27,7 @@ Guide for existing CoreScope users switching from the Node.js Docker image to th
 - An existing CoreScope deployment running the Node.js image
 - The repository cloned locally (needed to build the Go image):
   ```bash
-  git clone https://github.com/meshcore-dev/meshcore-analyzer.git
+  git clone https://github.com/Kpa-clawbot/meshcore-analyzer.git
   cd corescope
   git pull   # get latest
   ```
