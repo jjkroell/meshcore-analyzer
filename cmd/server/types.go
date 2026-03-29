@@ -903,8 +903,9 @@ type ThemeResponse struct {
 }
 
 type MapConfigResponse struct {
-	Center []float64 `json:"center"`
-	Zoom   int       `json:"zoom"`
+	Center   []float64   `json:"center"`
+	Zoom     int         `json:"zoom"`
+	Boundary [][]float64 `json:"boundary,omitempty"`
 }
 
 type ClientConfigResponse struct {

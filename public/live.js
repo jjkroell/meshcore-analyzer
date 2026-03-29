@@ -8,6 +8,19 @@
   let map, ws, nodesLayer, pathsLayer, animLayer, heatLayer;
   let nodeMarkers = {};
   let nodeData = {};
+  let mapBoundary = null; // polygon [[lat,lon],...] loaded from /api/config/map
+
+  function pointInBoundary(lat, lon) {
+    if (!mapBoundary || mapBoundary.length < 3) return true;
+    var n = mapBoundary.length, inside = false, j = n - 1;
+    for (var i = 0; i < n; i++) {
+      var yi = mapBoundary[i][0], xi = mapBoundary[i][1];
+      var yj = mapBoundary[j][0], xj = mapBoundary[j][1];
+      if (((yi > lat) !== (yj > lat)) && (lon < (xj - xi) * (lat - yi) / (yj - yi) + xi)) inside = !inside;
+      j = i;
+    }
+    return inside;
+  }
   let packetCount = 0;
   let activeAnims = 0;
   let nodeActivity = {};
@@ -723,6 +736,7 @@
       const mapCfg = await (await fetch('/api/config/map')).json();
       if (Array.isArray(mapCfg.center) && mapCfg.center.length === 2) mapCenter = mapCfg.center;
       if (typeof mapCfg.zoom === 'number') mapZoom = mapCfg.zoom;
+      if (Array.isArray(mapCfg.boundary) && mapCfg.boundary.length >= 3) mapBoundary = mapCfg.boundary;
     } catch {}
 
     map = L.map('liveMap', {
@@ -1619,7 +1633,7 @@
       var p = d.payload || {};
       if (h.payloadTypeName === 'ADVERT' && p.pubKey) {
         var key = p.pubKey;
-        if (!nodeMarkers[key] && p.lat != null && p.lon != null && !(p.lat === 0 && p.lon === 0)) {
+        if (!nodeMarkers[key] && p.lat != null && p.lon != null && !(p.lat === 0 && p.lon === 0) && pointInBoundary(p.lat, p.lon)) {
           var n = { public_key: key, name: p.name || key.slice(0,8), role: p.role || 'unknown', lat: p.lat, lon: p.lon, _liveSeen: Date.now() };
           nodeData[key] = n;
           addNodeMarker(n);

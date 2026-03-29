@@ -288,7 +288,27 @@ func (s *Server) handleConfigMap(w http.ResponseWriter, r *http.Request) {
 	if zoom == 0 {
 		zoom = 9
 	}
-	writeJSON(w, MapConfigResponse{Center: center, Zoom: zoom})
+	writeJSON(w, MapConfigResponse{Center: center, Zoom: zoom, Boundary: s.cfg.Boundary})
+}
+
+// pointInPolygon returns true if (lat, lon) is inside the polygon using ray casting.
+// polygon is a slice of [lat, lon] pairs.
+func pointInPolygon(lat, lon float64, polygon [][]float64) bool {
+	n := len(polygon)
+	if n < 3 {
+		return false
+	}
+	inside := false
+	j := n - 1
+	for i := 0; i < n; i++ {
+		yi, xi := polygon[i][0], polygon[i][1]
+		yj, xj := polygon[j][0], polygon[j][1]
+		if ((yi > lat) != (yj > lat)) && (lon < (xj-xi)*(lat-yi)/(yj-yi)+xi) {
+			inside = !inside
+		}
+		j = i
+	}
+	return inside
 }
 
 // --- System Handlers ---
@@ -807,6 +827,21 @@ func (s *Server) handleNodes(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+
+	// Filter nodes to boundary polygon if configured
+	if len(s.cfg.Boundary) >= 3 {
+		filtered := nodes[:0]
+		for _, node := range nodes {
+			lat, latOK := node["lat"].(float64)
+			lon, lonOK := node["lon"].(float64)
+			if latOK && lonOK && pointInPolygon(lat, lon, s.cfg.Boundary) {
+				filtered = append(filtered, node)
+			}
+		}
+		total = len(filtered)
+		nodes = filtered
+	}
+
 	writeJSON(w, NodeListResponse{Nodes: nodes, Total: total, Counts: counts})
 }
 

@@ -45,6 +45,8 @@ type Config struct {
 	CacheTTL map[string]interface{} `json:"cacheTTL"`
 
 	Retention *RetentionConfig `json:"retention,omitempty"`
+
+	Boundary [][]float64 `json:"boundary,omitempty"`
 }
 
 type RetentionConfig struct {
