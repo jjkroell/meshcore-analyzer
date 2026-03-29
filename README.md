@@ -141,6 +141,29 @@ Copy `config.example.json` to `config.json` and edit:
 | `PORT` | Override config port |
 | `DB_PATH` | Override SQLite database path |
 
+### Geographic Boundary Filter
+
+You can restrict the nodes and live map to only show data within a geographic polygon by creating a `boundary.json` file in your data directory (alongside `config.json`).
+
+The file is a JSON array of `[latitude, longitude]` pairs that define the polygon vertices in order:
+
+```json
+[
+  [51.13, -129.0],
+  [51.13, -118.8],
+  [49.0,  -118.8],
+  [49.0,  -123.3],
+  [48.3,  -124.0],
+  [48.5,  -124.7]
+]
+```
+
+- Minimum 3 points required; the polygon is automatically closed (last point connects back to first)
+- If `boundary.json` is present it takes priority over any `boundary` field in `config.json`
+- If neither is present, no filtering is applied and all nodes/packets are shown
+- The boundary outline is drawn as a dashed blue overlay on both the live map and the static node map
+- Restart the server after creating or editing `boundary.json` to apply changes
+
 ## Architecture
 
 ```
