@@ -761,6 +761,13 @@
     pathsLayer = L.layerGroup().addTo(map);
     animLayer = L.layerGroup().addTo(map);
 
+    if (mapBoundary && mapBoundary.length >= 3) {
+      L.polygon(mapBoundary, {
+        color: '#3b82f6', weight: 2, opacity: 0.7,
+        fill: false, dashArray: '6 6', interactive: false
+      }).addTo(map);
+    }
+
     injectSVGFilters();
     await loadNodes();
     showHeatMap();

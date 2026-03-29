@@ -128,10 +128,12 @@
     // Init Leaflet — restore saved position or use configurable defaults (#115)
     let defaultCenter = [37.6, -122.1];
     let defaultZoom = 9;
+    let mapBoundary = null;
     try {
       const mapCfg = await (await fetch('/api/config/map')).json();
       if (Array.isArray(mapCfg.center) && mapCfg.center.length === 2) defaultCenter = mapCfg.center;
       if (typeof mapCfg.zoom === 'number') defaultZoom = mapCfg.zoom;
+      if (Array.isArray(mapCfg.boundary) && mapCfg.boundary.length >= 3) mapBoundary = mapCfg.boundary;
     } catch {}
     let initCenter = defaultCenter;
     let initZoom = defaultZoom;
@@ -181,6 +183,13 @@
 
     markerLayer = L.layerGroup().addTo(map);
     routeLayer = L.layerGroup().addTo(map);
+
+    if (mapBoundary && mapBoundary.length >= 3) {
+      L.polygon(mapBoundary, {
+        color: '#3b82f6', weight: 2, opacity: 0.7,
+        fill: false, dashArray: '6 6', interactive: false
+      }).addTo(map);
+    }
 
     // Fix map size on SPA load
     setTimeout(() => map.invalidateSize(), 100);
