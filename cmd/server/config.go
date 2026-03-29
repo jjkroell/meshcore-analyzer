@@ -97,6 +97,14 @@ func LoadConfig(baseDirs ...string) (*Config, error) {
 		if err := json.Unmarshal(data, cfg); err != nil {
 			continue
 		}
+		// Check for boundary.json override alongside config.json
+		boundaryPath := filepath.Join(filepath.Dir(p), "boundary.json")
+		if bdata, berr := os.ReadFile(boundaryPath); berr == nil {
+			var boundary [][]float64
+			if json.Unmarshal(bdata, &boundary) == nil && len(boundary) >= 3 {
+				cfg.Boundary = boundary
+			}
+		}
 		return cfg, nil
 	}
 	return cfg, nil // defaults
