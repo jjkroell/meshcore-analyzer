@@ -1374,6 +1374,10 @@ func (s *PacketStore) filterPackets(q PacketQuery) []*StoreTx {
 		}
 	}
 
+	if q.FilterFn != nil {
+		results = filterTxSlice(results, q.FilterFn)
+	}
+
 	return results
 }
 

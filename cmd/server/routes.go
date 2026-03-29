@@ -625,6 +625,13 @@ func (s *Server) handlePackets(w http.ResponseWriter, r *http.Request) {
 		t, _ := strconv.Atoi(v)
 		q.Route = &t
 	}
+	if len(s.cfg.Boundary) >= 3 {
+		nodeLocs := s.db.GetNodeLocations()
+		boundary := s.cfg.Boundary
+		q.FilterFn = func(tx *StoreTx) bool {
+			return packetSenderInBoundary(txToMap(tx), nodeLocs, boundary)
+		}
+	}
 
 	if r.URL.Query().Get("groupByHash") == "true" {
 		var result *PacketResult
@@ -652,20 +659,6 @@ func (s *Server) handlePackets(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeError(w, 500, err.Error())
 		return
-	}
-
-	// Apply boundary filter if configured — exclude packets from nodes with a
-	// known location outside the polygon.
-	if len(s.cfg.Boundary) >= 3 {
-		nodeLocs := s.db.GetNodeLocations()
-		kept := result.Packets[:0]
-		for _, p := range result.Packets {
-			if packetSenderInBoundary(p, nodeLocs, s.cfg.Boundary) {
-				kept = append(kept, p)
-			}
-		}
-		result.Packets = kept
-		result.Total = len(kept)
 	}
 
 	// Strip observations from default response

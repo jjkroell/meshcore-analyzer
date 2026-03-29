@@ -366,6 +366,7 @@ type PacketQuery struct {
 	Region   string
 	Node     string
 	Order    string // ASC or DESC
+	FilterFn func(*StoreTx) bool // optional post-filter applied before pagination
 }
 
 // PacketResult wraps paginated packet list.
