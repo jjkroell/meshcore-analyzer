@@ -311,6 +311,34 @@ func pointInPolygon(lat, lon float64, polygon [][]float64) bool {
 	return inside
 }
 
+// packetSenderInBoundary returns false only when the packet's sender node has a
+// known location that is outside the boundary polygon. If the sender or its
+// location is unknown the packet is included (benefit of the doubt).
+func packetSenderInBoundary(p map[string]interface{}, nodeLocs map[string]map[string]interface{}, boundary [][]float64) bool {
+	djStr, ok := p["decoded_json"].(string)
+	if !ok || djStr == "" {
+		return true
+	}
+	var dj map[string]interface{}
+	if json.Unmarshal([]byte(djStr), &dj) != nil {
+		return true
+	}
+	pk, ok := dj["pubKey"].(string)
+	if !ok || pk == "" {
+		return true
+	}
+	loc, found := nodeLocs[strings.ToLower(pk)]
+	if !found {
+		return true
+	}
+	lat, latOK := loc["lat"].(float64)
+	lon, lonOK := loc["lon"].(float64)
+	if !latOK || !lonOK || (lat == 0 && lon == 0) {
+		return true
+	}
+	return pointInPolygon(lat, lon, boundary)
+}
+
 // --- System Handlers ---
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -624,6 +652,20 @@ func (s *Server) handlePackets(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeError(w, 500, err.Error())
 		return
+	}
+
+	// Apply boundary filter if configured — exclude packets from nodes with a
+	// known location outside the polygon.
+	if len(s.cfg.Boundary) >= 3 {
+		nodeLocs := s.db.GetNodeLocations()
+		kept := result.Packets[:0]
+		for _, p := range result.Packets {
+			if packetSenderInBoundary(p, nodeLocs, s.cfg.Boundary) {
+				kept = append(kept, p)
+			}
+		}
+		result.Packets = kept
+		result.Total = len(kept)
 	}
 
 	// Strip observations from default response
