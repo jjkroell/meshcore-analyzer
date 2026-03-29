@@ -264,7 +264,11 @@ func handleMessage(store *Store, tag string, source MQTTSource, m mqtt.Message, 
 				inBoundary := len(boundary) < 3 ||
 					decoded.Payload.Lat == nil || decoded.Payload.Lon == nil ||
 					pointInPolygon(*decoded.Payload.Lat, *decoded.Payload.Lon, boundary)
-				if inBoundary {
+				if !inBoundary {
+					// Node confirmed outside boundary — remove any zombie entry that
+					// may have been created from a non-ADVERT packet with no location.
+					_ = store.DeleteNode(decoded.Payload.PubKey)
+				} else {
 					role := advertRole(decoded.Payload.Flags)
 					if err := store.UpsertNode(decoded.Payload.PubKey, decoded.Payload.Name, role, decoded.Payload.Lat, decoded.Payload.Lon, pktData.Timestamp); err != nil {
 						log.Printf("MQTT [%s] node upsert error: %v", tag, err)

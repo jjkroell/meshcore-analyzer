@@ -461,6 +461,12 @@ func (s *Store) UpsertNode(pubKey, name, role string, lat, lon *float64, lastSee
 	return err
 }
 
+// DeleteNode removes a node record by public key.
+func (s *Store) DeleteNode(pubKey string) error {
+	_, err := s.db.Exec(`DELETE FROM nodes WHERE public_key = ?`, pubKey)
+	return err
+}
+
 // IncrementAdvertCount increments advert_count for a node by public key.
 func (s *Store) IncrementAdvertCount(pubKey string) error {
 	_, err := s.stmtIncrementAdvertCount.Exec(pubKey)
