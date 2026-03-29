@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 )
 
@@ -34,6 +35,7 @@ type Config struct {
 	ChannelKeys     map[string]string `json:"channelKeys,omitempty"`
 	HashChannels    []string          `json:"hashChannels,omitempty"`
 	Retention       *RetentionConfig  `json:"retention,omitempty"`
+	Boundary        [][]float64       `json:"boundary,omitempty"`
 }
 
 // RetentionConfig controls how long stale nodes are kept before being moved to inactive_nodes.
@@ -92,7 +94,30 @@ func LoadConfig(path string) (*Config, error) {
 		}}
 	}
 
+	// Check for boundary.json override alongside config.json
+	boundaryPath := filepath.Join(filepath.Dir(path), "boundary.json")
+	if bdata, berr := os.ReadFile(boundaryPath); berr == nil {
+		var boundary [][]float64
+		if json.Unmarshal(bdata, &boundary) == nil && len(boundary) >= 3 {
+			cfg.Boundary = boundary
+		}
+	}
+
 	return &cfg, nil
+}
+
+// pointInPolygon returns true if (lat, lon) is inside the polygon using ray casting.
+func pointInPolygon(lat, lon float64, poly [][]float64) bool {
+	n, inside, j := len(poly), false, len(poly)-1
+	for i := 0; i < n; i++ {
+		yi, xi := poly[i][0], poly[i][1]
+		yj, xj := poly[j][0], poly[j][1]
+		if ((yi > lat) != (yj > lat)) && (lon < (xj-xi)*(lat-yi)/(yj-yi)+xi) {
+			inside = !inside
+		}
+		j = i
+	}
+	return inside
 }
 
 // ResolvedSources returns the final list of MQTT sources to connect to.

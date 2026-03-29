@@ -136,7 +136,7 @@ func main() {
 		// Capture source for closure
 		src := source
 		opts.SetDefaultPublishHandler(func(c mqtt.Client, m mqtt.Message) {
-			handleMessage(store, tag, src, m, channelKeys)
+			handleMessage(store, tag, src, m, channelKeys, cfg.Boundary)
 		})
 
 		client := mqtt.NewClient(opts)
@@ -170,7 +170,7 @@ func main() {
 	log.Println("Done.")
 }
 
-func handleMessage(store *Store, tag string, source MQTTSource, m mqtt.Message, channelKeys map[string]string) {
+func handleMessage(store *Store, tag string, source MQTTSource, m mqtt.Message, channelKeys map[string]string, boundary [][]float64) {
 	defer func() {
 		if r := recover(); r != nil {
 			log.Printf("MQTT [%s] panic in handler: %v", tag, r)
@@ -261,19 +261,24 @@ func handleMessage(store *Store, tag string, source MQTTSource, m mqtt.Message, 
 		if decoded.Header.PayloadTypeName == "ADVERT" && decoded.Payload.PubKey != "" {
 			ok, reason := ValidateAdvert(&decoded.Payload)
 			if ok {
-				role := advertRole(decoded.Payload.Flags)
-				if err := store.UpsertNode(decoded.Payload.PubKey, decoded.Payload.Name, role, decoded.Payload.Lat, decoded.Payload.Lon, pktData.Timestamp); err != nil {
-					log.Printf("MQTT [%s] node upsert error: %v", tag, err)
-				}
-				if isNew {
-					if err := store.IncrementAdvertCount(decoded.Payload.PubKey); err != nil {
-						log.Printf("MQTT [%s] advert count error: %v", tag, err)
+				inBoundary := len(boundary) < 3 ||
+					decoded.Payload.Lat == nil || decoded.Payload.Lon == nil ||
+					pointInPolygon(*decoded.Payload.Lat, *decoded.Payload.Lon, boundary)
+				if inBoundary {
+					role := advertRole(decoded.Payload.Flags)
+					if err := store.UpsertNode(decoded.Payload.PubKey, decoded.Payload.Name, role, decoded.Payload.Lat, decoded.Payload.Lon, pktData.Timestamp); err != nil {
+						log.Printf("MQTT [%s] node upsert error: %v", tag, err)
 					}
-				}
-				// Update telemetry if present in advert
-				if decoded.Payload.BatteryMv != nil || decoded.Payload.TemperatureC != nil {
-					if err := store.UpdateNodeTelemetry(decoded.Payload.PubKey, decoded.Payload.BatteryMv, decoded.Payload.TemperatureC); err != nil {
-						log.Printf("MQTT [%s] node telemetry update error: %v", tag, err)
+					if isNew {
+						if err := store.IncrementAdvertCount(decoded.Payload.PubKey); err != nil {
+							log.Printf("MQTT [%s] advert count error: %v", tag, err)
+						}
+					}
+					// Update telemetry if present in advert
+					if decoded.Payload.BatteryMv != nil || decoded.Payload.TemperatureC != nil {
+						if err := store.UpdateNodeTelemetry(decoded.Payload.PubKey, decoded.Payload.BatteryMv, decoded.Payload.TemperatureC); err != nil {
+							log.Printf("MQTT [%s] node telemetry update error: %v", tag, err)
+						}
 					}
 				}
 			} else {
