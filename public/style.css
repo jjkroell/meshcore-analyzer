@@ -1098,6 +1098,7 @@ button.ch-item.ch-item-encrypted .ch-badge { filter: grayscale(0.6); }
 .hash-cell.hash-selected { outline: 2px solid var(--accent); outline-offset: -2px; box-shadow: 0 0 6px var(--accent); }
 .hash-cell-empty  { background: var(--card-bg); color: var(--text-muted); }
 .hash-cell-taken  { background: var(--status-green); color: #fff; }
+.hash-cell-possible { background: var(--status-yellow); color: #fff; }
 .hash-cell-collision { color: #fff; }
 .hash-matrix-tooltip {
   position: fixed; z-index: 9999; background: var(--surface-1); border: 1px solid var(--border);

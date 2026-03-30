@@ -1013,8 +1013,10 @@
       }
     }
 
-    // Only repeaters matter for routing — filter out non-repeaters for collision analysis
+    // Repeaters are confirmed routing nodes; null-role nodes may also route (possible conflict)
     const repeaterNodes = allNodes.filter(n => n.role === 'repeater');
+    const nullRoleNodes = allNodes.filter(n => !n.role);
+    const routingNodes = [...repeaterNodes, ...nullRoleNodes];
 
     let currentBytes = 1;
     function refreshHashViews(bytes) {
@@ -1035,11 +1037,11 @@
         else if (bytes === 2) matrixDesc.textContent = 'Each cell = first-byte group. Color shows worst 2-byte collision within. Click a cell to see the breakdown.';
         else matrixDesc.textContent = '3-byte prefix space is too large to visualize as a matrix — collision table is shown below.';
       }
-      renderHashMatrix(data.topHops, repeaterNodes, bytes, allNodes);
+      renderHashMatrix(data.topHops, routingNodes, bytes, allNodes);
       // Hide collision risk card for 3-byte — stats are shown in the matrix panel
       const riskCard = document.getElementById('collisionRiskSection');
       if (riskCard) riskCard.style.display = bytes === 3 ? 'none' : '';
-      if (bytes !== 3) renderCollisions(data.topHops, repeaterNodes, bytes);
+      if (bytes !== 3) renderCollisions(data.topHops, routingNodes, bytes);
     }
 
     // Wire up selector
@@ -1239,15 +1241,22 @@
           const hex = nibbles[hi] + nibbles[lo];
           const nodes = prefixNodes[hex] || [];
           const count = nodes.length;
+          const repeaterCount = nodes.filter(n => n.role === 'repeater').length;
+          const isCollision = count >= 2 && repeaterCount >= 2;
+          const isPossible = count >= 2 && !isCollision;
           let cellClass, bgStyle;
           if (count === 0) { cellClass = 'hash-cell-empty'; bgStyle = ''; }
           else if (count === 1) { cellClass = 'hash-cell-taken'; bgStyle = ''; }
+          else if (isPossible) { cellClass = 'hash-cell-possible'; bgStyle = ''; }
           else { const t = Math.min((count - 2) / 4, 1); bgStyle = `background:rgb(${Math.round(220+35*t)},${Math.round(120*(1-t))},30);`; cellClass = 'hash-cell-collision'; }
+          const nodeLabel = m => `<div style="font-size:11px">${esc(m.name||m.public_key.slice(0,12))}${!m.role ? ' <span style="opacity:0.7">(unknown role)</span>' : ''}</div>`;
           const tip1 = count === 0
             ? `<div class="hash-matrix-tooltip-hex">0x${hex}</div><div class="hash-matrix-tooltip-status">Available</div>`
             : count === 1
-              ? `<div class="hash-matrix-tooltip-hex">0x${hex}</div><div class="hash-matrix-tooltip-status">One node — no collision</div><div class="hash-matrix-tooltip-nodes"><div style="font-size:11px">${esc(nodes[0].name || nodes[0].public_key.slice(0,12))}</div></div>`
-              : `<div class="hash-matrix-tooltip-hex">0x${hex}</div><div class="hash-matrix-tooltip-status">${count} nodes — COLLISION</div><div class="hash-matrix-tooltip-nodes">${nodes.slice(0,5).map(m=>`<div style="font-size:11px">${esc(m.name||m.public_key.slice(0,12))}</div>`).join('')}${nodes.length>5?`<div class="hash-matrix-tooltip-status">+${nodes.length-5} more</div>`:''}</div>`;
+              ? `<div class="hash-matrix-tooltip-hex">0x${hex}</div><div class="hash-matrix-tooltip-status">One node — no collision</div><div class="hash-matrix-tooltip-nodes">${nodeLabel(nodes[0])}</div>`
+              : isPossible
+                ? `<div class="hash-matrix-tooltip-hex">0x${hex}</div><div class="hash-matrix-tooltip-status">${count} nodes — POSSIBLE CONFLICT</div><div class="hash-matrix-tooltip-nodes">${nodes.slice(0,5).map(nodeLabel).join('')}${nodes.length>5?`<div class="hash-matrix-tooltip-status">+${nodes.length-5} more</div>`:''}</div>`
+                : `<div class="hash-matrix-tooltip-hex">0x${hex}</div><div class="hash-matrix-tooltip-status">${count} nodes — COLLISION</div><div class="hash-matrix-tooltip-nodes">${nodes.slice(0,5).map(nodeLabel).join('')}${nodes.length>5?`<div class="hash-matrix-tooltip-status">+${nodes.length-5} more</div>`:''}</div>`;
           html += `<td class="hash-cell ${cellClass}${count ? ' hash-active' : ''}" data-hex="${hex}" data-tip="${tip1.replace(/"/g,'&quot;')}" style="width:${cellSize}px;height:${cellSize}px;text-align:center;${bgStyle}border:1px solid var(--border);cursor:${count ? 'pointer' : 'default'};font-size:11px;font-weight:${count >= 2 ? '700' : '400'}">${hex}</td>`;
         }
         html += '</tr>';
@@ -1257,8 +1266,8 @@
       <div style="margin-top:8px;font-size:0.8em;display:flex;gap:16px;align-items:center;flex-wrap:wrap">
         <span><span class="legend-swatch hash-cell-empty" style="border:1px solid var(--border)"></span> Available</span>
         <span><span class="legend-swatch hash-cell-taken"></span> One node</span>
-        <span><span class="legend-swatch hash-cell-collision" style="background:rgb(220,80,30)"></span> Collision (2)</span>
-        <span><span class="legend-swatch hash-cell-collision" style="background:rgb(255,0,30)"></span> Collision (3+)</span>
+        <span><span class="legend-swatch hash-cell-possible"></span> Possible conflict</span>
+        <span><span class="legend-swatch hash-cell-collision" style="background:rgb(220,80,30)"></span> Collision</span>
       </div>`;
       el.innerHTML = html;
 
@@ -1320,15 +1329,21 @@
           const info = firstByteInfo[hex] || { groupNodes: [], maxCollision: 0, collisionCount: 0 };
           const nodeCount = info.groupNodes.length;
           const maxCol = info.maxCollision;
+          // Classify worst overlap in group: confirmed collision (2+ repeaters) or possible (null-role involved)
+          const overlapping = Object.values(info.twoByteMap || {}).filter(v => v.length > 1);
+          const hasConfirmed = overlapping.some(ns => ns.filter(n => n.role === 'repeater').length >= 2);
+          const hasPossible = !hasConfirmed && overlapping.some(ns => ns.length >= 2);
           let cellClass2, bgStyle2;
           if (nodeCount === 0) { cellClass2 = 'hash-cell-empty'; bgStyle2 = ''; }
           else if (maxCol === 0) { cellClass2 = 'hash-cell-taken'; bgStyle2 = ''; }
+          else if (hasPossible) { cellClass2 = 'hash-cell-possible'; bgStyle2 = ''; }
           else { const t = Math.min((maxCol - 2) / 4, 1); bgStyle2 = `background:rgb(${Math.round(220+35*t)},${Math.round(120*(1-t))},30);`; cellClass2 = 'hash-cell-collision'; }
+          const nodeLabel2 = m => esc(m.name||m.public_key.slice(0,8)) + (!m.role ? ' (?)' : '');
           const tip2 = nodeCount === 0
             ? `<div class="hash-matrix-tooltip-hex">0x${hex}__</div><div class="hash-matrix-tooltip-status">No nodes in this group</div>`
             : info.collisionCount === 0
               ? `<div class="hash-matrix-tooltip-hex">0x${hex}__</div><div class="hash-matrix-tooltip-status">${nodeCount} node${nodeCount>1?'s':''} — no 2-byte collisions</div>`
-              : `<div class="hash-matrix-tooltip-hex">0x${hex}__</div><div class="hash-matrix-tooltip-status">${info.collisionCount} 2-byte collision${info.collisionCount>1?'s':''}</div><div class="hash-matrix-tooltip-nodes">${Object.entries(info.twoByteMap).filter(([,v])=>v.length>1).slice(0,4).map(([p,ns])=>`<div style="font-size:11px;padding:1px 0"><span style="color:var(--status-red);font-family:var(--mono);font-weight:700">${p}</span> — ${ns.map(m=>esc(m.name||m.public_key.slice(0,8))).join(', ')}</div>`).join('')}</div>`;
+              : `<div class="hash-matrix-tooltip-hex">0x${hex}__</div><div class="hash-matrix-tooltip-status">${hasConfirmed ? info.collisionCount + ' collision' + (info.collisionCount>1?'s':'') : 'Possible conflict'}</div><div class="hash-matrix-tooltip-nodes">${Object.entries(info.twoByteMap).filter(([,v])=>v.length>1).slice(0,4).map(([p,ns])=>`<div style="font-size:11px;padding:1px 0"><span style="color:${hasConfirmed?'var(--status-red)':'var(--status-yellow)'};font-family:var(--mono);font-weight:700">${p}</span> — ${ns.map(nodeLabel2).join(', ')}</div>`).join('')}</div>`;
           html += `<td class="hash-cell ${cellClass2}${nodeCount ? ' hash-active' : ''}" data-hex="${hex}" data-tip="${tip2.replace(/"/g,'&quot;')}" style="width:${cellSize}px;height:${cellSize}px;text-align:center;${bgStyle2}border:1px solid var(--border);cursor:${nodeCount ? 'pointer' : 'default'};font-size:11px;font-weight:${maxCol > 0 ? '700' : '400'}">${hex}</td>`;
         }
         html += '</tr>';
@@ -1338,7 +1353,8 @@
       <div style="margin-top:8px;font-size:0.8em;display:flex;gap:16px;align-items:center;flex-wrap:wrap">
         <span><span class="legend-swatch hash-cell-empty" style="border:1px solid var(--border)"></span> No nodes in group</span>
         <span><span class="legend-swatch hash-cell-taken"></span> Nodes present, no collision</span>
-        <span><span class="legend-swatch hash-cell-collision" style="background:rgb(220,80,30)"></span> 2-byte collision exists</span>
+        <span><span class="legend-swatch hash-cell-possible"></span> Possible conflict</span>
+        <span><span class="legend-swatch hash-cell-collision" style="background:rgb(220,80,30)"></span> Collision</span>
       </div>`;
       el.innerHTML = html;
 
