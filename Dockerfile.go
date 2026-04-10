@@ -6,6 +6,9 @@ ARG APP_VERSION=unknown
 ARG GIT_COMMIT=unknown
 ARG BUILD_TIME=unknown
 
+# Copy internal modules (required by replace directives in go.mod)
+COPY internal/ /internal/
+
 # Build server
 WORKDIR /build/server
 COPY cmd/server/go.mod cmd/server/go.sum ./

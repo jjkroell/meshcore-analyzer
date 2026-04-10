@@ -33,7 +33,7 @@
       selectedHash = null; messages = [];
       history.replaceState(null, '', '#/channels');
       const hdr = document.getElementById('chHeader');
-      if (hdr) hdr.querySelector('.ch-header-text').textContent = 'Select a channel';
+      if (hdr) hdr.querySelector('.ch-header-text').innerHTML = '<span class="ch-header-name">Select a channel</span>';
       const msgEl = document.getElementById('chMessages');
       if (msgEl) msgEl.innerHTML = '<div class="ch-empty">Choose a channel from the sidebar to view messages</div>';
       document.querySelector('.ch-layout')?.classList.remove('ch-show-main');
@@ -49,7 +49,7 @@
     const badge = document.getElementById('chBlockedBadge');
     if (!badge) return;
     const count = getBlockedChannels().size;
-    badge.textContent = count ? `Blocked (${count})` : 'Blocked';
+    badge.textContent = count ? `Hidden (${count})` : 'Hidden';
     badge.classList.toggle('has-blocked', count > 0);
   }
   function renderBlockedList() {
@@ -57,7 +57,7 @@
     if (!el) return;
     const blocked = getBlockedChannels();
     if (!blocked.size) {
-      el.innerHTML = '<div class="ch-empty">No blocked channels</div>';
+      el.innerHTML = '<div class="ch-empty">No hidden channels</div>';
       return;
     }
     const items = [...blocked].map(hash => {
@@ -68,7 +68,7 @@
       return `<div class="ch-blocked-item">
         <div class="ch-badge" style="--ch-color:${color};background:${color}"><span class="ch-badge-shine"></span>${escapeHtml(abbr)}</div>
         <span class="ch-blocked-name">${escapeHtml(name)}</span>
-        <button class="ch-unblock-btn" data-hash="${hash}" title="Unblock">Unblock</button>
+        <button class="ch-unblock-btn" data-hash="${hash}">Unhide</button>
       </div>`;
     });
     el.innerHTML = items.join('');
@@ -151,7 +151,7 @@
     history.replaceState(null, '', '#/channels');
     renderChannelList();
     const header = document.getElementById('chHeader');
-    if (header) header.querySelector('.ch-header-text').textContent = 'Select a channel';
+    if (header) header.querySelector('.ch-header-text').innerHTML = '<span class="ch-header-name">Select a channel</span>';
     const msgEl = document.getElementById('chMessages');
     if (msgEl) msgEl.innerHTML = '<div class="ch-empty">Choose a channel from the sidebar to view messages</div>';
     document.querySelector('.ch-layout')?.classList.remove('ch-show-main');
@@ -402,7 +402,13 @@
         <div class="ch-sidebar-header">
           <div class="ch-sidebar-title">
             <span class="ch-icon">💬</span> Channels
-            <button class="ch-blocked-badge" id="chBlockedBadge" title="Manage blocked channels">Blocked</button>
+            <button class="ch-blocked-badge" id="chBlockedBadge" title="Manage hidden channels">Hidden</button>
+            <button class="ch-add-btn" id="chAddBtn" title="Add a channel">+</button>
+          </div>
+          <div class="ch-add-form hidden" id="chAddForm">
+            <input class="ch-add-input" id="chAddInput" type="text" placeholder="#channelname" maxlength="65" spellcheck="false" />
+            <button class="ch-add-submit" id="chAddSubmit">Add</button>
+            <div class="ch-add-msg" id="chAddMsg"></div>
           </div>
         </div>
         <div id="chRegionFilter" class="region-filter-container" style="padding:0 8px"></div>
@@ -414,7 +420,7 @@
       <div class="ch-main" role="region" aria-label="Channel messages">
         <div class="ch-main-header" id="chHeader">
           <button class="ch-back-btn" id="chBackBtn" aria-label="Back to channels" data-action="ch-back">←</button>
-          <span class="ch-header-text">Select a channel</span>
+          <span class="ch-header-text"><span class="ch-header-name">Select a channel</span></span>
         </div>
         <div class="ch-messages" id="chMessages">
           <div class="ch-empty">Choose a channel from the sidebar to view messages</div>
@@ -423,6 +429,51 @@
         <button class="ch-scroll-btn hidden" id="chScrollBtn">↓ New messages</button>
       </div>
     </div>`;
+
+    // Add channel form
+    const addBtn = document.getElementById('chAddBtn');
+    const addForm = document.getElementById('chAddForm');
+    const addInput = document.getElementById('chAddInput');
+    const addSubmit = document.getElementById('chAddSubmit');
+    const addMsg = document.getElementById('chAddMsg');
+    if (addBtn) {
+      addBtn.addEventListener('click', () => {
+        addForm.classList.toggle('hidden');
+        if (!addForm.classList.contains('hidden')) addInput.focus();
+      });
+      const doAdd = async () => {
+        const raw = addInput.value.trim();
+        if (!raw) return;
+        const name = raw.startsWith('#') ? raw : '#' + raw;
+        addMsg.textContent = '';
+        addSubmit.disabled = true;
+        try {
+          const res = await fetch('/api/channels/add', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name })
+          });
+          if (res.ok) {
+            addMsg.style.color = '';
+            addMsg.classList.remove('ch-add-msg-error');
+            addMsg.innerHTML = name + ' added &mdash; will appear after first message is received';
+            addInput.value = '';
+            setTimeout(() => { addForm.classList.add('hidden'); addMsg.textContent = ''; }, 4000);
+            await loadChannels(true);
+          } else {
+            const txt = await res.text();
+            addMsg.classList.add('ch-add-msg-error');
+            addMsg.textContent = txt || 'Error';
+          }
+        } catch (e) {
+          addMsg.classList.add('ch-add-msg-error');
+          addMsg.textContent = 'Network error';
+        }
+        addSubmit.disabled = false;
+      };
+      addSubmit.addEventListener('click', doAdd);
+      addInput.addEventListener('keydown', e => { if (e.key === 'Enter') doAdd(); });
+    }
 
     // Blocked badge toggle
     const blockedBadge = document.getElementById('chBlockedBadge');
@@ -599,7 +650,8 @@
         var payload = m.data?.decoded?.payload;
         if (!payload) continue;
 
-        var channelName = payload.channel || 'unknown';
+        var channelName = payload.channel;
+        if (!channelName) continue;
         var rawText = payload.text || '';
         var sender = payload.sender || null;
         var displayText = rawText;
@@ -640,8 +692,10 @@
           ch.lastMessage = truncate(displayText, 100);
           channelListDirty = true;
           if (isFirstObservation && channelName !== selectedHash) unreadChannels.add(channelName);
-        } else if (isFirstObservation) {
-          // New channel we haven't seen
+        } else {
+          // New channel — channels.find() guard above ensures no duplicates.
+          // Do not gate on isFirstObservation: pktHash can be null for some
+          // GRP_TXT packets, which would cause the channel to never appear.
           channels.push({
             hash: channelName,
             name: channelName,
@@ -651,6 +705,7 @@
             lastMessage: truncate(displayText, 100),
           });
           channelListDirty = true;
+          if (channelName !== selectedHash) unreadChannels.add(channelName);
         }
 
         // If this message is for the selected channel, append to messages
@@ -681,7 +736,7 @@
       }
 
       if (channelListDirty) {
-        channels.sort(function (a, b) { return (b.lastActivityMs || 0) - (a.lastActivityMs || 0); });
+        channels.sort((a, b) => { const an = a.name || a.hash, bn = b.name || b.hash; if (an === 'public') return -1; if (bn === 'public') return 1; return an.localeCompare(bn, undefined, { numeric: true, sensitivity: 'base' }); });
         renderChannelList();
       }
       if (messagesDirty) {
@@ -690,7 +745,7 @@
         var ch2 = channels.find(function (c) { return c.hash === selectedHash; });
         var header = document.getElementById('chHeader');
         if (header && ch2) {
-          header.querySelector('.ch-header-text').textContent = (ch2.name || 'Channel ' + selectedHash) + ' — ' + messages.length + ' messages';
+          header.querySelector('.ch-header-text').innerHTML = `<span class="ch-header-name">${escapeHtml(ch2.name || 'Channel ' + selectedHash)}</span><span class="ch-header-count">${messages.length} messages</span>`;
         }
         var msgEl = document.getElementById('chMessages');
         if (msgEl && autoScroll) scrollToBottom();
@@ -753,7 +808,7 @@
         // Auto-block 'unknown' channels
         if (ch.name && ch.name.trim().toLowerCase() === 'unknown') blockChannel(ch.hash);
         return ch;
-      }).sort((a, b) => (b.lastActivityMs || 0) - (a.lastActivityMs || 0));
+      }).sort((a, b) => { const an = a.name || a.hash, bn = b.name || b.hash; if (an === 'public') return -1; if (bn === 'public') return 1; return an.localeCompare(bn, undefined, { numeric: true, sensitivity: 'base' }); });
       updateBlockedBadge();
       renderChannelList();
       reconcileSelectionAfterChannelRefresh();
@@ -781,7 +836,7 @@
         if (ch.lastActivityMs > 0 && now - ch.lastActivityMs > INACTIVE_MS) return false;
         return true;
       })
-      .sort((a, b) => (b.messageCount || 0) - (a.messageCount || 0));
+      .sort((a, b) => { const an = a.name || a.hash, bn = b.name || b.hash; if (an === 'public') return -1; if (bn === 'public') return 1; return an.localeCompare(bn, undefined, { numeric: true, sensitivity: 'base' }); });
 
     if (visible.length === 0) {
       el.innerHTML = '<div class="ch-empty">No active channels</div>';
@@ -811,7 +866,7 @@
           </div>
           <div class="ch-item-preview">${escapeHtml(preview)}</div>
         </div>
-        <span class="ch-block-btn" data-hash="${ch.hash}" title="Block channel" aria-label="Block ${escapeHtml(name)}" role="button" tabindex="0">✕</span>
+        <span class="ch-block-btn" data-hash="${ch.hash}" aria-label="Hide ${escapeHtml(name)}" role="button" tabindex="0">✕</span>
       </div>`;
     }).join('');
 
@@ -848,7 +903,7 @@
     const ch = channels.find(c => c.hash === hash);
     const name = ch?.name || `Channel ${formatHashHex(hash)}`;
     const header = document.getElementById('chHeader');
-    header.querySelector('.ch-header-text').textContent = `${name} — ${ch?.messageCount || 0} messages`;
+    header.querySelector('.ch-header-text').innerHTML = `<span class="ch-header-name">${escapeHtml(name)}</span><span class="ch-header-count">${ch?.messageCount || 0} messages</span>`;
 
     // On mobile, show the message view
     document.querySelector('.ch-layout')?.classList.add('ch-show-main');

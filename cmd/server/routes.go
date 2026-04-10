@@ -1,12 +1,17 @@
 package main
 
 import (
+	"crypto/sha256"
 	"crypto/subtle"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"regexp"
 	"runtime"
 	"sort"
@@ -14,6 +19,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/gorilla/mux"
 )
@@ -160,6 +166,7 @@ func (s *Server) RegisterRoutes(r *mux.Router) {
 
 	// Other endpoints
 	r.HandleFunc("/api/resolve-hops", s.handleResolveHops).Methods("GET")
+	r.HandleFunc("/api/channels/add", s.handleAddChannel).Methods("POST")
 	r.HandleFunc("/api/channels/{hash}/messages", s.handleChannelMessages).Methods("GET")
 	r.HandleFunc("/api/channels", s.handleChannels).Methods("GET")
 	r.HandleFunc("/api/observers/metrics/summary", s.handleMetricsSummary).Methods("GET")
@@ -174,6 +181,79 @@ func (s *Server) RegisterRoutes(r *mux.Router) {
 	// OpenAPI spec + Swagger UI
 	r.HandleFunc("/api/spec", s.handleOpenAPISpec).Methods("GET")
 	r.HandleFunc("/api/docs", s.handleSwaggerUI).Methods("GET")
+}
+
+// handleAddChannel allows users to register a new # channel for decryption.
+// Writes the name to user-channels.json in the data directory and signals
+// the ingestor process to reload via SIGUSR1.
+func (s *Server) handleAddChannel(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Name string `json:"name"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid JSON", http.StatusBadRequest)
+		return
+	}
+	name := strings.TrimSpace(req.Name)
+	if !strings.HasPrefix(name, "#") {
+		name = "#" + name
+	}
+	// Basic validation: must have at least one character after #, no spaces, printable ASCII.
+	inner := name[1:]
+	if len(inner) == 0 || len(inner) > 64 {
+		http.Error(w, "channel name must be 1–64 characters", http.StatusBadRequest)
+		return
+	}
+	for _, c := range inner {
+		if c > 127 || unicode.IsSpace(c) {
+			http.Error(w, "channel name must be ASCII with no spaces", http.StatusBadRequest)
+			return
+		}
+	}
+
+	// Derive AES key: SHA256(name)[:16].
+	h := sha256.Sum256([]byte(name))
+	key := hex.EncodeToString(h[:16])
+
+	// Persist to user-channels.json in the data directory.
+	dataDir := filepath.Dir(s.db.path)
+	userChannelsPath := filepath.Join(dataDir, "user-channels.json")
+
+	// Read existing list.
+	var names []string
+	if data, err := os.ReadFile(userChannelsPath); err == nil {
+		_ = json.Unmarshal(data, &names)
+	}
+	// Deduplicate.
+	exists := false
+	for _, n := range names {
+		if n == name {
+			exists = true
+			break
+		}
+	}
+	if !exists {
+		names = append(names, name)
+		data, _ := json.MarshalIndent(names, "", "  ")
+		if err := os.WriteFile(userChannelsPath, data, 0644); err != nil {
+			log.Printf("[channels] failed to write user-channels.json: %v", err)
+			http.Error(w, "failed to save channel", http.StatusInternalServerError)
+			return
+		}
+	}
+
+	// Signal ingestor to reload.
+	if err := exec.Command("pkill", "-USR1", "corescope-ingestor").Run(); err != nil {
+		log.Printf("[channels] failed to signal ingestor: %v", err)
+	} else {
+		log.Printf("[channels] signalled ingestor to reload keys")
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{
+		"name": name,
+		"key":  key,
+	})
 }
 
 func (s *Server) backfillStatusMiddleware(next http.Handler) http.Handler {

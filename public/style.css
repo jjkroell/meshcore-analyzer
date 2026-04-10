@@ -460,7 +460,8 @@ fieldset.mc-section legend.mc-label { padding: 0; }
   padding: 14px 16px; border-bottom: 1px solid var(--border);
 }
 .ch-sidebar-title {
-  display: flex; align-items: center; gap: 8px; font-size: 16px; font-weight: 700; margin-bottom: 8px;
+  display: flex; align-items: center; gap: 8px; margin-bottom: 8px;
+  font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .4px; color: var(--text-muted);
 }
 /* Blocked badge toggle */
 .ch-blocked-badge {
@@ -472,15 +473,50 @@ fieldset.mc-section legend.mc-label { padding: 0; }
 .ch-blocked-badge:hover { background: var(--row-hover); color: var(--text); }
 .ch-blocked-badge.has-blocked { border-color: var(--status-red); color: var(--status-red); }
 .ch-blocked-badge.active { background: var(--surface-2); color: var(--text); border-color: var(--accent); }
+/* Add channel button */
+.ch-add-btn {
+  padding: 3px 8px; border-radius: 20px; font-size: 14px; font-weight: 700; cursor: pointer;
+  border: 1px solid var(--border); background: transparent; color: var(--text-muted);
+  transition: background 0.15s, color 0.15s;
+}
+.ch-add-btn:hover { background: var(--row-hover); color: var(--accent); border-color: var(--accent); }
+.ch-add-form { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 6px 0 4px; }
+.ch-add-form.hidden { display: none; }
+.ch-add-input {
+  flex: 1; min-width: 0; padding: 5px 8px; border-radius: 6px; font-size: 13px;
+  border: 1px solid var(--border); background: var(--surface-2); color: var(--text);
+  outline: none;
+}
+.ch-add-input:focus { border-color: var(--accent); }
+.ch-add-submit {
+  padding: 5px 12px; border-radius: 6px; font-size: 13px; font-weight: 600; cursor: pointer;
+  border: none; background: var(--accent); color: #fff;
+  transition: opacity 0.15s;
+}
+.ch-add-submit:disabled { opacity: 0.5; cursor: default; }
+.ch-add-msg { width: 100%; font-size: 12px; color: var(--text-muted); }
+.ch-add-msg.ch-add-msg-error { color: var(--status-red); }
 /* Block button on channel items */
 .ch-block-btn {
   display: none; flex-shrink: 0; width: 22px; height: 22px; border-radius: 50%;
   border: none; background: transparent; color: var(--text-muted);
   cursor: pointer; font-size: 11px; align-items: center; justify-content: center;
   transition: background 0.12s, color 0.12s;
+  position: relative;
 }
 .ch-item:hover .ch-block-btn { display: flex; }
 .ch-block-btn:hover { background: var(--status-red) !important; color: #fff !important; }
+.ch-block-btn::after {
+  content: 'Hide channel';
+  position: absolute; right: 28px; top: 50%; transform: translateY(-50%);
+  background: var(--card-bg); border: 1px solid var(--border);
+  border-radius: 6px; padding: 4px 9px;
+  font-size: 11px; font-weight: 500; color: var(--text-muted);
+  white-space: nowrap; pointer-events: none;
+  box-shadow: 0 2px 8px rgba(0,0,0,.15);
+  opacity: 0; transition: opacity 0.12s;
+}
+.ch-block-btn:hover::after { opacity: 1; }
 /* Blocked channels management list */
 .ch-blocked-item {
   display: flex; align-items: center; gap: 10px; padding: 10px 14px;
@@ -493,7 +529,7 @@ fieldset.mc-section legend.mc-label { padding: 0; }
   transition: background 0.12s, color 0.12s;
 }
 .ch-unblock-btn:hover { background: var(--accent); color: #fff; }
-.ch-icon { font-size: 20px; }
+.ch-icon { font-size: 14px; }
 .ch-sidebar-controls { display: flex; align-items: center; gap: 6px; }
 .ch-region-select {
   flex: 1; padding: 5px 8px; border: 1px solid var(--border); border-radius: 6px;
@@ -545,9 +581,14 @@ fieldset.mc-section legend.mc-label { padding: 0; }
 .ch-sidebar-resize:hover { background: var(--accent); opacity: 0.3; }
 .ch-sidebar { position: relative; }
 .ch-main-header {
-  padding: 14px 20px; font-size: 16px; font-weight: 700;
+  padding: 14px 20px;
   border-bottom: 1px solid var(--border); background: var(--card-bg);
   display: flex; align-items: center; gap: 8px;
+}
+.ch-header-name { font-size: 16px; font-weight: 700; }
+.ch-header-count {
+  font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .3px;
+  color: var(--text-muted); margin-left: 8px;
 }
 .ch-back-btn {
   display: none; background: none; border: none; font-size: 22px; cursor: pointer;
@@ -2137,17 +2178,17 @@ tr[data-hops]:hover { background: rgba(59,130,246,0.1); }
 .ch-pulse-dot {
   display: none; flex-shrink: 0;
   width: 8px; height: 8px; border-radius: 50%;
-  background: var(--accent);
-  box-shadow: 0 0 0 0 rgba(59,130,246,0.5);
+  background: var(--status-green);
+  box-shadow: 0 0 0 0 rgba(34,197,94,0.5);
 }
 .ch-has-unread .ch-pulse-dot {
   display: block;
   animation: ch-pulse 1.8s ease-in-out infinite;
 }
 @keyframes ch-pulse {
-  0%   { box-shadow: 0 0 0 0 rgba(59,130,246,0.6); }
-  60%  { box-shadow: 0 0 0 6px rgba(59,130,246,0); }
-  100% { box-shadow: 0 0 0 0 rgba(59,130,246,0); }
+  0%   { box-shadow: 0 0 0 0 rgba(34,197,94,0.7); }
+  60%  { box-shadow: 0 0 0 7px rgba(34,197,94,0); }
+  100% { box-shadow: 0 0 0 0 rgba(34,197,94,0); }
 }
 
 /* Mobile bottom-sheet + larger touch targets (#674) */
@@ -2272,6 +2313,7 @@ th.sort-active { color: var(--accent, #60a5fa); }
     width: 36px; height: 36px;
     opacity: 0.6;
   }
+  .ch-block-btn::after { display: none; }
   /* My-node remove button always visible */
   .mnc-remove { opacity: 1; }
   /* Favourites remove always visible */

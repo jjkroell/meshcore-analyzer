@@ -2888,7 +2888,7 @@ func (s *PacketStore) GetChannels(region string) []map[string]interface{} {
 		}
 		channelName := decoded.Channel
 		if channelName == "" {
-			channelName = "unknown"
+			continue
 		}
 		ch := channelMap[channelName]
 		if ch == nil {

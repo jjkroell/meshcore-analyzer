@@ -16,6 +16,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -38,7 +40,13 @@ func main() {
 	}
 
 	configPath := flag.String("config", "config.json", "path to config file")
+	dataDir := flag.String("data-dir", "", "path to data directory for user-channels.json (defaults to config directory)")
 	flag.Parse()
+
+	resolvedDataDir := *dataDir
+	if resolvedDataDir == "" {
+		resolvedDataDir = filepath.Dir(*configPath)
+	}
 
 	log.SetFlags(log.LstdFlags | log.Lmsgprefix)
 	log.SetPrefix("[ingestor] ")
@@ -89,12 +97,44 @@ func main() {
 		}
 	}()
 
-	channelKeys := loadChannelKeys(cfg, *configPath)
-	if len(channelKeys) > 0 {
-		log.Printf("Loaded %d channel keys for GRP_TXT decryption", len(channelKeys))
+	initialKeys := loadChannelKeys(cfg, *configPath)
+	// Merge user-added channels from the data directory.
+	for k, v := range loadUserChannels(resolvedDataDir) {
+		initialKeys[k] = v
+	}
+	if len(initialKeys) > 0 {
+		log.Printf("Loaded %d channel keys for GRP_TXT decryption", len(initialKeys))
 	} else {
 		log.Printf("No channel keys loaded — GRP_TXT packets will not be decrypted")
 	}
+
+	// Hot-reloadable channel keys — updated atomically on SIGUSR1.
+	var channelKeysAtomic atomic.Value
+	channelKeysAtomic.Store(initialKeys)
+
+	// channelKeysMu guards writes to the atomic value (one writer at a time).
+	var channelKeysMu sync.Mutex
+
+	// SIGUSR1 → reload user-channels.json and merge into live keys.
+	usr1 := make(chan os.Signal, 1)
+	signal.Notify(usr1, syscall.SIGUSR1)
+	go func() {
+		for range usr1 {
+			channelKeysMu.Lock()
+			current := channelKeysAtomic.Load().(map[string]string)
+			newMap := make(map[string]string, len(current))
+			for k, v := range current {
+				newMap[k] = v
+			}
+			added := loadUserChannels(resolvedDataDir)
+			for k, v := range added {
+				newMap[k] = v
+			}
+			channelKeysAtomic.Store(newMap)
+			channelKeysMu.Unlock()
+			log.Printf("[channels] reloaded — now %d keys (%d user-added)", len(newMap), len(added))
+		}
+	}()
 
 	// Connect to each MQTT source
 	var clients []mqtt.Client
@@ -146,7 +186,7 @@ func main() {
 		// Capture source for closure
 		src := source
 		opts.SetDefaultPublishHandler(func(c mqtt.Client, m mqtt.Message) {
-			handleMessage(store, tag, src, m, channelKeys, cfg.GeoFilter)
+			handleMessage(store, tag, src, m, channelKeysAtomic.Load().(map[string]string), cfg.GeoFilter)
 		})
 
 		client := mqtt.NewClient(opts)
@@ -768,6 +808,34 @@ func loadChannelKeys(cfg *Config, configPath string) map[string]string {
 		keys[k] = v
 	}
 
+	return keys
+}
+
+// loadUserChannels reads user-channels.json from the data directory and derives
+// keys for each channel name. Returns an empty map if the file doesn't exist.
+func loadUserChannels(dataDir string) map[string]string {
+	path := filepath.Join(dataDir, "user-channels.json")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return map[string]string{}
+	}
+	var names []string
+	if err := json.Unmarshal(data, &names); err != nil {
+		log.Printf("[channels] failed to parse %s: %v", path, err)
+		return map[string]string{}
+	}
+	keys := make(map[string]string, len(names))
+	for _, name := range names {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		if !strings.HasPrefix(name, "#") {
+			name = "#" + name
+		}
+		h := sha256.Sum256([]byte(name))
+		keys[name] = hex.EncodeToString(h[:16])
+	}
 	return keys
 }
 
