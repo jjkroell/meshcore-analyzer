@@ -382,7 +382,7 @@ jobs:
 
       - name: Smoke test staging API
         run: |
-          if curl -sf http://localhost:82/api/stats | grep -q engine; then
+          if docker exec "$STAGING_CONTAINER" wget -qO- http://localhost:3000/api/stats | grep -q engine; then
             echo "Staging verified — engine field present ✅"
           else
             echo "Staging /api/stats did not return engine field"
