@@ -39,7 +39,7 @@
   <nav class="top-nav" role="navigation" aria-label="Main navigation">
     <div class="nav-left">
       <a href="#/" class="nav-brand">
-        <span class="brand-icon">🍄</span>
+        <img src="swbc-logo.svg" class="brand-icon" alt="SWBC Mesh" width="24" height="24" style="vertical-align:middle">
         <span class="brand-text">CoreScope</span>
         <span class="live-dot" id="liveDot" title="WebSocket connected" aria-label="WebSocket connected"></span>
       </a>
@@ -47,14 +47,13 @@
         <a href="#/home" class="nav-link" data-route="home" data-priority="high">Home</a>
         <a href="#/packets" class="nav-link" data-route="packets" data-priority="high">Packets</a>
         <a href="#/map" class="nav-link" data-route="map" data-priority="high">Map</a>
-        <a href="#/live" class="nav-link" data-route="live" data-priority="high">🔴 Live</a>
+        <a href="#/live" class="nav-link" data-route="live" data-priority="high"><span class="nav-live-dot" aria-hidden="true"></span>Live</a>
         <a href="#/channels" class="nav-link" data-route="channels">Channels</a>
         <a href="#/nodes" class="nav-link" data-route="nodes" data-priority="high">Nodes</a>
         <a href="#/traces" class="nav-link" data-route="traces">Traces</a>
         <a href="#/observers" class="nav-link" data-route="observers">Observers</a>
         <a href="#/analytics" class="nav-link" data-route="analytics">Analytics</a>
-        <a href="#/perf" class="nav-link" data-route="perf">⚡ Perf</a>
-        <a href="#/audio-lab" class="nav-link" data-route="audio-lab">🎵 Lab</a>
+        <a href="#/perf" class="nav-link" data-route="perf"><span class="nav-perf-icon" aria-hidden="true">⚡</span>Perf</a>
       </div>
       <div class="nav-more-wrap">
         <button class="nav-btn nav-more-btn" id="navMoreBtn" aria-haspopup="true" aria-expanded="false" aria-controls="navMoreMenu" title="More pages">More ▾</button>
@@ -63,13 +62,13 @@
     </div>
     <div class="nav-right">
       <div class="nav-stats" id="navStats" title="Live stats"></div>
-      <div class="nav-fav-wrap">
+      <div class="nav-fav-wrap" style="display:none">
         <button class="nav-btn" id="favToggle" title="Favorites">⭐</button>
         <div class="nav-fav-dropdown" id="favDropdown"></div>
       </div>
-      <button class="nav-btn" id="searchToggle" title="Search (Ctrl+K)">🔍</button>
-      <button class="nav-btn" id="customizeToggle" title="Customize theme & branding">🎨</button>
-      <button class="nav-btn" id="darkModeToggle" title="Toggle dark mode">☀️</button>
+      <button class="nav-btn" id="searchToggle" style="display:none" title="Search (Ctrl+K)">🔍</button>
+      <button class="nav-btn" id="customizeToggle" style="display:none" title="Customize theme & branding">🎨</button>
+      <button class="nav-btn" id="darkModeToggle" style="display:none" title="Toggle dark mode">☀️</button>
       <button class="nav-btn hamburger" id="hamburger" title="Menu" aria-label="Toggle navigation menu">☰</button>
     </div>
   </nav>

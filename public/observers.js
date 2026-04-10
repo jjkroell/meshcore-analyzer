@@ -6,16 +6,25 @@
   let wsHandler = null;
   let refreshTimer = null;
   let regionChangeHandler = null;
+  let sortCol = 'status';
+  let sortDir = 1; // 1 = asc, -1 = desc
+
+  const SORT_KEYS = {
+    status:  o => { const c = healthStatus(o.last_seen).cls; return c === 'health-green' ? 0 : c === 'health-yellow' ? 1 : 2; },
+    name:    o => (o.name || o.id || '').toLowerCase(),
+    region:  o => (o.iata || '').toLowerCase(),
+    packets: o => o.packet_count || 0,
+    rate:    o => o.packetsLastHour || 0,
+    uptime:  o => o.first_seen ? new Date(o.first_seen).getTime() : Infinity,
+  };
 
   function init(app) {
     app.innerHTML = `
       <div class="observers-page">
         <div class="page-header">
           <h2>Observer Status</h2>
-          <a href="#/compare" class="btn-icon" title="Compare observers" aria-label="Compare observers" style="text-decoration:none">🔍</a>
-          <button class="btn-icon" data-action="obs-refresh" title="Refresh" aria-label="Refresh observers">🔄</button>
         </div>
-        <div id="obsRegionFilter" class="region-filter-container"></div>
+        <div id="obsRegionFilter" class="region-filter-container" style="margin-bottom:16px"></div>
         <div id="obsContent"><div class="text-center text-muted" style="padding:40px">Loading…</div></div>
       </div>`;
     RegionFilter.init(document.getElementById('obsRegionFilter'));
@@ -113,33 +122,70 @@
     const stale = filtered.filter(o => healthStatus(o.last_seen).cls === 'health-yellow').length;
     const offline = filtered.filter(o => healthStatus(o.last_seen).cls === 'health-red').length;
 
+    function sortedRows() {
+      const fn = SORT_KEYS[sortCol];
+      return [...filtered].sort((a, b) => {
+        const av = fn(a), bv = fn(b);
+        return av < bv ? -sortDir : av > bv ? sortDir : 0;
+      });
+    }
+
+    function thHtml(label, key) {
+      const active = sortCol === key;
+      const arrow = active ? (sortDir === 1 ? ' ↑' : ' ↓') : '';
+      return `<th scope="col" class="obs-sortable${active ? ' obs-sort-active' : ''}" data-sort="${key}" style="cursor:pointer" title="Sort by ${label}">${label}${arrow}</th>`;
+    }
+
+    function renderRows() {
+      const rows = sortedRows();
+      const maxPkts = Math.max(1, ...rows.map(o => o.packetsLastHour || 0));
+      return rows.map(o => {
+        const h = healthStatus(o.last_seen);
+        return `<tr style="cursor:pointer" tabindex="0" role="row" data-action="navigate" data-value="#/observers/${encodeURIComponent(o.id)}" onclick="location.hash='#/observers/${encodeURIComponent(o.id)}'">
+          <td><span class="health-dot ${h.cls}" title="${h.label}"></span> ${h.label}</td>
+          <td class="mono">${o.name || o.id}</td>
+          <td>${o.iata ? `<span class="badge-region">${o.iata}</span>` : '—'}</td>
+          <td>${timeAgo(o.last_seen)}</td>
+          <td>${(o.packet_count || 0).toLocaleString()}</td>
+          <td>${sparkBar(o.packetsLastHour || 0, maxPkts)}</td>
+          <td>${uptimeStr(o.first_seen)}</td>
+        </tr>`;
+      }).join('');
+    }
+
     el.innerHTML = `
       <div class="obs-summary">
-        <span class="obs-stat"><span class="health-dot health-green">●</span> ${online} Online</span>
-        <span class="obs-stat"><span class="health-dot health-yellow">▲</span> ${stale} Stale</span>
-        <span class="obs-stat"><span class="health-dot health-red">✕</span> ${offline} Offline</span>
+        <span class="obs-stat"><span class="health-dot health-green"></span> ${online} Online</span>
+        <span class="obs-stat"><span class="health-dot health-yellow"></span> ${stale} Stale</span>
+        <span class="obs-stat"><span class="health-dot health-red"></span> ${offline} Offline</span>
         <span class="obs-stat">📡 ${filtered.length} Total</span>
       </div>
       <div class="obs-table-scroll"><table class="data-table obs-table" id="obsTable">
         <caption class="sr-only">Observer status and statistics</caption>
         <thead><tr>
-          <th scope="col">Status</th><th scope="col">Name</th><th scope="col">Region</th><th scope="col">Last Seen</th>
-          <th scope="col">Packets</th><th scope="col">Packets/Hour</th><th scope="col">Uptime</th>
+          ${thHtml('Status','status')}${thHtml('Name','name')}${thHtml('Region','region')}
+          <th scope="col">Last Seen</th>
+          ${thHtml('Packets','packets')}${thHtml('Packets/Hour','rate')}${thHtml('Uptime','uptime')}
         </tr></thead>
-        <tbody>${filtered.map(o => {
-          const h = healthStatus(o.last_seen);
-          const shape = h.cls === 'health-green' ? '●' : h.cls === 'health-yellow' ? '▲' : '✕';
-          return `<tr style="cursor:pointer" tabindex="0" role="row" data-action="navigate" data-value="#/observers/${encodeURIComponent(o.id)}" onclick="location.hash='#/observers/${encodeURIComponent(o.id)}'">
-            <td><span class="health-dot ${h.cls}" title="${h.label}">${shape}</span> ${h.label}</td>
-            <td class="mono">${o.name || o.id}</td>
-            <td>${o.iata ? `<span class="badge-region">${o.iata}</span>` : '—'}</td>
-            <td>${timeAgo(o.last_seen)}</td>
-            <td>${(o.packet_count || 0).toLocaleString()}</td>
-            <td>${sparkBar(o.packetsLastHour || 0, maxPktsHr)}</td>
-            <td>${uptimeStr(o.first_seen)}</td>
-          </tr>`;
-        }).join('')}</tbody>
+        <tbody>${renderRows()}</tbody>
       </table></div>`;
+
+    // Sort header click handlers
+    el.querySelectorAll('.obs-sortable').forEach(th => {
+      th.addEventListener('click', () => {
+        const key = th.dataset.sort;
+        if (sortCol === key) sortDir *= -1;
+        else { sortCol = key; sortDir = 1; }
+        // Re-render just the thead and tbody in place
+        const table = el.querySelector('#obsTable');
+        table.querySelector('thead tr').innerHTML = `
+          ${thHtml('Status','status')}${thHtml('Name','name')}${thHtml('Region','region')}
+          <th scope="col">Last Seen</th>
+          ${thHtml('Packets','packets')}${thHtml('Packets/Hour','rate')}${thHtml('Uptime','uptime')}`;
+        table.querySelector('tbody').innerHTML = renderRows();
+      });
+    });
+
     makeColumnsResizable('#obsTable', 'meshcore-obs-col-widths');
   }
 

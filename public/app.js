@@ -247,6 +247,17 @@ function truncate(str, len) {
   return str.length > len ? str.slice(0, len) + '…' : str;
 }
 
+function formatPubKey(pubkey, hashSize, truncLen) {
+  if (!pubkey) return '';
+  const pk = pubkey.toUpperCase();
+  const prefixChars = (hashSize || 0) * 2;
+  let full = truncLen && pk.length > truncLen ? pk.slice(0, truncLen) + '…' : pk;
+  if (!prefixChars || prefixChars > full.length) return escapeHtml(full);
+  const prefix = full.slice(0, prefixChars);
+  const rest   = full.slice(prefixChars);
+  return `<span class="pubkey-hash-prefix" title="${prefixChars/2}-byte hash ID">${escapeHtml(prefix)}</span>${escapeHtml(rest)}`;
+}
+
 function formatEngineBadge(engine) {
   if (!engine) return '';
   return ` <span class="engine-badge">${engine}</span>`;
@@ -289,19 +300,20 @@ function toggleFavorite(pubkey) {
   localStorage.setItem(FAV_KEY, JSON.stringify(favs));
   return idx < 0; // true if now favorited
 }
-function favStar(pubkey, cls) {
+function favStar(pubkey, cls, name) {
   const on = isFavorite(pubkey);
-  return '<button class="fav-star ' + (cls || '') + (on ? ' on' : '') + '" data-fav="' + pubkey + '" title="' + (on ? 'Remove from favorites' : 'Add to favorites') + '">' + (on ? '★' : '☆') + '</button>';
+  return '<button class="fav-star ' + (cls || '') + (on ? ' on' : '') + '" data-fav="' + pubkey + '" data-name="' + escapeHtml(name || '') + '" title="' + (on ? 'Remove from My Nodes' : 'Add to My Nodes') + '">' + (on ? '★' : '☆') + '</button>';
 }
 function bindFavStars(container, onToggle) {
   container.querySelectorAll('.fav-star').forEach(btn => {
     btn.addEventListener('click', (e) => {
       e.stopPropagation();
       const pk = btn.dataset.fav;
-      const nowOn = toggleFavorite(pk);
+      const nodeName = btn.dataset.name || '';
+      const nowOn = toggleFavorite(pk, nodeName);
       btn.textContent = nowOn ? '★' : '☆';
       btn.classList.toggle('on', nowOn);
-      btn.title = nowOn ? 'Remove from favorites' : 'Add to favorites';
+      btn.title = nowOn ? 'Remove from My Nodes' : 'Add to My Nodes';
       if (onToggle) onToggle(pk, nowOn);
     });
   });
@@ -686,7 +698,8 @@ window.addEventListener('DOMContentLoaded', () => {
       try {
         const h = await api('/nodes/' + pk + '/health', { ttl: CLIENT_TTL.nodeHealth });
         const age = h.stats.lastHeard ? Date.now() - new Date(h.stats.lastHeard).getTime() : null;
-        const status = age === null ? '🔴' : age < HEALTH_THRESHOLDS.nodeDegradedMs ? '🟢' : age < HEALTH_THRESHOLDS.nodeSilentMs ? '🟡' : '🔴';
+        const _fth = getHealthThresholds(h.node && h.node.role);
+        const status = age === null ? '🔴' : age < _fth.degradedMs ? '🟢' : age < _fth.silentMs ? '🟡' : '🔴';
         return '<a href="#/nodes/' + pk + '" class="fav-dd-item" data-key="' + pk + '">'
           + '<span class="fav-dd-status">' + status + '</span>'
           + '<span class="fav-dd-name">' + (h.node.name || truncate(pk, 12)) + '</span>'
@@ -766,7 +779,7 @@ window.addEventListener('DOMContentLoaded', () => {
         for (const n of nodeList.slice(0, 5)) {
           if (n.name && n.name.toLowerCase().includes(q.toLowerCase())) {
             html += `<div class="search-result-item" tabindex="0" role="option" data-href="#/nodes/${n.public_key}">
-              <span class="search-result-type">Node</span>${n.name} — ${truncate(n.public_key || '', 16)}</div>`;
+              <span class="search-result-type">Node</span>${n.name} — ${formatPubKey(n.public_key || '', n.hash_size, 16)}</div>`;
           }
         }
         const chList = Array.isArray(channels) ? channels : [];
@@ -826,8 +839,6 @@ window.addEventListener('DOMContentLoaded', () => {
       const el = document.getElementById('navStats');
       if (el) {
         el.innerHTML = `<span class="stat-val">${stats.totalPackets}</span> pkts · <span class="stat-val">${stats.totalNodes}</span> nodes · <span class="stat-val">${stats.totalObservers}</span> obs${formatVersionBadge(stats.version, stats.commit, stats.engine, stats.buildTime)}`;
-        el.querySelectorAll('.stat-val').forEach(s => s.classList.add('updated'));
-        setTimeout(() => { el.querySelectorAll('.stat-val').forEach(s => s.classList.remove('updated')); }, 600);
       }
     } catch {}
   }

@@ -466,7 +466,7 @@
           ${dupSection}
           <div style="margin:4px 0 6px">${renderNodeBadges(n, roleColor)}</div>
           ${renderHashInconsistencyWarning(n)}
-          <div class="node-detail-key mono" style="font-size:11px;word-break:break-all;margin-bottom:6px">${n.public_key}</div>
+          <div class="node-detail-key mono" style="font-size:11px;word-break:break-all;margin-bottom:6px">${formatPubKey(n.public_key, n.hash_size)}</div>
           <div>
             <button class="btn-primary" id="copyUrlBtn" style="font-size:12px;padding:4px 10px">📋 Copy URL</button>
             <a href="#/nodes/${encodeURIComponent(n.public_key)}/analytics" class="btn-primary" style="display:inline-block;margin-left:6px;text-decoration:none;font-size:12px;padding:4px 10px">📊 Analytics</a>
@@ -477,7 +477,7 @@
           ${hasLoc ? `<div class="node-map-wrap"><div id="nodeFullMap" class="node-detail-map" style="height:100%;min-height:200px;border-radius:8px;overflow:hidden"></div></div>` : ''}
           <div class="node-qr-wrap${hasLoc ? '' : ' node-qr-wrap--full'}">
             <div class="node-qr" id="nodeFullQrCode"></div>
-            <div class="mono" style="font-size:10px;color:var(--text-muted);margin-top:8px;word-break:break-all;text-align:center;max-width:180px">${n.public_key.slice(0, 16)}…${n.public_key.slice(-8)}</div>
+            <div class="mono" style="font-size:10px;color:var(--text-muted);margin-top:8px;word-break:break-all;text-align:center;max-width:180px">${formatPubKey(n.public_key, n.hash_size, 16)}…${escapeHtml(n.public_key.slice(-8).toUpperCase())}</div>
           </div>
         </div>
 
@@ -1030,8 +1030,8 @@
       const status = getNodeStatus(n.role || 'companion', lastSeenTime ? new Date(lastSeenTime).getTime() : 0);
       const lastSeenClass = status === 'active' ? 'last-seen-active' : 'last-seen-stale';
       return `<tr data-key="${n.public_key}" data-action="select" data-value="${n.public_key}" tabindex="0" role="row" class="${selectedKey === n.public_key ? 'selected' : ''}${isClaimed ? ' claimed-row' : ''}">
-        <td>${favStar(n.public_key, 'node-fav')}${isClaimed ? '<span class="claimed-badge" title="My Mesh">★</span> ' : ''}<strong>${n.name || '(unnamed)'}</strong>${dupNameBadge(n.name, n.public_key, dupMap)}</td>
-        <td class="mono col-pubkey">${truncate(n.public_key, 16)}</td>
+        <td>${favStar(n.public_key, 'node-fav', n.name)}${isClaimed ? '<span class="claimed-badge" title="My Mesh">★</span> ' : ''}<strong>${n.name || '(unnamed)'}</strong>${dupNameBadge(n.name, n.public_key, dupMap)}</td>
+        <td class="mono col-pubkey">${formatPubKey(n.public_key, n.hash_size, 16)}</td>
         <td><span class="badge" style="background:${roleColor}20;color:${roleColor}">${n.role}</span></td>
         <td class="${lastSeenClass}">${renderNodeTimestampHtml(n.last_heard || n.last_seen)}</td>
         <td>${n.advert_count || 0}</td>
@@ -1097,7 +1097,7 @@
         </div>` : `<div class="node-qr" id="nodeQrCode" style="margin:8px 0"></div>`}
 
         <div class="node-detail-section">
-          <div class="node-detail-key mono" style="font-size:11px;word-break:break-all;margin-bottom:4px">${n.public_key}</div>
+          <div class="node-detail-key mono" style="font-size:11px;word-break:break-all;margin-bottom:4px">${formatPubKey(n.public_key, n.hash_size)}</div>
         </div>
 
         <div class="node-detail-section">

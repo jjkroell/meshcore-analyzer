@@ -13,6 +13,69 @@
   let observerIataByName = {};
   let messageRequestId = 0;
   var _nodeCacheTTL = 5 * 60 * 1000; // 5 minutes
+  const INACTIVE_MS = 8 * 60 * 60 * 1000; // 8 hours
+  const unreadChannels = new Set(); // hashes with new unread messages
+  const BLOCKED_KEY = 'meshcore-blocked-channels';
+  const PERMANENT_BLOCK_NAMES = new Set(['#wardriving', 'unknown']); // hardcoded, cannot be unblocked
+  let showingBlockedList = false;
+
+  function getBlockedChannels() {
+    try { return new Set(JSON.parse(localStorage.getItem(BLOCKED_KEY) || '[]')); }
+    catch (_) { return new Set(); }
+  }
+  function saveBlockedChannels(set) {
+    try { localStorage.setItem(BLOCKED_KEY, JSON.stringify([...set])); } catch (_) {}
+  }
+  function blockChannel(hash) {
+    const s = getBlockedChannels(); s.add(hash); saveBlockedChannels(s);
+    // If this was the selected channel, deselect it
+    if (selectedHash === hash) {
+      selectedHash = null; messages = [];
+      history.replaceState(null, '', '#/channels');
+      const hdr = document.getElementById('chHeader');
+      if (hdr) hdr.querySelector('.ch-header-text').textContent = 'Select a channel';
+      const msgEl = document.getElementById('chMessages');
+      if (msgEl) msgEl.innerHTML = '<div class="ch-empty">Choose a channel from the sidebar to view messages</div>';
+      document.querySelector('.ch-layout')?.classList.remove('ch-show-main');
+    }
+    renderChannelList(); updateBlockedBadge();
+  }
+  function unblockChannel(hash) {
+    const s = getBlockedChannels(); s.delete(hash); saveBlockedChannels(s);
+    renderChannelList(); updateBlockedBadge();
+    if (showingBlockedList) renderBlockedList();
+  }
+  function updateBlockedBadge() {
+    const badge = document.getElementById('chBlockedBadge');
+    if (!badge) return;
+    const count = getBlockedChannels().size;
+    badge.textContent = count ? `Blocked (${count})` : 'Blocked';
+    badge.classList.toggle('has-blocked', count > 0);
+  }
+  function renderBlockedList() {
+    const el = document.getElementById('chList');
+    if (!el) return;
+    const blocked = getBlockedChannels();
+    if (!blocked.size) {
+      el.innerHTML = '<div class="ch-empty">No blocked channels</div>';
+      return;
+    }
+    const items = [...blocked].map(hash => {
+      const ch = channels.find(c => c.hash === hash);
+      const name = ch?.name || hash.slice(0, 8);
+      const color = getChannelColor(hash);
+      const abbr = name.startsWith('#') ? name.slice(1, 3).toUpperCase() : name.slice(0, 2).toUpperCase();
+      return `<div class="ch-blocked-item">
+        <div class="ch-badge" style="--ch-color:${color};background:${color}"><span class="ch-badge-shine"></span>${escapeHtml(abbr)}</div>
+        <span class="ch-blocked-name">${escapeHtml(name)}</span>
+        <button class="ch-unblock-btn" data-hash="${hash}" title="Unblock">Unblock</button>
+      </div>`;
+    });
+    el.innerHTML = items.join('');
+    el.querySelectorAll('.ch-unblock-btn').forEach(btn => {
+      btn.addEventListener('click', () => unblockChannel(btn.dataset.hash));
+    });
+  }
 
   function getSelectedRegionsSnapshot() {
     var rp = RegionFilter.getRegionParam();
@@ -132,7 +195,7 @@
     tip.innerHTML = `<div class="ch-tooltip-name">${escapeHtml(node.name)}</div>
       <div class="ch-tooltip-role">${role}</div>
       <div class="ch-tooltip-meta">Last seen: ${lastSeen}</div>
-      <div class="ch-tooltip-key mono">${(node.public_key || '').slice(0, 16)}…</div>`;
+      <div class="ch-tooltip-key mono">${formatPubKey(node.public_key, node.hash_size, 16)}…</div>`;
     document.body.appendChild(tip);
     var trigger = e.target.closest('[data-node]') || e.target;
     trigger.setAttribute('aria-describedby', 'chNodeTooltip');
@@ -217,7 +280,7 @@
           <div class="ch-node-field"><span class="ch-node-label">Last Seen</span> ${lastSeen}</div>
           <div class="ch-node-field"><span class="ch-node-label">Adverts</span> ${n.advert_count || 0}</div>
           ${n.lat && n.lon ? `<div class="ch-node-field"><span class="ch-node-label">Location</span> ${Number(n.lat).toFixed(4)}, ${Number(n.lon).toFixed(4)}</div>` : ''}
-          <div class="ch-node-field mono" style="font-size:11px;word-break:break-all"><span class="ch-node-label">Key</span> ${n.public_key}</div>
+          <div class="ch-node-field mono" style="font-size:11px;word-break:break-all"><span class="ch-node-label">Key</span> ${formatPubKey(n.public_key, n.hash_size)}</div>
           ${adverts.length ? `<div class="ch-node-adverts"><span class="ch-node-label">Recent Adverts</span>
             ${adverts.slice(0, 5).map(a => `<div class="ch-node-advert">${timeAgo(a.timestamp)} · SNR ${a.snr != null ? a.snr + 'dB' : '?'}</div>`).join('')}
           </div>` : ''}
@@ -308,12 +371,24 @@
     return Math.floor(sec / 86400) + 'd ago';
   }
 
+  function linkifyUrls(html) {
+    // Match http/https URLs not already inside an href attribute
+    return html.replace(/(?<![="])https?:\/\/[^\s<>"']+/g, function(url) {
+      // Strip trailing punctuation that's likely not part of the URL
+      var clean = url.replace(/[.,;:!?)]+$/, '');
+      var trailing = url.slice(clean.length);
+      var safeUrl = clean.replace(/&amp;/g, '&'); // decode HTML entity for href
+      return '<a href="' + escapeHtml(safeUrl) + '" target="_blank" rel="noopener noreferrer" class="ch-url-link">' + clean + '</a>' + trailing;
+    });
+  }
+
   function highlightMentions(text) {
     if (!text) return '';
-    return escapeHtml(text).replace(/@\[([^\]]+)\]/g, function(_, name) {
+    var html = escapeHtml(text).replace(/@\[([^\]]+)\]/g, function(_, name) {
       const safeId = btoa(encodeURIComponent(name));
       return '<span class="ch-mention ch-sender-link" tabindex="0" role="button" data-node="' + safeId + '">@' + name + '</span>';
     });
+    return linkifyUrls(html);
   }
 
   let regionChangeHandler = null;
@@ -325,7 +400,10 @@
     app.innerHTML = `<div class="ch-layout">
       <div class="ch-sidebar" aria-label="Channel list">
         <div class="ch-sidebar-header">
-          <div class="ch-sidebar-title"><span class="ch-icon">💬</span> Channels</div>
+          <div class="ch-sidebar-title">
+            <span class="ch-icon">💬</span> Channels
+            <button class="ch-blocked-badge" id="chBlockedBadge" title="Manage blocked channels">Blocked</button>
+          </div>
         </div>
         <div id="chRegionFilter" class="region-filter-container" style="padding:0 8px"></div>
         <div class="ch-channel-list" id="chList" role="listbox" aria-label="Channels">
@@ -345,6 +423,18 @@
         <button class="ch-scroll-btn hidden" id="chScrollBtn">↓ New messages</button>
       </div>
     </div>`;
+
+    // Blocked badge toggle
+    const blockedBadge = document.getElementById('chBlockedBadge');
+    if (blockedBadge) {
+      updateBlockedBadge();
+      blockedBadge.addEventListener('click', () => {
+        showingBlockedList = !showingBlockedList;
+        blockedBadge.classList.toggle('active', showingBlockedList);
+        if (showingBlockedList) renderBlockedList();
+        else renderChannelList();
+      });
+    }
 
     RegionFilter.init(document.getElementById('chRegionFilter'));
     regionChangeHandler = RegionFilter.onChange(function () {
@@ -539,6 +629,9 @@
         var isFirstObservation = pktHash && !seenHashes.has(pktHash + ':' + channelName);
         if (pktHash) seenHashes.add(pktHash + ':' + channelName);
 
+        // Skip permanently blocked channels entirely
+        if (PERMANENT_BLOCK_NAMES.has((channelName || '').toLowerCase())) continue;
+
         var ch = channels.find(function (c) { return c.hash === channelName; });
         if (ch) {
           if (isFirstObservation) ch.messageCount = (ch.messageCount || 0) + 1;
@@ -546,6 +639,7 @@
           ch.lastSender = sender;
           ch.lastMessage = truncate(displayText, 100);
           channelListDirty = true;
+          if (isFirstObservation && channelName !== selectedHash) unreadChannels.add(channelName);
         } else if (isFirstObservation) {
           // New channel we haven't seen
           channels.push({
@@ -656,8 +750,11 @@
       const data = await api('/channels' + qs, { ttl: CLIENT_TTL.channels });
       channels = (data.channels || []).map(ch => {
         ch.lastActivityMs = ch.lastActivity ? new Date(ch.lastActivity).getTime() : 0;
+        // Auto-block 'unknown' channels
+        if (ch.name && ch.name.trim().toLowerCase() === 'unknown') blockChannel(ch.hash);
         return ch;
       }).sort((a, b) => (b.lastActivityMs || 0) - (a.lastActivityMs || 0));
+      updateBlockedBadge();
       renderChannelList();
       reconcileSelectionAfterChannelRefresh();
     } catch (e) {
@@ -669,48 +766,83 @@
   }
 
   function renderChannelList() {
+    if (showingBlockedList) { renderBlockedList(); return; }
     const el = document.getElementById('chList');
     if (!el) return;
-    if (channels.length === 0) { el.innerHTML = '<div class="ch-empty">No channels found</div>'; return; }
 
-    // Sort by message count desc
-    const sorted = [...channels].sort((a, b) => {
-      return (b.messageCount || 0) - (a.messageCount || 0);
-    });
+    const blocked = getBlockedChannels();
+    const now = Date.now();
 
-    el.innerHTML = sorted.map(ch => {
+    // Filter: not blocked, not permanently blocked, not inactive > 8h
+    const visible = [...channels]
+      .filter(ch => {
+        if (blocked.has(ch.hash)) return false;
+        if (ch.name && PERMANENT_BLOCK_NAMES.has(ch.name.toLowerCase())) return false;
+        if (ch.lastActivityMs > 0 && now - ch.lastActivityMs > INACTIVE_MS) return false;
+        return true;
+      })
+      .sort((a, b) => (b.messageCount || 0) - (a.messageCount || 0));
+
+    if (visible.length === 0) {
+      el.innerHTML = '<div class="ch-empty">No active channels</div>';
+      return;
+    }
+
+    el.innerHTML = visible.map(ch => {
       const name = ch.name || `Channel ${formatHashHex(ch.hash)}`;
       const color = getChannelColor(ch.hash);
-      const time = ch.lastActivityMs ? formatSecondsAgo(Math.floor((Date.now() - ch.lastActivityMs) / 1000)) : '';
+      const time = ch.lastActivityMs ? formatSecondsAgo(Math.floor((now - ch.lastActivityMs) / 1000)) : '';
       const preview = ch.lastSender && ch.lastMessage
         ? `${ch.lastSender}: ${truncate(ch.lastMessage, 28)}`
         : `${ch.messageCount} messages`;
       const sel = selectedHash === ch.hash ? ' selected' : '';
-      const abbr = name.startsWith('#') ? name.slice(0, 3) : name.slice(0, 2).toUpperCase();
-      // Channel color dot for color picker (#674)
+      const abbr = name.startsWith('#') ? name.slice(1, 3).toUpperCase() : name.slice(0, 2).toUpperCase();
       const chColor = window.ChannelColors ? window.ChannelColors.get(ch.hash) : null;
       const dotStyle = chColor ? ` style="background:${chColor}"` : '';
-      // Left border for assigned color
       const borderStyle = chColor ? ` style="border-left:3px solid ${chColor}"` : '';
 
-      return `<button class="ch-item${sel}" data-hash="${ch.hash}"${borderStyle} type="button" role="option" aria-selected="${selectedHash === ch.hash ? 'true' : 'false'}" aria-label="${escapeHtml(name)}">
-        <div class="ch-badge" style="background:${color}" aria-hidden="true">${escapeHtml(abbr)}</div>
+      return `<div class="ch-item${sel}" data-hash="${ch.hash}"${borderStyle} role="option" tabindex="0" aria-selected="${selectedHash === ch.hash ? 'true' : 'false'}" aria-label="${escapeHtml(name)}">
+        <div class="ch-badge" style="--ch-color:${color};background:${color}" aria-hidden="true"><span class="ch-badge-shine"></span>${escapeHtml(abbr)}</div>
+        <span class="ch-pulse-dot" aria-hidden="true"></span>
         <div class="ch-item-body">
           <div class="ch-item-top">
             <span class="ch-item-name">${escapeHtml(name)}</span>
-            <span class="ch-color-dot" data-channel="${escapeHtml(ch.hash)}"${dotStyle} title="Change channel color" aria-label="Change color for ${escapeHtml(name)}"></span>
             <span class="ch-item-time" data-channel-hash="${ch.hash}">${time}</span>
           </div>
           <div class="ch-item-preview">${escapeHtml(preview)}</div>
         </div>
-      </button>`;
+        <span class="ch-block-btn" data-hash="${ch.hash}" title="Block channel" aria-label="Block ${escapeHtml(name)}" role="button" tabindex="0">✕</span>
+      </div>`;
     }).join('');
+
+    // Apply unread pulse to rows with new messages
+    el.querySelectorAll('.ch-item').forEach(row => {
+      if (unreadChannels.has(row.dataset.hash)) row.classList.add('ch-has-unread');
+    });
+
+    // Wire clicks on channel rows and block buttons
+    el.querySelectorAll('.ch-item').forEach(row => {
+      row.addEventListener('click', e => {
+        if (e.target.closest('.ch-block-btn') || e.target.closest('.ch-color-dot')) return;
+        selectChannel(row.dataset.hash);
+      });
+      row.addEventListener('keydown', e => {
+        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); selectChannel(row.dataset.hash); }
+      });
+    });
+    el.querySelectorAll('.ch-block-btn').forEach(btn => {
+      btn.addEventListener('click', e => { e.stopPropagation(); blockChannel(btn.dataset.hash); });
+      btn.addEventListener('keydown', e => {
+        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.stopPropagation(); blockChannel(btn.dataset.hash); }
+      });
+    });
   }
 
   async function selectChannel(hash) {
     const rp = RegionFilter.getRegionParam() || '';
     const request = beginMessageRequest(hash, rp);
     selectedHash = hash;
+    unreadChannels.delete(hash);
     history.replaceState(null, '', `#/channels/${encodeURIComponent(hash)}`);
     renderChannelList();
     const ch = channels.find(c => c.hash === hash);
@@ -801,7 +933,7 @@
 
       const safeId = btoa(encodeURIComponent(sender));
       return `<div class="ch-msg">
-        <div class="ch-avatar ch-tappable" style="background:${senderColor}" tabindex="0" role="button" data-node="${safeId}">${senderLetter}</div>
+        <div class="ch-avatar ch-tappable" style="--ch-color:${senderColor};background:${senderColor}" tabindex="0" role="button" data-node="${safeId}"><span class="ch-badge-shine"></span>${senderLetter}</div>
         <div class="ch-msg-content">
           <div class="ch-msg-sender ch-sender-link ch-tappable" style="color:${senderColor}" tabindex="0" role="button" data-node="${safeId}">${escapeHtml(sender)}</div>
           <div class="ch-msg-bubble">${displayText}</div>

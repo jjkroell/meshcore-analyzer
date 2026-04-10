@@ -58,6 +58,11 @@
     REQUEST: '❓', RESPONSE: '📨', TRACE: '🔍', PATH: '🛤️'
   };
 
+  // Legend filter state — null means "show all" (default)
+  var legendFilterActive = false;
+  var activeTypeFilters = null; // null = all pass; Set = only listed types shown
+  var activeRoleFilters = null; // null = all pass; Set = only listed roles shown
+
   /* ---- Panel Corner Positioning (#608 M0) ---- */
   var PANEL_DEFAULTS = { liveFeed: 'bl', liveLegend: 'br', liveNodeDetail: 'tr' };
   var CORNER_CYCLE = ['tl', 'tr', 'br', 'bl'];
@@ -213,7 +218,7 @@
     vcrSetMode('LIVE');
     // Reload all nodes (no time filter)
     clearNodeMarkers();
-    loadNodes();
+    loadNodes().then(loadObservers);
     const prompt = document.getElementById('vcrPrompt');
     if (prompt) prompt.classList.add('hidden');
   }
@@ -808,8 +813,7 @@
         <div id="liveMap" style="width:100%;height:100%;position:absolute;top:0;left:0;z-index:1"></div>
         <div class="live-overlay live-header" id="liveHeader">
           <div class="live-title">
-            <span class="live-beacon"></span>
-            MESH LIVE
+            LIVE STATS
           </div>
           <div class="live-stats-row">
             <div class="live-stat-pill"><span id="livePktCount">0</span> pkts</div>
@@ -842,7 +846,7 @@
         </div>
         <div class="live-overlay live-feed" id="liveFeed">
           <div class="panel-header">
-            <button class="panel-corner-btn" data-panel="liveFeed" title="Move panel to next corner" aria-label="Move panel to next corner">◫</button>
+            <span class="panel-feed-title">Recent Packets</span>
             <button class="feed-hide-btn" id="feedHideBtn" title="Hide feed">✕</button>
           </div>
           <div class="panel-content" aria-live="polite" aria-relevant="additions" role="log"></div>
@@ -858,16 +862,18 @@
         <button class="legend-toggle-btn" id="legendToggleBtn" aria-label="Show legend" title="Show legend">🎨</button>
         <div class="live-overlay live-legend" id="liveLegend" role="region" aria-label="Map legend">
           <div class="panel-header">
-            <button class="panel-corner-btn" data-panel="liveLegend" title="Move panel to next corner" aria-label="Move panel to next corner">◫</button>
+            <span class="panel-feed-title">Packet Types</span>
           </div>
           <div class="panel-content">
-          <h3 class="legend-title">PACKET TYPES</h3>
-          <ul class="legend-list">
-            <li><span class="live-dot" style="background:${TYPE_COLORS.ADVERT}" aria-hidden="true"></span> Advert — Node advertisement</li>
-            <li><span class="live-dot" style="background:${TYPE_COLORS.GRP_TXT}" aria-hidden="true"></span> Message — Group text</li>
-            <li><span class="live-dot" style="background:${TYPE_COLORS.TXT_MSG}" aria-hidden="true"></span> Direct — Direct message</li>
-            <li><span class="live-dot" style="background:${TYPE_COLORS.REQUEST}" aria-hidden="true"></span> Request — Data request</li>
-            <li><span class="live-dot" style="background:${TYPE_COLORS.TRACE}" aria-hidden="true"></span> Trace — Route trace</li>
+          <button class="legend-filter-btn" id="legendFilterBtn" title="Filter by type / role" aria-pressed="false">⊘ Filter</button>
+          <ul class="legend-list" id="typeLegendList">
+            <li data-type="ADVERT"><span class="live-dot" style="background:${TYPE_COLORS.ADVERT}" aria-hidden="true"></span> Advert</li>
+            <li data-type="GRP_TXT"><span class="live-dot" style="background:${TYPE_COLORS.GRP_TXT}" aria-hidden="true"></span> Message</li>
+            <li data-type="TXT_MSG"><span class="live-dot" style="background:${TYPE_COLORS.TXT_MSG}" aria-hidden="true"></span> Direct</li>
+            <li data-type="REQUEST"><span class="live-dot" style="background:${TYPE_COLORS.REQUEST}" aria-hidden="true"></span> Request</li>
+            <li data-type="RESPONSE"><span class="live-dot" style="background:${TYPE_COLORS.RESPONSE}" aria-hidden="true"></span> Response</li>
+            <li data-type="TRACE"><span class="live-dot" style="background:${TYPE_COLORS.TRACE}" aria-hidden="true"></span> Trace</li>
+            <li data-type="PATH"><span class="live-dot" style="background:${TYPE_COLORS.PATH}" aria-hidden="true"></span> Path</li>
           </ul>
           <h3 class="legend-title" style="margin-top:8px">NODE ROLES</h3>
           <ul class="legend-list" id="roleLegendList"></ul>
@@ -937,6 +943,7 @@
 
     injectSVGFilters();
     await loadNodes();
+    loadObservers();
     showHeatMap();
     connectWS();
     initResizeHandler();
@@ -1162,13 +1169,78 @@
     // Initialize panel corner positions (#608 M0)
     initPanelPositions();
     const roleLegendList = document.getElementById('roleLegendList');
+    const LEGEND_ROLES = window.ROLE_SORT || ['repeater', 'companion', 'room', 'sensor', 'observer'];
     if (roleLegendList) {
-      for (const role of (window.ROLE_SORT || ['repeater', 'companion', 'room', 'sensor', 'observer'])) {
+      for (const role of LEGEND_ROLES) {
         const li = document.createElement('li');
+        li.dataset.role = role;
         li.innerHTML = `<span class="live-dot" style="background:${ROLE_COLORS[role] || '#6b7280'}" aria-hidden="true"></span> ${(ROLE_LABELS[role] || role).replace(/s$/, '')}`;
         roleLegendList.appendChild(li);
       }
     }
+
+    // ---- Legend filter system ----
+    const legendPanel = document.getElementById('liveLegend');
+    const legendFilterBtn = document.getElementById('legendFilterBtn');
+
+    function applyRoleFilter() {
+      for (const key in nodeMarkers) {
+        const n = nodeData[key];
+        const role = n ? (n.role || 'unknown') : 'unknown';
+        const visible = !activeRoleFilters || activeRoleFilters.has(role);
+        const marker = nodeMarkers[key];
+        if (visible) {
+          if (!nodesLayer.hasLayer(marker)) marker.addTo(nodesLayer);
+          if (marker._glowMarker && !nodesLayer.hasLayer(marker._glowMarker)) marker._glowMarker.addTo(nodesLayer);
+        } else {
+          if (nodesLayer.hasLayer(marker)) nodesLayer.removeLayer(marker);
+          if (marker._glowMarker && nodesLayer.hasLayer(marker._glowMarker)) nodesLayer.removeLayer(marker._glowMarker);
+        }
+      }
+    }
+
+    function applyLegendFilter() {
+      const allTypeKeys = Object.keys(TYPE_COLORS);
+      const activeTypes = new Set();
+      legendPanel.querySelectorAll('#typeLegendList [data-type]').forEach(li => {
+        if (!li.classList.contains('legend-inactive')) activeTypes.add(li.dataset.type);
+      });
+      activeTypeFilters = activeTypes.size === allTypeKeys.length ? null : activeTypes;
+
+      const activeRoles = new Set();
+      legendPanel.querySelectorAll('#roleLegendList [data-role]').forEach(li => {
+        if (!li.classList.contains('legend-inactive')) activeRoles.add(li.dataset.role);
+      });
+      activeRoleFilters = activeRoles.size === LEGEND_ROLES.length ? null : activeRoles;
+
+      applyRoleFilter();
+    }
+
+    if (legendFilterBtn) {
+      legendFilterBtn.addEventListener('click', () => {
+        legendFilterActive = !legendFilterActive;
+        legendPanel.classList.toggle('legend-filter-active', legendFilterActive);
+        legendFilterBtn.classList.toggle('active', legendFilterActive);
+        legendFilterBtn.setAttribute('aria-pressed', String(legendFilterActive));
+        legendFilterBtn.title = legendFilterActive ? 'Exit filter mode (show all)' : 'Filter by type / role';
+        if (!legendFilterActive) {
+          // Revert: clear all inactive classes and reset filters
+          legendPanel.querySelectorAll('.legend-inactive').forEach(li => li.classList.remove('legend-inactive'));
+          activeTypeFilters = null;
+          activeRoleFilters = null;
+          applyRoleFilter();
+        }
+      });
+    }
+
+    // Click items to toggle when filter mode is active
+    legendPanel.addEventListener('click', e => {
+      if (!legendFilterActive) return;
+      const li = e.target.closest('[data-type],[data-role]');
+      if (!li) return;
+      li.classList.toggle('legend-inactive');
+      applyLegendFilter();
+    });
 
     // Node detail panel
     const nodeDetailPanel = document.getElementById('liveNodeDetail');
@@ -1178,27 +1250,6 @@
       nodeDetailPanel.classList.add('hidden');
     });
 
-    // Feed panel resize handle (#27)
-    const savedFeedWidth = localStorage.getItem('live-feed-width');
-    if (savedFeedWidth) feedEl.style.width = savedFeedWidth + 'px';
-    const resizeHandle = document.createElement('div');
-    resizeHandle.className = 'feed-resize-handle';
-    resizeHandle.setAttribute('aria-label', 'Resize feed panel');
-    feedEl.appendChild(resizeHandle);
-    let feedResizing = false;
-    resizeHandle.addEventListener('mousedown', (e) => {
-      feedResizing = true; e.preventDefault();
-    });
-    document.addEventListener('mousemove', (e) => {
-      if (!feedResizing) return;
-      const newWidth = Math.max(200, Math.min(800, e.clientX - feedEl.getBoundingClientRect().left));
-      feedEl.style.width = newWidth + 'px';
-    });
-    document.addEventListener('mouseup', () => {
-      if (!feedResizing) return;
-      feedResizing = false;
-      localStorage.setItem('live-feed-width', parseInt(feedEl.style.width));
-    });
 
     // Save/restore map view
     const savedView = localStorage.getItem('live-map-view');
@@ -1334,46 +1385,10 @@
     // Prune stale nodes every 60 seconds
     _pruneInterval = setInterval(pruneStaleNodes, 60000);
 
-    // Auto-hide nav with pin toggle (#62)
+    // Nav always visible on live page
     const topNav = document.querySelector('.top-nav');
     if (topNav) { topNav.style.position = 'fixed'; topNav.style.width = '100%'; topNav.style.zIndex = '1100'; }
-    _navCleanup = { timeout: null, fn: null, pinned: false };
-    // Add pin button to nav (guard against duplicate)
-    if (topNav && !document.getElementById('navPinBtn')) {
-      const pinBtn = document.createElement('button');
-      pinBtn.id = 'navPinBtn';
-      pinBtn.className = 'nav-pin-btn';
-      pinBtn.setAttribute('aria-label', 'Pin navigation open');
-      pinBtn.setAttribute('title', 'Pin navigation open');
-      pinBtn.textContent = '📌';
-      pinBtn.addEventListener('click', (e) => {
-        e.stopPropagation();
-        _navCleanup.pinned = !_navCleanup.pinned;
-        pinBtn.classList.toggle('pinned', _navCleanup.pinned);
-        pinBtn.setAttribute('aria-pressed', _navCleanup.pinned);
-        if (_navCleanup.pinned) {
-          clearTimeout(_navCleanup.timeout);
-          topNav.classList.remove('nav-autohide');
-        } else {
-          _navCleanup.timeout = setTimeout(() => { topNav.classList.add('nav-autohide'); }, 4000);
-        }
-      });
-      topNav.appendChild(pinBtn);
-    }
-    function showNav() {
-      if (topNav) topNav.classList.remove('nav-autohide');
-      clearTimeout(_navCleanup.timeout);
-      if (!_navCleanup.pinned) {
-        _navCleanup.timeout = setTimeout(() => { if (topNav) topNav.classList.add('nav-autohide'); }, 4000);
-      }
-    }
-    _navCleanup.fn = showNav;
-    const livePage = document.querySelector('.live-page');
-    if (livePage) {
-      livePage.addEventListener('mousemove', showNav);
-      livePage.addEventListener('touchstart', showNav);
-      livePage.addEventListener('click', showNav);
-    }
+    _navCleanup = { timeout: null, fn: null };
     showNav();
   }
 
@@ -1532,6 +1547,36 @@
       fetchAffinityData();
       startAffinityRefresh();
     } catch (e) { console.error('Failed to load nodes:', e); }
+  }
+
+  async function loadObservers() {
+    try {
+      const resp = await fetch('/api/observers');
+      const data = await resp.json();
+      const list = Array.isArray(data) ? data : (data.observers || []);
+      const color = ROLE_COLORS.observer || '#8b5cf6';
+      list.forEach(obs => {
+        if (!obs.lat || !obs.lon) return;
+        const key = obs.public_key || obs.id || obs.observer_id;
+        if (!key) return;
+        if (nodeMarkers[key]) {
+          nodeMarkers[key].setStyle({ fillColor: color });
+          nodeMarkers[key]._baseColor = color;
+          if (nodeMarkers[key]._glowMarker) nodeMarkers[key]._glowMarker.setStyle({ fillColor: color });
+          return;
+        }
+        const latLng = L.latLng(obs.lat, obs.lon);
+        const circle = L.circleMarker(latLng, {
+          radius: 7, color: '#fff', weight: 1.5,
+          fillColor: color, fillOpacity: 0.9
+        });
+        circle._baseColor = color;
+        circle._nodeKey = key;
+        circle.bindTooltip(escapeHtml(obs.name || key.slice(0, 12)), { permanent: false });
+        circle.addTo(nodesLayer);
+        nodeMarkers[key] = circle;
+      });
+    } catch (e) { console.warn('Failed to load observers:', e); }
   }
 
   let _affinityInterval = null;
@@ -1714,6 +1759,12 @@
     marker._baseSize = size;
     nodeMarkers[n.public_key] = marker;
 
+    // Hide if role is currently filtered out
+    if (activeRoleFilters && !activeRoleFilters.has(n.role || 'unknown')) {
+      nodesLayer.removeLayer(marker);
+      nodesLayer.removeLayer(glow);
+    }
+
     // Apply matrix tint if active
     if (matrixMode) {
       marker._matrixPrevColor = color;
@@ -1895,6 +1946,9 @@
 
     // --- Favorites filter ---
     if (showOnlyFavorites && !packets.some(function(p) { return packetInvolvesFavorite(p); })) return;
+
+    // --- Type filter ---
+    if (activeTypeFilters && !activeTypeFilters.has(typeName)) return;
 
     // --- Ensure ADVERT nodes appear on map ---
     for (var pi = 0; pi < packets.length; pi++) {
@@ -2225,7 +2279,7 @@
       const elapsed = now - lastPulse;
       if (elapsed >= 26) {
         const ticks = Math.min(Math.floor(elapsed / 26), 4);
-        r += 1.5 * ticks; op -= 0.03 * ticks;
+        r += 0.375 * ticks; op -= 0.03 * ticks;
         lastPulse = now;
         if (op <= 0) {
           try { animLayer.removeLayer(ring); } catch {}
