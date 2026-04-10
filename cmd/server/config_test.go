@@ -231,17 +231,17 @@ func TestGetHealthThresholdsDefaults(t *testing.T) {
 	cfg := &Config{}
 	ht := cfg.GetHealthThresholds()
 
-	if ht.InfraDegradedHours != 24 {
-		t.Errorf("expected 24, got %v", ht.InfraDegradedHours)
+	if ht.InfraDegradedHours != 48 {
+		t.Errorf("expected 48, got %v", ht.InfraDegradedHours)
 	}
-	if ht.InfraSilentHours != 72 {
-		t.Errorf("expected 72, got %v", ht.InfraSilentHours)
+	if ht.InfraSilentHours != 96 {
+		t.Errorf("expected 96, got %v", ht.InfraSilentHours)
 	}
-	if ht.NodeDegradedHours != 1 {
-		t.Errorf("expected 1, got %v", ht.NodeDegradedHours)
+	if ht.NodeDegradedHours != 24 {
+		t.Errorf("expected 24, got %v", ht.NodeDegradedHours)
 	}
-	if ht.NodeSilentHours != 24 {
-		t.Errorf("expected 24, got %v", ht.NodeSilentHours)
+	if ht.NodeSilentHours != 72 {
+		t.Errorf("expected 72, got %v", ht.NodeSilentHours)
 	}
 }
 
@@ -282,8 +282,8 @@ func TestGetHealthThresholdsPartialCustom(t *testing.T) {
 	if ht.InfraDegradedHours != 2 {
 		t.Errorf("expected 2, got %v", ht.InfraDegradedHours)
 	}
-	if ht.InfraSilentHours != 72 {
-		t.Errorf("expected default 72, got %v", ht.InfraSilentHours)
+	if ht.InfraSilentHours != 96 {
+		t.Errorf("expected default 96, got %v", ht.InfraSilentHours)
 	}
 }
 
