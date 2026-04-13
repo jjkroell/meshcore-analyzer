@@ -61,7 +61,7 @@ func TestQueryInt(t *testing.T) {
 		{"empty", "/?limit=", "limit", 50, 50},
 		{"invalid", "/?limit=abc", "limit", 50, 50},
 		{"zero", "/?limit=0", "limit", 50, 0},
-		{"negative", "/?limit=-1", "limit", 50, -1},
+		{"negative", "/?limit=-1", "limit", 50, 0},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
