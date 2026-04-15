@@ -850,16 +850,9 @@
             <label id="liveGeoFilterLabel" style="display:none"><input type="checkbox" id="liveGeoFilterToggle"> Mesh live area</label>
           </div>
           <div class="live-toggles-mobile">
-            <button class="live-options-btn" id="liveOptionsBtn" aria-label="Map options" aria-haspopup="true" aria-expanded="false">☰ Options</button>
-            <div class="live-options-menu" id="liveOptionsMenu" aria-label="Map options menu">
-              <label><input type="checkbox" id="liveHeatToggleMobile" checked> Heat</label>
-              <label><input type="checkbox" id="liveGhostToggleMobile" checked> Ghosts</label>
-              <label><input type="checkbox" id="liveRealisticToggleMobile"> Realistic</label>
-              <label><input type="checkbox" id="liveMatrixToggleMobile"> Matrix</label>
-              <label><input type="checkbox" id="liveMatrixRainToggleMobile"> Rain</label>
-              <label><input type="checkbox" id="liveAudioToggleMobile"> 🎵 Audio</label>
-              <label><input type="checkbox" id="liveFavoritesToggleMobile"> ⭐ Favorites</label>
-            </div>
+            <button class="live-options-btn" id="liveOptionsBtn" aria-label="Map options" aria-haspopup="dialog" aria-expanded="false">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="4" y1="6" x2="20" y2="6"/><line x1="8" y1="12" x2="16" y2="12"/><line x1="6" y1="18" x2="18" y2="18"/></svg>
+            </button>
           </div>
           <div class="audio-controls hidden" id="audioControls">
             <label class="audio-slider-label">Voice <select id="audioVoiceSelect" class="audio-voice-select"></select></label>
@@ -931,6 +924,21 @@
             <div class="vcr-lcd-row vcr-lcd-pkts" id="vcrLcdPkts"></div>
           </div>
           <div id="vcrPrompt" class="vcr-prompt hidden"></div>
+        </div>
+        <!-- Map options modal (mobile) -->
+        <div class="live-options-backdrop" id="liveOptionsBackdrop"></div>
+        <div class="live-options-modal" id="liveOptionsMenu" role="dialog" aria-label="Map options" aria-modal="true">
+          <div class="live-options-modal-handle"></div>
+          <div class="live-options-modal-title">Map Options</div>
+          <div class="live-options-modal-body">
+            <label><input type="checkbox" id="liveHeatToggleMobile" checked> <span>Heat map</span></label>
+            <label><input type="checkbox" id="liveGhostToggleMobile" checked> <span>Ghost nodes</span></label>
+            <label><input type="checkbox" id="liveRealisticToggleMobile"> <span>Realistic view</span></label>
+            <label><input type="checkbox" id="liveMatrixToggleMobile"> <span>Matrix mode</span></label>
+            <label><input type="checkbox" id="liveMatrixRainToggleMobile"> <span>Matrix rain</span></label>
+            <label><input type="checkbox" id="liveAudioToggleMobile"> <span>🎵 Audio</span></label>
+            <label><input type="checkbox" id="liveFavoritesToggleMobile"> <span>⭐ Favorites only</span></label>
+          </div>
         </div>
       </div>`;
 
@@ -1191,20 +1199,25 @@
         d.addEventListener('change', () => { m.checked = d.checked; });
       });
 
-      // Toggle menu open/close
+      const backdrop = document.getElementById('liveOptionsBackdrop');
+
+      function openMenu() {
+        menu.classList.add('open');
+        if (backdrop) backdrop.classList.add('open');
+        btn.setAttribute('aria-expanded', 'true');
+      }
+      function closeMenu() {
+        menu.classList.remove('open');
+        if (backdrop) backdrop.classList.remove('open');
+        btn.setAttribute('aria-expanded', 'false');
+      }
+
       btn.addEventListener('click', (e) => {
         e.stopPropagation();
-        const open = menu.classList.toggle('open');
-        btn.setAttribute('aria-expanded', open);
+        menu.classList.contains('open') ? closeMenu() : openMenu();
       });
 
-      // Close on outside click
-      document.addEventListener('click', (e) => {
-        if (!menu.contains(e.target) && e.target !== btn) {
-          menu.classList.remove('open');
-          btn.setAttribute('aria-expanded', 'false');
-        }
-      });
+      if (backdrop) backdrop.addEventListener('click', closeMenu);
     })();
 
     // Feed show/hide

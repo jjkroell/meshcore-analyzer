@@ -58,15 +58,16 @@
   let lastHeard = localStorage.getItem('meshcore-nodes-last-heard') || '';
   let statusFilter = localStorage.getItem('meshcore-nodes-status-filter') || 'all';
   let wsHandler = null;
+  let paused = false;
   let detailMap = null;
 
   // ROLE_COLORS loaded from shared roles.js
   const TABS = [
-    { key: 'all', label: 'All' },
-    { key: 'repeater', label: 'Repeaters' },
-    { key: 'room', label: 'Rooms' },
-    { key: 'companion', label: 'Companions' },
-    { key: 'sensor', label: 'Sensors' },
+    { key: 'all',       label: 'All',        icon: null },
+    { key: 'repeater',  label: 'Repeaters',  icon: '📡' },
+    { key: 'companion', label: 'Companions', icon: '📻' },
+    { key: 'room',      label: 'Rooms',      icon: '🏠' },
+    { key: 'sensor',    label: 'Sensors',    icon: '🌡' },
   ];
 
   function buildNodesQuery(tab, searchStr) {
@@ -341,13 +342,35 @@
     if (_urlTab && TABS.some(function(t) { return t.key === _urlTab; })) activeTab = _urlTab;
     if (_urlSearch) search = _urlSearch;
 
+    paused = false;
     app.innerHTML = `<div class="nodes-page">
       <div class="nodes-topbar">
-        <input type="text" class="nodes-search" id="nodeSearch" placeholder="Search nodes by name…" aria-label="Search nodes by name">
-        <div class="nodes-counts" id="nodeCounts"></div>
+        <button class="nodes-search-trigger" id="nodesSearchTrigger" aria-label="Search nodes" aria-haspopup="dialog">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+          <span class="nodes-trigger-text">Search nodes…</span>
+          <kbd class="nodes-search-kbd">/</kbd>
+        </button>
       </div>
       <div id="nodesRegionFilter" class="region-filter-container"></div>
       <div id="nodesLeft" aria-live="polite" aria-relevant="additions removals"></div>
+    </div>
+    <div class="modal-overlay pkt-search-overlay nodes-search-overlay" id="nodesSearchOverlay" style="display:none" aria-hidden="true">
+      <div class="pkt-search-modal" role="dialog" aria-label="Search Nodes" aria-modal="true">
+        <div class="pkt-search-input-row">
+          <svg class="pkt-search-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+          <input type="text" id="nodesSearchInput" class="pkt-search-input" placeholder="Search by name or public key prefix…" autocomplete="off" spellcheck="false" aria-label="Search nodes">
+          <button class="pkt-search-clear" id="nodesSearchClear" style="display:none" aria-label="Clear search">✕</button>
+        </div>
+        <div class="pkt-search-meta" id="nodesSearchMeta"></div>
+        <div class="pkt-search-results" id="nodesSearchResults">
+          <div class="pkt-sr-empty">Type to search nodes</div>
+        </div>
+        <div class="pkt-search-footer">
+          <span><kbd>↑</kbd><kbd>↓</kbd> navigate</span>
+          <span><kbd>↵</kbd> open</span>
+          <span><kbd>Esc</kbd> close</span>
+        </div>
+      </div>
     </div>
     <div class="modal-overlay nodes-detail-overlay" id="nodesDetailOverlay" style="display:none">
       <div class="modal nodes-detail-modal" role="dialog" aria-label="Node Detail" aria-modal="true">
@@ -362,53 +385,193 @@
     RegionFilter.init(document.getElementById('nodesRegionFilter'));
     regionChangeHandler = RegionFilter.onChange(function () { _allNodes = null; loadNodes(); });
 
-    if (search) {
-      var _si = document.getElementById('nodeSearch');
-      if (_si) _si.value = search;
-    }
+    // --- Nodes Search Modal ---
+    (function() {
+      var trigger = document.getElementById('nodesSearchTrigger');
+      var overlay = document.getElementById('nodesSearchOverlay');
+      var input = document.getElementById('nodesSearchInput');
+      var clearBtn = document.getElementById('nodesSearchClear');
+      var meta = document.getElementById('nodesSearchMeta');
+      var results = document.getElementById('nodesSearchResults');
+      if (!trigger || !overlay || !input) return;
 
-    document.getElementById('nodeSearch').addEventListener('input', debounce(e => {
-      search = e.target.value;
-      updateNodesUrl();
-      loadNodes();
-    }, 250));
+      var activeIdx = -1;
+      var currentMatches = [];
+
+      function openSearch() {
+        var stickyTop = document.querySelector('.nodes-topbar');
+        if (stickyTop) {
+          var bottom = stickyTop.getBoundingClientRect().bottom;
+          overlay.style.paddingTop = Math.max(bottom + 8, 12) + 'px';
+        }
+        overlay.style.display = 'flex';
+        overlay.removeAttribute('aria-hidden');
+        input.value = '';
+        clearBtn.style.display = 'none';
+        meta.textContent = '';
+        results.innerHTML = '<div class="pkt-sr-empty">Type to search nodes</div>';
+        currentMatches = [];
+        activeIdx = -1;
+        requestAnimationFrame(function() { input.focus(); });
+      }
+
+      function closeSearch() {
+        overlay.style.display = 'none';
+        overlay.setAttribute('aria-hidden', 'true');
+        trigger.focus();
+      }
+
+      function matchNodes(raw) {
+        if (!raw) return [];
+        var src = _allNodes || nodes;
+        var q = raw.toLowerCase().replace(/\s/g, '');
+        var lq = raw.toLowerCase();
+        var isHex = q.length >= 4 && /^[0-9a-f]+$/.test(q);
+
+        var scored = [];
+        src.forEach(function(n) {
+          var pk = (n.public_key || '').toLowerCase();
+          var nm = (n.name || '').toLowerCase();
+          var score = 0;
+          if (isHex) {
+            if (pk.startsWith(q)) score = 100;
+            else if (pk.includes(q)) score = 60;
+            // also allow name fallback for hex-like strings
+            else if (nm.startsWith(lq)) score = 40;
+            else if (nm.includes(lq)) score = 20;
+          } else {
+            if (nm === lq) score = 100;
+            else if (nm.startsWith(lq)) score = 80;
+            else if (nm.includes(lq)) score = 50;
+          }
+          if (score > 0) scored.push({ n: n, score: score });
+        });
+
+        // Sort by score desc, then by recency desc
+        scored.sort(function(a, b) {
+          if (b.score !== a.score) return b.score - a.score;
+          var ta = a.n.last_heard || a.n.last_seen || 0;
+          var tb = b.n.last_heard || b.n.last_seen || 0;
+          return new Date(tb) - new Date(ta);
+        });
+
+        return scored.map(function(s) { return s.n; });
+      }
+
+      function renderResults(raw) {
+        activeIdx = -1;
+        if (!raw) {
+          currentMatches = [];
+          results.innerHTML = '<div class="pkt-sr-empty">Type to search nodes</div>';
+          meta.textContent = '';
+          return;
+        }
+        currentMatches = matchNodes(raw);
+        var shown = currentMatches.slice(0, 100);
+        meta.textContent = currentMatches.length === 0
+          ? 'No results'
+          : currentMatches.length > 100
+            ? 'Showing 100 of ' + currentMatches.length.toLocaleString() + ' matches'
+            : currentMatches.length.toLocaleString() + ' match' + (currentMatches.length === 1 ? '' : 'es');
+        if (!shown.length) {
+          results.innerHTML = '<div class="pkt-sr-empty">No nodes found</div>';
+          return;
+        }
+        results.innerHTML = shown.map(function(n, i) {
+          var icon = roleIcon(n.role);
+          var roleColor = ROLE_COLORS[n.role] || '#6b7280';
+          var lastTime = n.last_heard || n.last_seen;
+          var time = lastTime ? timeAgo(lastTime) : '—';
+          var status = getNodeStatus(n.role || 'companion', lastTime ? new Date(lastTime).getTime() : 0);
+          var statusDot = status === 'active' ? '🟢' : '⚪';
+          var pubkeyShort = n.public_key ? n.public_key.slice(0, 16).toUpperCase() : '';
+          return '<div class="pkt-sr-item" data-idx="' + i + '" tabindex="-1" role="option">' +
+            '<div class="pkt-sr-top">' +
+              '<span style="color:' + roleColor + '">' + icon + '</span>' +
+              '<span style="font-weight:600">' + escapeHtml(n.name || '(unnamed)') + '</span>' +
+              '<span class="pkt-sr-time">' + statusDot + ' ' + escapeHtml(time) + '</span>' +
+            '</div>' +
+            '<div class="pkt-sr-obs mono" style="font-size:11px">' + escapeHtml(pubkeyShort) + (n.public_key && n.public_key.length > 16 ? '…' : '') + '</div>' +
+          '</div>';
+        }).join('');
+      }
+
+      function setActive(idx) {
+        var items = results.querySelectorAll('.pkt-sr-item');
+        items.forEach(function(el) { el.classList.remove('active'); });
+        if (idx >= 0 && idx < items.length) {
+          activeIdx = idx;
+          items[idx].classList.add('active');
+          items[idx].scrollIntoView({ block: 'nearest' });
+        } else {
+          activeIdx = -1;
+        }
+      }
+
+      function openResult(idx) {
+        var n = currentMatches[idx];
+        if (!n) return;
+        closeSearch();
+        selectNode(n.public_key);
+      }
+
+      trigger.addEventListener('click', openSearch);
+      overlay.addEventListener('click', function(e) { if (e.target === overlay) closeSearch(); });
+
+      input.addEventListener('keydown', function(e) {
+        var items = results.querySelectorAll('.pkt-sr-item');
+        if (e.key === 'Escape') { closeSearch(); return; }
+        if (e.key === 'ArrowDown') { e.preventDefault(); setActive(Math.min(activeIdx + 1, items.length - 1)); return; }
+        if (e.key === 'ArrowUp') { e.preventDefault(); setActive(Math.max(activeIdx - 1, 0)); return; }
+        if (e.key === 'Enter') { if (activeIdx >= 0) openResult(activeIdx); else if (currentMatches.length === 1) openResult(0); return; }
+      });
+
+      var srTimer = null;
+      input.addEventListener('input', function() {
+        var raw = input.value.trim();
+        clearBtn.style.display = raw ? 'flex' : 'none';
+        clearTimeout(srTimer);
+        srTimer = setTimeout(function() { renderResults(raw); }, 150);
+      });
+
+      clearBtn.addEventListener('click', function() {
+        input.value = '';
+        clearBtn.style.display = 'none';
+        renderResults('');
+        input.focus();
+      });
+
+      results.addEventListener('click', function(e) {
+        var item = e.target.closest('.pkt-sr-item');
+        if (!item) return;
+        openResult(Number(item.dataset.idx));
+      });
+
+      results.addEventListener('mousemove', function(e) {
+        var item = e.target.closest('.pkt-sr-item');
+        if (!item) return;
+        setActive(Number(item.dataset.idx));
+      });
+
+      document.addEventListener('keydown', function(e) {
+        if (overlay.style.display !== 'none') return;
+        if (e.key !== '/') return;
+        var tag = (document.activeElement || {}).tagName;
+        if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+        e.preventDefault();
+        openSearch();
+      });
+    })();
 
     loadNodes();
     // Auto-refresh when ADVERT packets arrive via WebSocket (fixes #131)
     wsHandler = debouncedOnWS(function (msgs) {
       const advertMsgs = msgs.filter(isAdvertMessage);
       if (!advertMsgs.length) return;
-
-      if (!_allNodes) {
-        invalidateApiCache('/nodes');
-        loadNodes(true);
-        return;
-      }
-
-      let needReload = false;
-      for (const m of advertMsgs) {
-        const payload = m.data && m.data.decoded && m.data.decoded.payload;
-        const pubKey = payload && (payload.pubKey || payload.public_key);
-        if (!pubKey) { needReload = true; break; }
-
-        const existing = _allNodes.find(n => n.public_key === pubKey);
-        if (existing) {
-          if (payload.name) existing.name = payload.name;
-          if (payload.lat != null) existing.lat = payload.lat;
-          if (payload.lon != null) existing.lon = payload.lon;
-          const ts = m.data.packet && (m.data.packet.timestamp || m.data.packet.first_seen);
-          if (ts) existing.last_seen = ts;
-        } else {
-          needReload = true;
-          break;
-        }
-      }
-
-      if (needReload) {
-        _allNodes = null;
-        invalidateApiCache('/nodes');
-      }
-      loadNodes(true);
+      // Force fresh fetch so last_heard, advert_count, etc. are current
+      _allNodes = null;
+      invalidateApiCache('/nodes');
+      if (!paused) loadNodes(true);
     }, 5000);
   }
 
@@ -812,8 +975,15 @@
       let filtered = _allNodes;
       if (activeTab !== 'all') filtered = filtered.filter(n => (n.role || '').toLowerCase() === activeTab);
       if (search) {
-        const q = search.toLowerCase();
-        filtered = filtered.filter(n => (n.name || '').toLowerCase().includes(q) || (n.public_key || '').toLowerCase().includes(q));
+        const q = search.toLowerCase().replace(/\s/g, '');
+        const nameQ = search.toLowerCase().trim();
+        const isHex = q.length >= 4 && /^[0-9a-f]+$/.test(q);
+        if (isHex) {
+          const byKey = filtered.filter(n => (n.public_key || '').toLowerCase().includes(q));
+          filtered = byKey.length > 0 ? byKey : filtered.filter(n => (n.name || '').toLowerCase().includes(nameQ));
+        } else {
+          filtered = filtered.filter(n => (n.name || '').toLowerCase().includes(nameQ));
+        }
       }
       if (lastHeard) {
         const ms = { '1h': 3600000, '2h': 7200000, '6h': 21600000, '12h': 43200000, '24h': 86400000, '48h': 172800000, '3d': 259200000, '7d': 604800000, '14d': 1209600000, '30d': 2592000000 }[lastHeard];
@@ -867,15 +1037,25 @@
     }
   }
 
+  function _tabCount(key) {
+    if (key === 'all') return (counts.repeaters || 0) + (counts.rooms || 0) + (counts.companions || 0) + (counts.sensors || 0);
+    if (key === 'repeater') return counts.repeaters || 0;
+    if (key === 'room') return counts.rooms || 0;
+    if (key === 'companion') return counts.companions || 0;
+    if (key === 'sensor') return counts.sensors || 0;
+    return 0;
+  }
+
+  function _tabColor(key) {
+    return ROLE_COLORS[key] || ROLE_COLORS.companion;
+  }
+
   function renderCounts() {
-    const el = document.getElementById('nodeCounts');
-    if (!el) return;
-    el.innerHTML = [
-      { k: 'repeaters', l: 'Repeaters', c: ROLE_COLORS.repeater },
-      { k: 'rooms', l: 'Rooms', c: ROLE_COLORS.room || '#6b7280' },
-      { k: 'companions', l: 'Companions', c: ROLE_COLORS.companion },
-      { k: 'sensors', l: 'Sensors', c: ROLE_COLORS.sensor },
-    ].map(r => `<span class="node-count-pill" style="background:${r.c}">${counts[r.k] || 0} ${r.l}</span>`).join('');
+    document.querySelectorAll('#nodeTabs .node-tab').forEach(btn => {
+      const span = btn.querySelector('.node-tab-count');
+      if (!span) return;
+      span.textContent = _tabCount(btn.dataset.tab);
+    });
   }
 
   function renderLeft() {
@@ -885,7 +1065,12 @@
     el.innerHTML = `
       <div class="nodes-tabs-bar">
         <div class="nodes-tabs" id="nodeTabs">
-          ${TABS.map(t => `<button class="node-tab ${activeTab === t.key ? 'active' : ''}" data-tab="${t.key}">${t.label}</button>`).join('')}
+          ${TABS.map(t => {
+            const c = t.key === 'all' ? null : _tabColor(t.key);
+            const pillStyle = c ? `background:${c}20;color:${c}` : 'background:var(--surface-2);color:var(--text-muted)';
+            const labelHtml = t.icon ? `<span class="node-tab-label"><span class="node-tab-icon">${t.icon}</span> ${t.label}</span>` : t.label;
+            return `<button class="node-tab ${activeTab === t.key ? 'active' : ''}" data-tab="${t.key}"><span class="node-tab-count" style="${pillStyle}">${_tabCount(t.key)}</span>${labelHtml}</button>`;
+          }).join('')}
         </div>
         <div class="nodes-filters">
           <div class="filter-group" id="nodeStatusFilter">
@@ -910,11 +1095,11 @@
       </div>
       <table class="data-table" id="nodesTable">
         <thead><tr>
-          <th scope="col" data-sort-key="name">Name</th>
+          <th scope="col" class="col-node-name" data-sort-key="name">Name</th>
           <th scope="col" class="col-pubkey" data-sort-key="public_key">Public Key</th>
-          <th scope="col" data-sort-key="role">Role</th>
-          <th scope="col" data-sort-key="last_seen" data-sort-default="desc">Last Seen</th>
-          <th scope="col" data-sort-key="advert_count" data-sort-default="desc">Adverts</th>
+          <th scope="col" class="col-node-role" data-sort-key="role">Role</th>
+          <th scope="col" class="col-node-lastseen" data-sort-key="last_seen" data-sort-default="desc">Last Seen</th>
+          <th scope="col" class="col-node-adverts" data-sort-key="advert_count" data-sort-default="desc">Adverts</th>
         </tr></thead>
         <tbody id="nodesBody"></tbody>
       </table>`;
@@ -980,6 +1165,23 @@
     renderRows();
   }
 
+  function roleIcon(role) {
+    switch ((role || '').toLowerCase()) {
+      case 'repeater': return '📡';
+      case 'room':     return '🏠';
+      case 'sensor':   return '🌡';
+      default:         return '📻';
+    }
+  }
+
+  function renderRoleBadge(role, roleColor) {
+    const icon = roleIcon(role);
+    return `<span class="role-badge-wrap" title="${escapeHtml(role || '')}">` +
+      `<span class="role-icon" aria-hidden="true">${icon}</span>` +
+      `<span class="badge role-text" style="background:${roleColor}20;color:${roleColor}">${escapeHtml(role || '—')}</span>` +
+    `</span>`;
+  }
+
   function renderRows() {
     const tbody = document.getElementById('nodesBody');
     if (!tbody) return;
@@ -1012,11 +1214,11 @@
       const status = getNodeStatus(n.role || 'companion', lastSeenTime ? new Date(lastSeenTime).getTime() : 0);
       const lastSeenClass = status === 'active' ? 'last-seen-active' : 'last-seen-stale';
       return `<tr data-key="${n.public_key}" data-action="select" data-value="${n.public_key}" tabindex="0" role="row" class="${selectedKey === n.public_key ? 'selected' : ''}${isClaimed ? ' claimed-row' : ''}">
-        <td>${isClaimed ? '<span class="claimed-badge" title="My Mesh">★</span> ' : favStar(n.public_key, 'node-fav', n.name)}<strong>${n.name || '(unnamed)'}</strong>${dupNameBadge(n.name, n.public_key, dupMap)}</td>
+        <td class="col-node-name">${isClaimed ? '<span class="claimed-badge" title="My Mesh">★</span> ' : favStar(n.public_key, 'node-fav', n.name)}<strong>${n.name || '(unnamed)'}</strong>${dupNameBadge(n.name, n.public_key, dupMap)}</td>
         <td class="mono col-pubkey">${formatPubKey(n.public_key, n.hash_size, 16)}</td>
-        <td><span class="badge" style="background:${roleColor}20;color:${roleColor}">${n.role}</span></td>
-        <td class="${lastSeenClass}">${renderNodeTimestampHtml(n.last_heard || n.last_seen)}</td>
-        <td>${n.advert_count || 0}</td>
+        <td class="col-node-role">${renderRoleBadge(n.role, roleColor)}</td>
+        <td class="col-node-lastseen ${lastSeenClass}">${renderNodeTimestampHtml(n.last_heard || n.last_seen)}</td>
+        <td class="col-node-adverts">${n.advert_count || 0}</td>
       </tr>`;
     }).join('');
     bindFavStars(tbody);

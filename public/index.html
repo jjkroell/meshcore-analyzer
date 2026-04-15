@@ -39,12 +39,28 @@
   <a class="skip-link" href="#app">Skip to content</a>
   <nav class="top-nav" role="navigation" aria-label="Main navigation">
     <div class="nav-left">
-      <a href="#/" class="nav-brand">
-        <img src="swbc-logo.svg" class="brand-icon" alt="SWBC Mesh" width="24" height="24" style="vertical-align:middle">
-        <span class="brand-text">CoreScope</span>
+      <a href="#/home" class="nav-brand">
+        <img src="swbc-logo.svg" class="brand-icon" alt="SWBC Mesh" width="36" height="36">
+        <span class="brand-stack">
+          <span class="brand-text">
+            <span class="brand-core">SWBC</span><span class="brand-sep"> / </span><span class="brand-scope">Salish Mesh</span>
+          </span>
+          <span class="brand-trace" aria-hidden="true">
+            <svg id="brandTraceSvg" width="100%" height="10" viewBox="0 0 230 10" preserveAspectRatio="none" xmlns="http://www.w3.org/2000/svg">
+              <line id="brandTraceLine" x1="0" y1="5" x2="220" y2="5" stroke="#94a3b8" stroke-width="1.8" opacity="0.55"/>
+              <line id="brandTracePulse" x1="0" y1="5" x2="220" y2="5" stroke="#94a3b8" stroke-width="3" stroke-dasharray="20 2400" stroke-dashoffset="1000" stroke-linecap="round" opacity="0.8"/>
+              <g id="brandTraceNodes" fill="#94a3b8">
+                <circle cx="32"  cy="5" r="3" opacity="1"/>
+                <circle cx="95"  cy="5" r="3" opacity="1"/>
+                <circle cx="158" cy="5" r="3" opacity="1"/>
+                <circle cx="218" cy="5" r="5" opacity="1"/>
+              </g>
+            </svg>
+          </span>
+        </span>
         <span class="live-dot" id="liveDot" title="WebSocket connected" aria-label="WebSocket connected"></span>
       </a>
-      <div class="nav-links">
+      <div class="nav-links" id="mainNavLinks">
         <a href="#/home" class="nav-link" data-route="home" data-priority="high">Home</a>
         <a href="#/packets" class="nav-link" data-route="packets" data-priority="high">Packets</a>
         <a href="#/map" class="nav-link" data-route="map" data-priority="high">Map</a>
@@ -70,8 +86,51 @@
       <button class="nav-btn" id="searchToggle" style="display:none" title="Search (Ctrl+K)">🔍</button>
       <button class="nav-btn" id="customizeToggle" style="display:none" title="Customize theme & branding">🎨</button>
       <button class="nav-btn" id="darkModeToggle" style="display:none" title="Toggle dark mode">☀️</button>
-      <button class="nav-btn hamburger" id="hamburger" title="Menu" aria-label="Toggle navigation menu">☰</button>
     </div>
+  </nav>
+
+  <!-- Bottom nav bar (mobile/tablet only) -->
+  <nav class="bottom-nav" id="bottomNav" aria-label="Quick navigation">
+    <a href="#/home" class="bottom-nav-item" data-route="home" aria-label="Home">
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>
+      <span>Home</span>
+    </a>
+    <a href="#/packets" class="bottom-nav-item" data-route="packets" aria-label="Packets">
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="22 12 16 12 14 15 10 15 8 12 2 12"/><path d="M5.45 5.11L2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/></svg>
+      <span>Packets</span>
+    </a>
+    <a href="#/map" class="bottom-nav-item" data-route="map" aria-label="Map">
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="1 6 1 22 8 18 16 22 23 18 23 2 16 6 8 2 1 6"/><line x1="8" y1="2" x2="8" y2="18"/><line x1="16" y1="6" x2="16" y2="22"/></svg>
+      <span>Map</span>
+    </a>
+    <a href="#/live" class="bottom-nav-item" data-route="live" aria-label="Live">
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1.42 9a16 16 0 0 1 21.16 0"/><path d="M5 12.55a11 11 0 0 1 14.08 0"/><path d="M8.53 16.11a6 6 0 0 1 6.95 0"/><line x1="12" y1="20" x2="12" y2="20"/></svg>
+      <span>Live</span>
+    </a>
+    <a href="#/nodes" class="bottom-nav-item" data-route="nodes" aria-label="Nodes">
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="5" r="3"/><circle cx="4" cy="19" r="3"/><circle cx="20" cy="19" r="3"/><line x1="12" y1="8" x2="4" y2="16"/><line x1="12" y1="8" x2="20" y2="16"/></svg>
+      <span>Nodes</span>
+    </a>
+    <button class="bottom-nav-item bottom-nav-menu-btn" id="bottomHamburger" aria-label="Menu" aria-expanded="false" aria-controls="mainNavLinks">
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
+      <span>Menu</span>
+    </button>
+  </nav>
+
+  <!-- Nav sheet backdrop -->
+  <div class="nav-sheet-backdrop" id="navSheetBackdrop"></div>
+  <!-- Nav sheet (bottom sheet on mobile/tablet) -->
+  <nav class="nav-sheet" id="navSheet" aria-label="Navigation menu">
+    <a href="#/home" class="nav-link" data-route="home">Home</a>
+    <a href="#/packets" class="nav-link" data-route="packets">Packets</a>
+    <a href="#/map" class="nav-link" data-route="map">Map</a>
+    <a href="#/live" class="nav-link" data-route="live">Live</a>
+    <a href="#/channels" class="nav-link" data-route="channels">Channels</a>
+    <a href="#/nodes" class="nav-link" data-route="nodes">Nodes</a>
+    <a href="#/traces" class="nav-link" data-route="traces">Traces</a>
+    <a href="#/observers" class="nav-link" data-route="observers">Observers</a>
+    <a href="#/analytics" class="nav-link" data-route="analytics">Analytics</a>
+    <a href="#/perf" class="nav-link" data-route="perf">Perf</a>
   </nav>
 
   <!-- Search overlay -->

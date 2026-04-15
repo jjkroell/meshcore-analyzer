@@ -56,6 +56,11 @@
   font-size: .9rem;
   position: relative;
 }
+.home-hero-sub {
+  font-size: .78rem !important;
+  color: #64748b !important;
+  margin: -16px 0 24px !important;
+}
 .home-search-wrap {
   position: relative;
   max-width: 480px;
@@ -467,7 +472,7 @@
   margin: 0 auto;
 }
 .home-section-header {
-  padding: 20px 20px 0;
+  padding: 20px 20px 12px;
   border-top: 1px solid var(--border);
 }
 .home-section-header:first-child { border-top: none; }
@@ -614,7 +619,7 @@
   }
 
   /* Section header tighter */
-  .home-section-header { padding: 16px 16px 0; }
+  .home-section-header { padding: 16px 16px 12px; }
 
   /* Node card metrics: 2 cols */
   .mnc-metrics { grid-template-columns: repeat(2, 1fr); }
@@ -638,7 +643,7 @@
   .suggest-name { font-size: 1rem !important; }
   .suggest-key { font-size: 0.8rem !important; }
   .suggest-item { padding: 14px 16px !important; min-height: 52px !important; }
-  .home-section-header { padding: 20px 16px 0 !important; }
+  .home-section-header { padding: 20px 16px 12px !important; }
   .my-nodes-grid { padding: 0 16px 16px !important; gap: 16px !important; }
   .mnc-name { font-size: 1rem !important; }
   .mnc-role { font-size: 0.8rem !important; }

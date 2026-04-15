@@ -1,6 +1,53 @@
 /* === CoreScope — app.js === */
 'use strict';
 
+// --- Easter egg: Konami code + 7x logo tap ---
+(function () {
+  const SEQ = ['ArrowUp','ArrowUp','ArrowDown','ArrowDown','ArrowLeft','ArrowRight','ArrowLeft','ArrowRight','b','a'];
+  let pos = 0;
+  document.addEventListener('keydown', function (e) {
+    if (e.key === SEQ[pos]) {
+      pos++;
+      if (pos === SEQ.length) { pos = 0; showEasterEgg(); }
+    } else {
+      pos = e.key === SEQ[0] ? 1 : 0;
+    }
+  });
+
+  // 7 taps on the nav logo
+  let tapCount = 0, tapTimer = null;
+  document.addEventListener('click', function (e) {
+    if (!e.target.closest('.nav-brand')) { tapCount = 0; return; }
+    tapCount++;
+    clearTimeout(tapTimer);
+    if (tapCount >= 7) { tapCount = 0; showEasterEgg(); return; }
+    tapTimer = setTimeout(() => { tapCount = 0; }, 2000);
+  });
+  function showEasterEgg() {
+    if (document.getElementById('easterEggOverlay')) return;
+    const overlay = document.createElement('div');
+    overlay.id = 'easterEggOverlay';
+    overlay.style.cssText = 'position:fixed;inset:0;z-index:99999;background:rgba(0,0,0,0.92);display:flex;flex-direction:column;align-items:center;justify-content:center;cursor:pointer;animation:eggFadeIn 0.4s ease';
+    overlay.innerHTML = `
+      <style>
+        @keyframes eggFadeIn { from { opacity:0; transform:scale(0.92); } to { opacity:1; transform:scale(1); } }
+        @keyframes eggSpin { 0% { transform:rotate(0deg) scale(1); } 50% { transform:rotate(180deg) scale(1.08); } 100% { transform:rotate(360deg) scale(1); } }
+        #easterEggLogo { animation: eggSpin 8s linear infinite; filter:brightness(0) invert(1) drop-shadow(0 0 28px rgba(74,158,255,0.7)); }
+        #easterEggOverlay h2 { color:#fff; font-size:1.6rem; font-weight:700; margin:28px 0 8px; letter-spacing:0.04em; }
+        #easterEggOverlay p { color:#64748b; font-size:0.9rem; margin:0; }
+        #easterEggOverlay small { color:#334155; font-size:0.75rem; margin-top:32px; }
+      </style>
+      <img id="easterEggLogo" src="salishmesh-logo.svg" width="220" height="220" alt="Salish Mesh">
+      <h2>Salish Mesh</h2>
+      <p>You found the secret. Welcome to the mesh.</p>
+      <small>click or press Esc to close</small>`;
+    document.body.appendChild(overlay);
+    const close = () => overlay.remove();
+    overlay.addEventListener('click', close);
+    document.addEventListener('keydown', function esc(e) { if (e.key === 'Escape') { close(); document.removeEventListener('keydown', esc); } });
+  }
+})();
+
 // --- Route/Payload name maps ---
 const ROUTE_TYPES = { 0: 'TRANSPORT_FLOOD', 1: 'FLOOD', 2: 'DIRECT', 3: 'TRANSPORT_DIRECT' };
 const PAYLOAD_TYPES = { 0: 'Request', 1: 'Response', 2: 'Direct Msg', 3: 'ACK', 4: 'Advert', 5: 'Channel Msg', 6: 'Group Data', 7: 'Anon Req', 8: 'Path', 9: 'Trace', 10: 'Multipart', 11: 'Control', 15: 'Raw Custom' };
@@ -390,12 +437,34 @@ function buildHexLegend(ranges) {
 let ws = null;
 let wsListeners = [];
 
+function setTraceColor(color) {
+  const line  = document.getElementById('brandTraceLine');
+  const pulse = document.getElementById('brandTracePulse');
+  const nodes = document.getElementById('brandTraceNodes');
+  if (line)  line.setAttribute('stroke', color);
+  if (pulse) pulse.setAttribute('stroke', color);
+  if (nodes) nodes.setAttribute('fill', color);
+}
+
+function fireBrandPulse() {
+  const pulse = document.getElementById('brandTracePulse');
+  if (!pulse) return;
+  pulse.classList.remove('trace-pulsing');
+  void pulse.getBoundingClientRect();
+  pulse.classList.add('trace-pulsing');
+}
+
 function connectWS() {
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
   ws = new WebSocket(`${proto}//${location.host}`);
-  ws.onopen = () => document.getElementById('liveDot')?.classList.add('connected');
+  ws.onopen = () => {
+    document.getElementById('liveDot')?.classList.add('connected');
+    setTraceColor('#22c55e');
+    fireBrandPulse();
+  };
   ws.onclose = () => {
     document.getElementById('liveDot')?.classList.remove('connected');
+    setTraceColor('#94a3b8');
     setTimeout(connectWS, 3000);
   };
   ws.onerror = () => ws.close();
@@ -459,9 +528,11 @@ let currentPage = null;
 
 function closeNav() {
   document.querySelector('.nav-links')?.classList.remove('open');
+  document.getElementById('navSheet')?.classList.remove('open');
+  document.getElementById('navSheetBackdrop')?.classList.remove('open');
   document.body.classList.remove('nav-open');
-  var btn = document.getElementById('hamburger');
-  if (btn) btn.setAttribute('aria-expanded', 'false');
+  var bottomBtn = document.getElementById('bottomHamburger');
+  if (bottomBtn) bottomBtn.setAttribute('aria-expanded', 'false');
   closeMoreMenu();
 }
 
@@ -506,6 +577,12 @@ function navigate() {
   document.querySelectorAll('.nav-link[data-route]').forEach(el => {
     el.classList.toggle('active', el.dataset.route === basePage);
   });
+  document.querySelectorAll('.bottom-nav-item[data-route]').forEach(el => {
+    el.classList.toggle('active', el.dataset.route === basePage);
+  });
+  document.querySelectorAll('#navSheet .nav-link[data-route]').forEach(el => {
+    el.classList.toggle('active', el.dataset.route === basePage);
+  });
   // Update "More" button to show active state if a low-priority page is selected
   var moreBtn = document.getElementById('navMoreBtn');
   if (moreBtn) {
@@ -534,6 +611,9 @@ function navigate() {
       var heading = app.querySelector('h1, h2, h3, [role="heading"]');
       if (heading) { heading.setAttribute('tabindex', '-1'); heading.focus({ preventScroll: true }); }
       else { app.setAttribute('tabindex', '-1'); app.focus({ preventScroll: true }); }
+      // iOS Safari: force fixed elements to reposition after content renders
+      window.scrollTo(0, window.scrollY + 1);
+      window.scrollTo(0, window.scrollY - 1);
     });
   } else {
     app.innerHTML = `<div style="padding:40px;text-align:center;color:#6b7280"><h2>${route}</h2><p>Page not yet implemented.</p></div>`;
@@ -553,6 +633,13 @@ window.addEventListener('timestamp-mode-changed', () => {
   window.dispatchEvent(new CustomEvent('theme-refresh'));
 });
 window.addEventListener('DOMContentLoaded', () => {
+  // Reposition trace nodes for mobile: dot 1 at start, dot 2 at midpoint
+  if (window.matchMedia('(max-width: 767px)').matches) {
+    const nodes = document.querySelectorAll('#brandTraceNodes circle');
+    if (nodes[0]) nodes[0].setAttribute('cx', '4');
+    if (nodes[1]) nodes[1].setAttribute('cx', '115');
+  }
+  fireBrandPulse();
   connectWS();
 
   // --- Dark Mode ---
@@ -613,15 +700,29 @@ window.addEventListener('DOMContentLoaded', () => {
     applyTheme(isDark ? 'light' : 'dark');
   });
 
-  // --- Hamburger Menu ---
-  const hamburger = document.getElementById('hamburger');
+  // --- Navigation Menu ---
+  const bottomHamburger = document.getElementById('bottomHamburger');
   const navLinks = document.querySelector('.nav-links');
-  hamburger.addEventListener('click', () => {
-    const opening = !navLinks.classList.contains('open');
-    navLinks.classList.toggle('open');
-    document.body.classList.toggle('nav-open');
-    hamburger.setAttribute('aria-expanded', String(opening));
-  });
+  const navSheet = document.getElementById('navSheet');
+  const navSheetBackdrop = document.getElementById('navSheetBackdrop');
+  function isBottomNavActive() { return window.innerWidth <= 1023; }
+  function toggleNav() {
+    if (isBottomNavActive() && navSheet) {
+      const opening = !navSheet.classList.contains('open');
+      navSheet.classList.toggle('open');
+      if (navSheetBackdrop) navSheetBackdrop.classList.toggle('open');
+      document.body.classList.toggle('nav-open', opening);
+      if (bottomHamburger) bottomHamburger.setAttribute('aria-expanded', String(opening));
+    } else {
+      const opening = !navLinks.classList.contains('open');
+      navLinks.classList.toggle('open');
+      document.body.classList.toggle('nav-open');
+    }
+  }
+  if (bottomHamburger) bottomHamburger.addEventListener('click', toggleNav);
+  if (navSheetBackdrop) navSheetBackdrop.addEventListener('click', closeNav);
+  // Close sheet on nav link click
+  if (navSheet) navSheet.querySelectorAll('.nav-link').forEach(link => link.addEventListener('click', closeNav));
   navLinks.querySelectorAll('.nav-link').forEach(link => {
     link.addEventListener('click', closeNav);
   });
@@ -659,7 +760,7 @@ window.addEventListener('DOMContentLoaded', () => {
   document.addEventListener('click', (e) => {
     if (navLinks.classList.contains('open') &&
         !navLinks.contains(e.target) &&
-        !hamburger.contains(e.target)) {
+        !(bottomHamburger && bottomHamburger.contains(e.target))) {
       closeNav();
     }
     if (navMoreMenu && navMoreMenu.classList.contains('open') &&

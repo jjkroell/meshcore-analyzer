@@ -142,8 +142,7 @@
       overlay.style.display = 'none';
     }
     selectedId = null;
-    history.replaceState(null, '', '#/packets');
-    renderTableRows();
+    location.hash = '/packets';
   }
 
   function initPanelResize() {
@@ -307,13 +306,16 @@
 
   function renderTimestampCell(isoString) {
     if (typeof formatTimestampWithTooltip !== 'function' || typeof getTimestampMode !== 'function') {
-      return escapeHtml(typeof timeAgo === 'function' ? timeAgo(isoString) : '—');
+      const full = typeof timeAgo === 'function' ? timeAgo(isoString) : '—';
+      const short = full.replace(/ ago$/, '');
+      return `<span class="ts-full">${escapeHtml(full)}</span><span class="ts-short">${escapeHtml(short)}</span>`;
     }
     const f = formatTimestampWithTooltip(isoString, getTimestampMode());
+    const short = f.text.replace(/ ago$/, '');
     const warn = f.isFuture
       ? ' <span class="timestamp-future-icon" title="Timestamp is in the future — node clock may be skewed">⚠️</span>'
       : '';
-    return `<span class="timestamp-text" title="${escapeHtml(f.tooltip)}">${escapeHtml(f.text)}</span>${warn}`;
+    return `<span class="timestamp-text" title="${escapeHtml(f.tooltip)}"><span class="ts-full">${escapeHtml(f.text)}</span><span class="ts-short">${escapeHtml(short)}</span></span>${warn}`;
   }
 
   async function init(app, routeParam) {
@@ -368,6 +370,42 @@
       if (e.key === 'Escape' && document.getElementById('pktDetailOverlay').style.display !== 'none') closeDetailPanel();
     });
 
+    // Horizontal swipe (left or right) to close on touch devices
+    (function() {
+      const modal = document.querySelector('.pkt-detail-modal');
+      if (!modal) return;
+      let startX = 0, startY = 0, dragging = false, pending = false;
+      modal.addEventListener('touchstart', function(e) {
+        startX = e.touches[0].clientX;
+        startY = e.touches[0].clientY;
+        pending = true;
+        dragging = false;
+        modal.style.transition = 'none';
+      }, { passive: true });
+      modal.addEventListener('touchmove', function(e) {
+        if (!pending) return;
+        const dx = e.touches[0].clientX - startX;
+        const dy = e.touches[0].clientY - startY;
+        if (!dragging) {
+          if (Math.abs(dy) > Math.abs(dx)) { pending = false; return; } // vertical — let scroll happen
+          if (Math.abs(dx) < 5) return; // wait for clear direction
+          dragging = true;
+        }
+        e.preventDefault();
+        modal.style.transform = `translateX(${dx}px)`;
+      }, { passive: false });
+      modal.addEventListener('touchend', function(e) {
+        modal.style.transition = '';
+        modal.style.transform = '';
+        const wasDragging = dragging;
+        pending = false;
+        dragging = false;
+        if (!wasDragging) return;
+        const dx = e.changedTouches[0].clientX - startX;
+        if (Math.abs(dx) > 80) closeDetailPanel();
+      }, { passive: true });
+    })();
+
     await loadObservers();
     loadPackets();
 
@@ -408,9 +446,12 @@
         packetsPaused = !packetsPaused;
         const pauseBtn = document.getElementById('pktPauseBtn');
         if (pauseBtn) {
-          pauseBtn.textContent = packetsPaused ? '▶' : '⏸';
+          pauseBtn.setAttribute('aria-pressed', packetsPaused);
           pauseBtn.title = packetsPaused ? 'Resume live updates' : 'Pause live updates';
-          pauseBtn.classList.toggle('active', packetsPaused);
+          pauseBtn.classList.toggle('paused', packetsPaused);
+          pauseBtn.innerHTML = packetsPaused
+            ? `<span class="pkt-pause-play">▶</span><span class="pkt-pill-text"> Resume</span>`
+            : `⏸<span class="pkt-pill-text"> Pause</span>`;
         }
         if (!packetsPaused && pauseBuffer.length) {
           const handler = wsHandler;
@@ -442,7 +483,7 @@
         pauseBuffer.push(...msgs);
         if (pauseBuffer.length > 2000) pauseBuffer = pauseBuffer.slice(-2000);
         const btn = document.getElementById('pktPauseBtn');
-        if (btn) btn.textContent = '▶ ' + pauseBuffer.length;
+        if (btn) btn.innerHTML = `<span class="pkt-pause-play">▶</span><span class="pkt-pill-text"> +${pauseBuffer.length}</span>`;
         return;
       }
       const newPkts = msgs
@@ -707,19 +748,21 @@
       <div class="pkt-sticky-top" id="pktStickyTop">
         <div class="page-header pkt-page-header">
           <h2>Latest Packets <span class="count">(${totalCount})</span></h2>
-          <button class="pkt-byop-pill" data-action="pkt-byop" title="Paste raw packet hex for analysis" aria-label="Bring Your Own Packet - paste raw packet hex for analysis" aria-haspopup="dialog">📦 Decode Packet</button>
         </div>
         <div class="pkt-search-bar">
-          <div style="flex:1;min-width:0">
-            <input type="text" id="packetFilterInput" class="packet-filter-input"
-              placeholder='Filter: type == Advert && snr > 5 · payload.name contains "Gilroy"'
-              aria-label="Packet filter expression"
-              style="width:100%;padding:6px 10px;border:1px solid var(--border);border-radius:6px;font-family:var(--mono);font-size:13px;background:var(--input-bg);color:var(--text)">
-            <div id="packetFilterError" style="color:var(--status-red);font-size:11px;margin-top:2px;display:none"></div>
-            <div id="packetFilterCount" style="color:var(--text-muted);font-size:11px;margin-top:2px;display:none"></div>
-          </div>
-          <button class="pkt-byop-pill pkt-filters-btn" id="pktFiltersBtn" aria-haspopup="dialog">
-            ⚙ Filters<span class="pkt-filter-badge" id="pktFilterBadge" style="display:none">0</span>
+          <button class="pkt-search-trigger" id="pktSearchTrigger" aria-label="Search packets" aria-haspopup="dialog">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+            <span class="pkt-trigger-text">Search packets…</span>
+            <kbd class="pkt-search-trigger-kbd">/</kbd>
+          </button>
+          <button class="pkt-byop-pill pkt-filters-btn" id="pktFiltersBtn" aria-haspopup="dialog" title="Filters">
+            ⚙<span class="pkt-pill-text"> Filters</span><span class="pkt-filter-badge" id="pktFilterBadge" style="display:none">0</span>
+          </button>
+          <button class="pkt-byop-pill pkt-decode-btn" data-action="pkt-byop" title="Paste raw packet hex for analysis" aria-label="Bring Your Own Packet - paste raw packet hex for analysis" aria-haspopup="dialog">
+            📦<span class="pkt-pill-text"> Decode Packet</span>
+          </button>
+          <button class="pkt-byop-pill pkt-pause-btn" id="pktPauseBtn" data-action="pkt-pause" title="Pause live updates" aria-pressed="false">
+            ⏸<span class="pkt-pill-text"> Pause</span>
           </button>
         </div>
       </div>
@@ -804,6 +847,24 @@
           </div>
         </div>
       </div>
+      <div class="modal-overlay pkt-search-overlay" id="pktSearchOverlay" style="display:none" aria-hidden="true">
+        <div class="pkt-search-modal" role="dialog" aria-label="Search Packets" aria-modal="true">
+          <div class="pkt-search-input-row">
+            <svg class="pkt-search-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+            <input type="text" id="pktSearchInput" class="pkt-search-input" placeholder="Search by hash, type, node or observer…" autocomplete="off" spellcheck="false" aria-label="Search packets">
+            <button class="pkt-search-clear" id="pktSearchClear" style="display:none" aria-label="Clear search">✕</button>
+          </div>
+          <div class="pkt-search-meta" id="pktSearchMeta"></div>
+          <div class="pkt-search-results" id="pktSearchResults">
+            <div class="pkt-sr-empty">Type to search across loaded packets</div>
+          </div>
+          <div class="pkt-search-footer">
+            <span><kbd>↑</kbd><kbd>↓</kbd> navigate</span>
+            <span><kbd>↵</kbd> open</span>
+            <span><kbd>Esc</kbd> close</span>
+          </div>
+        </div>
+      </div>
       <table class="data-table" id="pktTable">
         <colgroup>
           <col style="width:24px">
@@ -842,42 +903,218 @@
     }
     RegionFilter.onChange(function() { updatePacketsUrl(); updateFilterBadge(); loadPackets(); });
 
-    // --- Packet Filter Language ---
+    // --- Packet Search Modal ---
     (function() {
-      var pfInput = document.getElementById('packetFilterInput');
-      var pfError = document.getElementById('packetFilterError');
-      var pfCount = document.getElementById('packetFilterCount');
-      if (!pfInput || !window.PacketFilter) return;
-      var pfTimer = null;
-      pfInput.addEventListener('input', function() {
-        clearTimeout(pfTimer);
-        pfTimer = setTimeout(function() {
-          var expr = pfInput.value.trim();
-          if (!expr) {
-            pfInput.classList.remove('filter-error', 'filter-active');
-            pfError.style.display = 'none';
-            pfCount.style.display = 'none';
-            filters._packetFilter = null;
-            renderTableRows();
-            return;
-          }
-          var compiled = PacketFilter.compile(expr);
-          if (compiled.error) {
-            pfInput.classList.add('filter-error');
-            pfInput.classList.remove('filter-active');
-            pfError.textContent = compiled.error;
-            pfError.style.display = 'block';
-            pfCount.style.display = 'none';
-            filters._packetFilter = null;
-            renderTableRows();
-          } else {
-            pfInput.classList.remove('filter-error');
-            pfInput.classList.add('filter-active');
-            pfError.style.display = 'none';
-            filters._packetFilter = compiled.filter;
-            renderTableRows();
-          }
-        }, 300);
+      var trigger = document.getElementById('pktSearchTrigger');
+      var overlay = document.getElementById('pktSearchOverlay');
+      var input = document.getElementById('pktSearchInput');
+      var clearBtn = document.getElementById('pktSearchClear');
+      var meta = document.getElementById('pktSearchMeta');
+      var results = document.getElementById('pktSearchResults');
+      if (!trigger || !overlay || !input) return;
+
+      // Type-name → payload_type_number lookup
+      var typeMap = {};
+      Object.entries(PAYLOAD_TYPES).forEach(function([num, name]) {
+        typeMap[name.toLowerCase()] = Number(num);
+      });
+
+      var activeIdx = -1;
+      var currentMatches = [];
+
+      function openSearch() {
+        // Position modal just below the sticky header (accounts for nav + sticky bar at any screen size)
+        var stickyTop = document.getElementById('pktStickyTop');
+        if (stickyTop) {
+          var bottom = stickyTop.getBoundingClientRect().bottom;
+          overlay.style.paddingTop = Math.max(bottom + 8, 12) + 'px';
+        }
+        overlay.style.display = 'flex';
+        overlay.removeAttribute('aria-hidden');
+        input.value = '';
+        clearBtn.style.display = 'none';
+        meta.textContent = '';
+        results.innerHTML = '<div class="pkt-sr-empty">Type to search across loaded packets</div>';
+        currentMatches = [];
+        activeIdx = -1;
+        requestAnimationFrame(function() { input.focus(); });
+      }
+
+      function closeSearch() {
+        overlay.style.display = 'none';
+        overlay.setAttribute('aria-hidden', 'true');
+        trigger.focus();
+      }
+
+      function matchPackets(raw) {
+        if (!raw) return [];
+        var q = raw.toLowerCase().replace(/\s/g, '');
+        var lq = raw.toLowerCase();
+        var src = packets; // in-memory packet array (all loaded)
+        // 1. Hex prefix → hash match
+        if (q.length >= 4 && /^[0-9a-f]+$/.test(q)) {
+          return src.filter(function(p) { return p.hash && p.hash.toLowerCase().includes(q); });
+        }
+        // 2. Type keyword
+        var matchedTypes = [];
+        Object.entries(typeMap).forEach(function([name, num]) {
+          if (name.includes(lq)) matchedTypes.push(num);
+        });
+        if (matchedTypes.length) {
+          return src.filter(function(p) { return matchedTypes.includes(p.payload_type); });
+        }
+        // 3. Observer name or decoded payload (node name / message text)
+        return src.filter(function(p) {
+          if (obsNameOnly(p.observer_id).toLowerCase().includes(lq)) return true;
+          if ((p.decoded_json || '').toLowerCase().includes(lq)) return true;
+          return false;
+        });
+      }
+
+      function renderResults(raw) {
+        activeIdx = -1;
+        if (!raw) {
+          currentMatches = [];
+          results.innerHTML = '<div class="pkt-sr-empty">Type to search across loaded packets</div>';
+          meta.textContent = '';
+          return;
+        }
+        currentMatches = matchPackets(raw);
+        var shown = currentMatches.slice(0, 100);
+        meta.textContent = currentMatches.length === 0
+          ? 'No results'
+          : currentMatches.length > 100
+            ? 'Showing 100 of ' + currentMatches.length.toLocaleString() + ' matches'
+            : currentMatches.length.toLocaleString() + ' match' + (currentMatches.length === 1 ? '' : 'es');
+        if (!shown.length) {
+          results.innerHTML = '<div class="pkt-sr-empty">No packets found</div>';
+          return;
+        }
+        results.innerHTML = shown.map(function(p, i) {
+          var typeName = payloadTypeName(p.payload_type);
+          var typeClass = payloadTypeColor(p.payload_type);
+          var hash = p.hash ? midTruncate(p.hash, 4) : '—';
+          var obs = obsNameOnly(p.observer_id);
+          var region = p.observer_id ? (observerMap.get(p.observer_id)?.iata || '') : '';
+          var time = timeAgo(p.latest || p.timestamp || p.first_seen) || '';
+          var decoded = getParsedDecoded(p) || {};
+          var detail = getDetailPreviewPlain(decoded);
+          return '<div class="pkt-sr-item" data-idx="' + i + '" tabindex="-1" role="option">' +
+            '<div class="pkt-sr-top">' +
+              '<span class="badge badge-' + typeClass + '">' + escapeHtml(typeName) + '</span>' +
+              '<span class="pkt-sr-hash mono">' + escapeHtml(hash) + '</span>' +
+              (region ? '<span class="pkt-sr-region">' + escapeHtml(region) + '</span>' : '') +
+              '<span class="pkt-sr-time">' + escapeHtml(time) + '</span>' +
+            '</div>' +
+            (detail ? '<div class="pkt-sr-detail">' + escapeHtml(detail) + '</div>' : '') +
+            '<div class="pkt-sr-obs">' + escapeHtml(obs) + '</div>' +
+          '</div>';
+        }).join('');
+      }
+
+      // Plain-text version of detail preview (no HTML tags) for result rows
+      function getDetailPreviewPlain(decoded) {
+        if (!decoded) return '';
+        if (decoded.type === 'CHAN' && decoded.text) {
+          return (decoded.channel ? decoded.channel + ' ' : '') + decoded.text.slice(0, 80);
+        }
+        if (decoded.type === 'ADVERT' && decoded.name) return decoded.name;
+        if (decoded.type === 'GRP_TXT' && decoded.channelHash != null) {
+          var h = decoded.channelHashHex || decoded.channelHash.toString(16).padStart(2, '0').toUpperCase();
+          return 'Ch 0x' + h + ' (encrypted)';
+        }
+        if (decoded.type === 'TXT_MSG') return (decoded.srcHash || '?').slice(0, 8) + ' → ' + (decoded.destHash || '?').slice(0, 8);
+        if (decoded.type === 'PATH') return (decoded.srcHash || '?').slice(0, 8) + ' → ' + (decoded.destHash || '?').slice(0, 8);
+        if (decoded.type === 'REQ' || decoded.type === 'RESPONSE') return (decoded.srcHash || '?').slice(0, 8) + ' → ' + (decoded.destHash || '?').slice(0, 8);
+        if (decoded.text) return decoded.text.slice(0, 80);
+        return '';
+      }
+
+      function setActive(idx) {
+        var items = results.querySelectorAll('.pkt-sr-item');
+        items.forEach(function(el) { el.classList.remove('active'); });
+        if (idx >= 0 && idx < items.length) {
+          activeIdx = idx;
+          items[idx].classList.add('active');
+          items[idx].scrollIntoView({ block: 'nearest' });
+        } else {
+          activeIdx = -1;
+        }
+      }
+
+      function openResult(idx) {
+        var p = currentMatches[idx];
+        if (!p) return;
+        closeSearch();
+        selectPacket(p.id, p.hash, null, null);
+      }
+
+      // Event: open via trigger button
+      trigger.addEventListener('click', openSearch);
+
+      // Event: close via overlay backdrop click
+      overlay.addEventListener('click', function(e) {
+        if (e.target === overlay) closeSearch();
+      });
+
+      // Event: keyboard on input
+      input.addEventListener('keydown', function(e) {
+        var items = results.querySelectorAll('.pkt-sr-item');
+        if (e.key === 'Escape') { closeSearch(); return; }
+        if (e.key === 'ArrowDown') {
+          e.preventDefault();
+          setActive(Math.min(activeIdx + 1, items.length - 1));
+          return;
+        }
+        if (e.key === 'ArrowUp') {
+          e.preventDefault();
+          setActive(Math.max(activeIdx - 1, 0));
+          return;
+        }
+        if (e.key === 'Enter') {
+          if (activeIdx >= 0) openResult(activeIdx);
+          else if (currentMatches.length === 1) openResult(0);
+          return;
+        }
+      });
+
+      var srTimer = null;
+      input.addEventListener('input', function() {
+        var raw = input.value.trim();
+        clearBtn.style.display = raw ? 'flex' : 'none';
+        clearTimeout(srTimer);
+        srTimer = setTimeout(function() { renderResults(raw); }, 150);
+      });
+
+      clearBtn.addEventListener('click', function() {
+        input.value = '';
+        clearBtn.style.display = 'none';
+        renderResults('');
+        input.focus();
+      });
+
+      // Event: click on result item
+      results.addEventListener('click', function(e) {
+        var item = e.target.closest('.pkt-sr-item');
+        if (!item) return;
+        openResult(Number(item.dataset.idx));
+      });
+
+      // Event: hover activates item
+      results.addEventListener('mousemove', function(e) {
+        var item = e.target.closest('.pkt-sr-item');
+        if (!item) return;
+        setActive(Number(item.dataset.idx));
+      });
+
+      // Global keyboard shortcut: '/' opens search when not in an input
+      document.addEventListener('keydown', function(e) {
+        if (overlay.style.display !== 'none') return;
+        if (e.key !== '/') return;
+        var tag = (document.activeElement || {}).tagName;
+        if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+        e.preventDefault();
+        openSearch();
       });
     })();
 
@@ -1146,8 +1383,8 @@
       { key: 'details', label: 'Details' },
     ];
     const isNarrow = window.innerWidth <= 640;
-    const defaultHidden = isNarrow ? ['time', 'hash', 'size', 'observer', 'rpt', 'path'] : [];
-    const COLS_VERSION = isNarrow ? 'mob2' : 'desk1';
+    const defaultHidden = isNarrow ? ['region', 'hash', 'size', 'observer', 'rpt', 'path'] : [];
+    const COLS_VERSION = isNarrow ? 'mob4' : 'desk1';
     let visibleCols;
     try {
       if (localStorage.getItem('packets-cols-version') === COLS_VERSION) {
@@ -1705,19 +1942,6 @@
       });
     }
 
-    // Packet Filter Language
-    const pfCount = document.getElementById('packetFilterCount');
-    if (filters._packetFilter) {
-      const beforeCount = displayPackets.length;
-      displayPackets = displayPackets.filter(filters._packetFilter);
-      if (pfCount) {
-        pfCount.textContent = 'Showing ' + displayPackets.length.toLocaleString() + ' of ' + beforeCount.toLocaleString() + ' packets';
-        pfCount.style.display = 'block';
-      }
-    } else if (pfCount) {
-      pfCount.style.display = 'none';
-    }
-
     if (countEl) countEl.textContent = `(${displayPackets.length})`;
 
     if (!displayPackets.length) {
@@ -1818,6 +2042,7 @@
       body.innerHTML = '';
       const detailTitle = await renderDetail(body, data);
       if (title) title.textContent = detailTitle;
+      body.scrollTop = 0;
     } catch (e) {
       body.innerHTML = `<div class="text-muted" style="padding:24px">Error: ${e.message}</div>`;
     }

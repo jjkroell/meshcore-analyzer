@@ -4,6 +4,26 @@
 'use strict';
 
 (function () {
+  // ── Helpers ──
+
+  // Update brand text preserving the two-tone span structure (e.g. "SWBC/Salish Mesh")
+  function applyBrandName(name) {
+    var brandEl = document.querySelector('.brand-text');
+    if (!brandEl) return;
+    var parts = name.split('/');
+    if (parts.length === 2) {
+      var coreEl = brandEl.querySelector('.brand-core');
+      var sepEl  = brandEl.querySelector('.brand-sep');
+      var scopeEl = brandEl.querySelector('.brand-scope');
+      if (coreEl && sepEl && scopeEl) {
+        coreEl.textContent  = parts[0];
+        scopeEl.textContent = parts[1];
+        return;
+      }
+    }
+    brandEl.textContent = name;
+  }
+
   // ── Constants ──
 
   var DEFAULT_HOME = {
@@ -522,8 +542,7 @@
     if (br) {
       if (br.siteName) {
         document.title = br.siteName;
-        var brandEl = document.querySelector('.brand-text');
-        if (brandEl) brandEl.textContent = br.siteName;
+        applyBrandName(br.siteName);
       }
       if (br.logoUrl) {
         var iconEl = document.querySelector('.brand-icon');
@@ -1319,8 +1338,7 @@
           setOverride(section, key, inp.value);
           // Live branding updates
           if (section === 'branding' && key === 'siteName') {
-            var el = document.querySelector('.brand-text');
-            if (el) el.textContent = inp.value;
+            applyBrandName(inp.value);
             document.title = inp.value;
           }
           if (section === 'branding' && key === 'logoUrl') {
@@ -1591,8 +1609,7 @@
     var overrides = readOverrides();
     if (overrides.branding) {
       if (overrides.branding.siteName) {
-        var brandEl = document.querySelector('.brand-text');
-        if (brandEl) brandEl.textContent = overrides.branding.siteName;
+        applyBrandName(overrides.branding.siteName);
         document.title = overrides.branding.siteName;
       }
       if (overrides.branding.logoUrl) {

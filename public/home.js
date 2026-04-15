@@ -30,6 +30,12 @@
 
   function init(container) {
     renderHome(container);
+    // iOS Safari: position:fixed elements mis-position after large content renders.
+    // Micro-scroll forces the browser to reposition fixed elements correctly.
+    setTimeout(function() {
+      window.scrollTo(0, window.scrollY + 1);
+      window.scrollTo(0, window.scrollY - 1);
+    }, 300);
   }
 
   function showChooser(container) {
@@ -65,6 +71,7 @@
       <section class="home-hero">
         <h1>${hasNodes ? 'My Mesh' : escapeHtml(homeCfg?.heroTitle || siteName)}</h1>
         <p>${hasNodes ? 'Your nodes at a glance. Add more by searching below.' : escapeHtml(homeCfg?.heroSubtitle || 'Find your nodes to start monitoring them.')}</p>
+        ${hasNodes ? '<p class="home-hero-sub">Favorited nodes appear below your claimed nodes.</p>' : ''}
         <div class="home-search-wrap">
           <input type="text" id="homeSearch" placeholder="Search by node name or public key…" autocomplete="off" aria-label="Search nodes" role="combobox" aria-expanded="false" aria-owns="homeSuggest" aria-autocomplete="list" aria-activedescendant="">
           <div class="home-suggest" id="homeSuggest" role="listbox"></div>

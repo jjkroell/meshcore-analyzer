@@ -34,9 +34,16 @@
     gap: 8px;
   }
   /* Always show brand text on mobile */
-  .brand-text {
-    display: inline !important;
-    font-size: 16px;
+  .brand-text { display: flex !important; align-items: center; }
+  .brand-core, .brand-sep, .brand-scope { font-size: 17px !important; }
+  .brand-stack { gap: 4px; display: flex; flex-direction: column; }
+  /* Mobile trace: 165px wide, 3 nodes, circles compensated for horizontal compression */
+  #brandTraceSvg { width: 165px !important; }
+  #brandTraceNodes circle:nth-child(3) { display: none; }
+  #brandTraceNodes circle {
+    transform: scaleX(1.40);
+    transform-box: fill-box;
+    transform-origin: center;
   }
   /* Hamburger: big enough to tap */
   .hamburger {
@@ -69,9 +76,11 @@
   /* ── App shell ────────────────────────────────────────────── */
   #app {
     min-height: calc(100dvh - 56px);
+    padding-bottom: calc(56px + env(safe-area-inset-bottom, 0px));
   }
   #app.app-fixed {
     height: calc(100dvh - 56px);
+    padding-bottom: calc(56px + env(safe-area-inset-bottom, 0px));
   }
 
   /* ── Page layout & content ────────────────────────────────── */
@@ -806,55 +815,98 @@
     display: flex !important;
   }
 
-  /* Mobile hamburger options button */
+  /* Options icon button — small, top-right corner of the stats panel */
   .live-toggles-mobile {
     display: flex;
-    position: relative;
-    width: 100%;
-    justify-content: center;
+    position: absolute;
+    top: 6px;
+    right: 6px;
+    width: auto;
   }
   .live-options-btn {
     display: flex;
     align-items: center;
-    gap: 6px;
-    padding: 8px 20px;
-    background: color-mix(in srgb, var(--accent) 15%, transparent);
-    border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent);
-    border-radius: 8px;
-    color: var(--text-primary);
+    justify-content: center;
+    padding: 0;
+    width: 28px;
+    height: 28px;
+    min-height: unset;
+    background: color-mix(in srgb, var(--text) 8%, transparent);
+    border: 1px solid color-mix(in srgb, var(--text) 18%, transparent);
+    border-radius: 6px;
+    color: var(--nav-text);
     font-size: 14px;
     font-family: inherit;
     cursor: pointer;
-    min-height: 40px;
-    width: auto;
-    text-align: center;
-    justify-content: center;
+    opacity: 0.7;
   }
   .live-options-btn:active {
-    background: color-mix(in srgb, var(--accent) 25%, transparent);
+    opacity: 1;
+    background: color-mix(in srgb, var(--accent) 20%, transparent);
+    border-color: color-mix(in srgb, var(--accent) 50%, transparent);
   }
 
-  /* Dropdown menu */
-  .live-options-menu {
+  /* Backdrop */
+  .live-options-backdrop {
     display: none;
-    position: absolute;
-    top: calc(100% + 6px);
-    left: 50%;
-    transform: translateX(-50%);
-    min-width: 160px;
-    background: color-mix(in srgb, var(--bg-secondary, #111) 92%, transparent);
-    backdrop-filter: blur(12px);
-    -webkit-backdrop-filter: blur(12px);
-    border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
-    border-radius: 10px;
-    padding: 8px 4px;
-    z-index: 9999;
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,0.5);
+    backdrop-filter: blur(2px);
+    -webkit-backdrop-filter: blur(2px);
+    z-index: 2000;
+  }
+  .live-options-backdrop.open { display: block; }
+
+  /* Centered popup modal */
+  .live-options-modal {
+    display: none;
+    position: fixed;
+    top: 50%; left: 50%;
+    transform: translate(-50%, -50%);
+    z-index: 2001;
+    background: var(--surface-1);
+    border-radius: 12px;
+    border: 1px solid var(--border);
+    box-shadow: 0 8px 32px rgba(0,0,0,0.5);
     flex-direction: column;
-    gap: 0;
+    width: 220px;
   }
-  .live-options-menu.open {
+  .live-options-modal.open { display: flex; }
+
+  .live-options-modal-handle { display: none; }
+
+  .live-options-modal-title {
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    padding: 10px 14px 6px;
+    flex-shrink: 0;
+  }
+  .live-options-modal-body {
     display: flex;
+    flex-direction: column;
+    padding: 2px 0 6px;
   }
+  .live-options-modal-body label {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 14px;
+    font-size: 13px;
+    color: var(--text);
+    cursor: pointer;
+    min-height: unset;
+  }
+  .live-options-modal-body label:active { background: var(--hover-bg); }
+  .live-options-modal-body input[type="checkbox"] {
+    width: 16px; height: 16px; min-height: unset;
+    padding: 0; margin: 0; flex-shrink: 0;
+    accent-color: var(--accent);
+  }
+  .live-options-modal-body span { flex: 1; }
   .live-options-menu label {
     display: flex;
     align-items: center;
@@ -1187,13 +1239,12 @@
    Row 2: timeline scrubber (full width)
    ---------------------------------------------------------------- */
 @media screen and (max-width: 1023px) {
-  .vcr-bar {
-    flex-wrap: wrap;
-    align-items: center;
-    gap: 4px 6px;
-    padding: 5px 10px;
-    padding-bottom: calc(5px + env(safe-area-inset-bottom, 0px));
-  }
+  .vcr-bar { display: none !important; }
+
+  /* VCR bar gone — reset feed/legend bottom offsets */
+  .live-feed { bottom: 8px !important; }
+  .feed-show-btn { bottom: 8px !important; }
+  .live-legend { bottom: 8px !important; }
 
   /* ── Row 1 items ── */
   .vcr-controls    { order: 1; flex-shrink: 0; gap: 3px; }
