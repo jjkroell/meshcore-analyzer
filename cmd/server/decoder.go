@@ -60,9 +60,10 @@ type TransportCodes struct {
 
 // Path holds decoded path/hop information.
 type Path struct {
-	HashSize  int      `json:"hashSize"`
-	HashCount int      `json:"hashCount"`
-	Hops      []string `json:"hops"`
+	HashSize      int      `json:"hashSize"`
+	HashCount     int      `json:"hashCount"`
+	Hops          []string `json:"hops"`
+	HopsCompleted *int     `json:"hopsCompleted,omitempty"`
 }
 
 // AdvertFlags holds decoded advert flag bits.
@@ -95,7 +96,7 @@ type Payload struct {
 	Lat             *float64     `json:"lat,omitempty"`
 	Lon             *float64     `json:"lon,omitempty"`
 	Name            string       `json:"name,omitempty"`
-	ChannelHash     int          `json:"channelHash,omitempty"`
+	ChannelHash     *int         `json:"channelHash"`
 	EphemeralPubKey string       `json:"ephemeralPubKey,omitempty"`
 	PathData        string       `json:"pathData,omitempty"`
 	Tag             uint32       `json:"tag,omitempty"`
@@ -254,9 +255,10 @@ func decodeGrpTxt(buf []byte) Payload {
 	if len(buf) < 3 {
 		return Payload{Type: "GRP_TXT", Error: "too short", RawHex: hex.EncodeToString(buf)}
 	}
+	ch := int(buf[0])
 	return Payload{
 		Type:          "GRP_TXT",
-		ChannelHash:   int(buf[0]),
+		ChannelHash:   &ch,
 		MAC:           hex.EncodeToString(buf[1:3]),
 		EncryptedData: hex.EncodeToString(buf[3:]),
 	}
@@ -376,7 +378,12 @@ func DecodePacket(hexString string) (*DecodedPacket, error) {
 	// TRACE packets store hop IDs in the payload (buf[9:]) rather than the header
 	// path field. The header path byte still encodes hashSize in bits 6-7, which
 	// we use to split the payload path data into individual hop prefixes.
+	// The header path contains SNR bytes — one per hop that actually forwarded.
+	// We expose hopsCompleted (count of SNR bytes) so consumers can distinguish
+	// how far the trace got vs the full intended route.
 	if header.PayloadType == PayloadTRACE && payload.PathData != "" {
+		// The header path hops count represents SNR entries = completed hops
+		hopsCompleted := path.HashCount
 		pathBytes, err := hex.DecodeString(payload.PathData)
 		if err == nil && path.HashSize > 0 {
 			hops := make([]string, 0, len(pathBytes)/path.HashSize)
@@ -385,7 +392,18 @@ func DecodePacket(hexString string) (*DecodedPacket, error) {
 			}
 			path.Hops = hops
 			path.HashCount = len(hops)
+			path.HopsCompleted = &hopsCompleted
 		}
+	}
+
+	// Zero-hop direct packets have hash_count=0 (lower 6 bits of pathByte),
+	// which makes the generic formula yield a bogus hashSize. Reset to 0
+	// (unknown) so API consumers get correct data. We mask with 0x3F to check
+	// only hash_count, matching the JS frontend approach — the upper hash_size
+	// bits are meaningless when there are no hops. Skip TRACE packets — they
+	// use hashSize to parse hops from the payload above.
+	if (header.RouteType == RouteDirect || header.RouteType == RouteTransportDirect) && pathByte&0x3F == 0 && header.PayloadType != PayloadTRACE {
+		path.HashSize = 0
 	}
 
 	return &DecodedPacket{
@@ -395,6 +413,106 @@ func DecodePacket(hexString string) (*DecodedPacket, error) {
 		Payload:        payload,
 		Raw:            strings.ToUpper(hexString),
 	}, nil
+}
+
+// HexRange represents a labeled byte range for the hex breakdown visualization.
+type HexRange struct {
+	Start int    `json:"start"`
+	End   int    `json:"end"`
+	Label string `json:"label"`
+}
+
+// Breakdown holds colored byte ranges returned by the packet detail endpoint.
+type Breakdown struct {
+	Ranges []HexRange `json:"ranges"`
+}
+
+// BuildBreakdown computes labeled byte ranges for each section of a MeshCore packet.
+// The returned ranges are consumed by createColoredHexDump() and buildHexLegend()
+// in the frontend (public/app.js).
+func BuildBreakdown(hexString string) *Breakdown {
+	hexString = strings.ReplaceAll(hexString, " ", "")
+	hexString = strings.ReplaceAll(hexString, "\n", "")
+	hexString = strings.ReplaceAll(hexString, "\r", "")
+	buf, err := hex.DecodeString(hexString)
+	if err != nil || len(buf) < 2 {
+		return &Breakdown{Ranges: []HexRange{}}
+	}
+
+	var ranges []HexRange
+	offset := 0
+
+	// Byte 0: Header
+	ranges = append(ranges, HexRange{Start: 0, End: 0, Label: "Header"})
+	offset = 1
+
+	header := decodeHeader(buf[0])
+
+	// Bytes 1-4: Transport Codes (TRANSPORT_FLOOD / TRANSPORT_DIRECT only)
+	if isTransportRoute(header.RouteType) {
+		if len(buf) < offset+4 {
+			return &Breakdown{Ranges: ranges}
+		}
+		ranges = append(ranges, HexRange{Start: offset, End: offset + 3, Label: "Transport Codes"})
+		offset += 4
+	}
+
+	if offset >= len(buf) {
+		return &Breakdown{Ranges: ranges}
+	}
+
+	// Next byte: Path Length (bits 7-6 = hashSize-1, bits 5-0 = hashCount)
+	ranges = append(ranges, HexRange{Start: offset, End: offset, Label: "Path Length"})
+	pathByte := buf[offset]
+	offset++
+
+	hashSize := int(pathByte>>6) + 1
+	hashCount := int(pathByte & 0x3F)
+	pathBytes := hashSize * hashCount
+
+	// Path hops
+	if hashCount > 0 && offset+pathBytes <= len(buf) {
+		ranges = append(ranges, HexRange{Start: offset, End: offset + pathBytes - 1, Label: "Path"})
+	}
+	offset += pathBytes
+
+	if offset >= len(buf) {
+		return &Breakdown{Ranges: ranges}
+	}
+
+	payloadStart := offset
+
+	// Payload — break ADVERT into named sub-fields; everything else is one Payload range
+	if header.PayloadType == PayloadADVERT && len(buf)-payloadStart >= 100 {
+		ranges = append(ranges, HexRange{Start: payloadStart, End: payloadStart + 31, Label: "PubKey"})
+		ranges = append(ranges, HexRange{Start: payloadStart + 32, End: payloadStart + 35, Label: "Timestamp"})
+		ranges = append(ranges, HexRange{Start: payloadStart + 36, End: payloadStart + 99, Label: "Signature"})
+
+		appStart := payloadStart + 100
+		if appStart < len(buf) {
+			ranges = append(ranges, HexRange{Start: appStart, End: appStart, Label: "Flags"})
+			appFlags := buf[appStart]
+			fOff := appStart + 1
+			if appFlags&0x10 != 0 && fOff+8 <= len(buf) {
+				ranges = append(ranges, HexRange{Start: fOff, End: fOff + 3, Label: "Latitude"})
+				ranges = append(ranges, HexRange{Start: fOff + 4, End: fOff + 7, Label: "Longitude"})
+				fOff += 8
+			}
+			if appFlags&0x20 != 0 && fOff+2 <= len(buf) {
+				fOff += 2
+			}
+			if appFlags&0x40 != 0 && fOff+2 <= len(buf) {
+				fOff += 2
+			}
+			if appFlags&0x80 != 0 && fOff < len(buf) {
+				ranges = append(ranges, HexRange{Start: fOff, End: len(buf) - 1, Label: "Name"})
+			}
+		}
+	} else {
+		ranges = append(ranges, HexRange{Start: payloadStart, End: len(buf) - 1, Label: "Payload"})
+	}
+
+	return &Breakdown{Ranges: ranges}
 }
 
 // ComputeContentHash computes the SHA-256-based content hash (first 16 hex chars).

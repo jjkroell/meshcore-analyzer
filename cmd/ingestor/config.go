@@ -2,9 +2,13 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"log"
 	"os"
 	"strings"
+
+	"github.com/meshcore-analyzer/geofilter"
 )
 
 // MQTTSource represents a single MQTT broker connection.
@@ -34,11 +38,38 @@ type Config struct {
 	ChannelKeys     map[string]string `json:"channelKeys,omitempty"`
 	HashChannels    []string          `json:"hashChannels,omitempty"`
 	Retention       *RetentionConfig  `json:"retention,omitempty"`
+	Metrics         *MetricsConfig    `json:"metrics,omitempty"`
+	GeoFilter       *GeoFilterConfig  `json:"geo_filter,omitempty"`
 }
+
+// GeoFilterConfig is an alias for the shared geofilter.Config type.
+type GeoFilterConfig = geofilter.Config
 
 // RetentionConfig controls how long stale nodes are kept before being moved to inactive_nodes.
 type RetentionConfig struct {
-	NodeDays int `json:"nodeDays"`
+	NodeDays    int `json:"nodeDays"`
+	MetricsDays int `json:"metricsDays"`
+}
+
+// MetricsConfig controls observer metrics collection.
+type MetricsConfig struct {
+	SampleIntervalSec int `json:"sampleIntervalSec"`
+}
+
+// MetricsSampleInterval returns the configured sample interval or 300s default.
+func (c *Config) MetricsSampleInterval() int {
+	if c.Metrics != nil && c.Metrics.SampleIntervalSec > 0 {
+		return c.Metrics.SampleIntervalSec
+	}
+	return 300
+}
+
+// MetricsRetentionDays returns configured metrics retention or 30 days default.
+func (c *Config) MetricsRetentionDays() int {
+	if c.Retention != nil && c.Retention.MetricsDays > 0 {
+		return c.Retention.MetricsDays
+	}
+	return 30
 }
 
 // NodeDaysOrDefault returns the configured retention.nodeDays or 7 if not set.
@@ -50,15 +81,21 @@ func (c *Config) NodeDaysOrDefault() int {
 }
 
 // LoadConfig reads configuration from a JSON file, with env var overrides.
+// If the config file does not exist, sensible defaults are used (zero-config startup).
 func LoadConfig(path string) (*Config, error) {
+	var cfg Config
+
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil, fmt.Errorf("reading config %s: %w", path, err)
-	}
-
-	var cfg Config
-	if err := json.Unmarshal(data, &cfg); err != nil {
-		return nil, fmt.Errorf("parsing config %s: %w", path, err)
+		if !errors.Is(err, os.ErrNotExist) {
+			return nil, fmt.Errorf("reading config %s: %w", path, err)
+		}
+		// Config file doesn't exist — use defaults (zero-config mode)
+		log.Printf("config file %s not found, using sensible defaults", path)
+	} else {
+		if err := json.Unmarshal(data, &cfg); err != nil {
+			return nil, fmt.Errorf("parsing config %s: %w", path, err)
+		}
 	}
 
 	// Env var overrides
@@ -90,6 +127,16 @@ func LoadConfig(path string) (*Config, error) {
 			Broker: cfg.MQTT.Broker,
 			Topics: []string{cfg.MQTT.Topic, "meshcore/#"},
 		}}
+	}
+
+	// Default MQTT source: connect to localhost broker when no sources configured
+	if len(cfg.MQTTSources) == 0 {
+		cfg.MQTTSources = []MQTTSource{{
+			Name:   "local",
+			Broker: "mqtt://localhost:1883",
+			Topics: []string{"meshcore/#"},
+		}}
+		log.Printf("no MQTT sources configured, defaulting to mqtt://localhost:1883")
 	}
 
 	return &cfg, nil

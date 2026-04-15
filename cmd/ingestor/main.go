@@ -14,7 +14,10 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -37,7 +40,13 @@ func main() {
 	}
 
 	configPath := flag.String("config", "config.json", "path to config file")
+	dataDir := flag.String("data-dir", "", "path to data directory for user-channels.json (defaults to config directory)")
 	flag.Parse()
+
+	resolvedDataDir := *dataDir
+	if resolvedDataDir == "" {
+		resolvedDataDir = filepath.Dir(*configPath)
+	}
 
 	log.SetFlags(log.LstdFlags | log.Lmsgprefix)
 	log.SetPrefix("[ingestor] ")
@@ -48,11 +57,8 @@ func main() {
 	}
 
 	sources := cfg.ResolvedSources()
-	if len(sources) == 0 {
-		log.Fatal("no MQTT sources configured — set mqttSources in config or MQTT_BROKER env var")
-	}
 
-	store, err := OpenStore(cfg.DBPath)
+	store, err := OpenStoreWithInterval(cfg.DBPath, cfg.MetricsSampleInterval())
 	if err != nil {
 		log.Fatalf("db: %v", err)
 	}
@@ -63,6 +69,10 @@ func main() {
 	nodeDays := cfg.NodeDaysOrDefault()
 	store.MoveStaleNodes(nodeDays)
 
+	// Metrics retention: prune old metrics on startup
+	metricsDays := cfg.MetricsRetentionDays()
+	store.PruneOldMetrics(metricsDays)
+
 	// Daily ticker for node retention
 	retentionTicker := time.NewTicker(1 * time.Hour)
 	go func() {
@@ -71,7 +81,15 @@ func main() {
 		}
 	}()
 
-	// Periodic stats logging (every 5 minutes)
+	// Daily ticker for metrics retention (every 24h)
+	metricsRetentionTicker := time.NewTicker(24 * time.Hour)
+	go func() {
+		for range metricsRetentionTicker.C {
+			store.PruneOldMetrics(metricsDays)
+		}
+	}()
+
+// Periodic stats logging (every 5 minutes)
 	statsTicker := time.NewTicker(5 * time.Minute)
 	go func() {
 		for range statsTicker.C {
@@ -79,12 +97,44 @@ func main() {
 		}
 	}()
 
-	channelKeys := loadChannelKeys(cfg, *configPath)
-	if len(channelKeys) > 0 {
-		log.Printf("Loaded %d channel keys for GRP_TXT decryption", len(channelKeys))
+	initialKeys := loadChannelKeys(cfg, *configPath)
+	// Merge user-added channels from the data directory.
+	for k, v := range loadUserChannels(resolvedDataDir) {
+		initialKeys[k] = v
+	}
+	if len(initialKeys) > 0 {
+		log.Printf("Loaded %d channel keys for GRP_TXT decryption", len(initialKeys))
 	} else {
 		log.Printf("No channel keys loaded — GRP_TXT packets will not be decrypted")
 	}
+
+	// Hot-reloadable channel keys — updated atomically on SIGUSR1.
+	var channelKeysAtomic atomic.Value
+	channelKeysAtomic.Store(initialKeys)
+
+	// channelKeysMu guards writes to the atomic value (one writer at a time).
+	var channelKeysMu sync.Mutex
+
+	// SIGUSR1 → reload user-channels.json and merge into live keys.
+	usr1 := make(chan os.Signal, 1)
+	signal.Notify(usr1, syscall.SIGUSR1)
+	go func() {
+		for range usr1 {
+			channelKeysMu.Lock()
+			current := channelKeysAtomic.Load().(map[string]string)
+			newMap := make(map[string]string, len(current))
+			for k, v := range current {
+				newMap[k] = v
+			}
+			added := loadUserChannels(resolvedDataDir)
+			for k, v := range added {
+				newMap[k] = v
+			}
+			channelKeysAtomic.Store(newMap)
+			channelKeysMu.Unlock()
+			log.Printf("[channels] reloaded — now %d keys (%d user-added)", len(newMap), len(added))
+		}
+	}()
 
 	// Connect to each MQTT source
 	var clients []mqtt.Client
@@ -136,7 +186,7 @@ func main() {
 		// Capture source for closure
 		src := source
 		opts.SetDefaultPublishHandler(func(c mqtt.Client, m mqtt.Message) {
-			handleMessage(store, tag, src, m, channelKeys)
+			handleMessage(store, tag, src, m, channelKeysAtomic.Load().(map[string]string), cfg.GeoFilter)
 		})
 
 		client := mqtt.NewClient(opts)
@@ -150,7 +200,7 @@ func main() {
 	}
 
 	if len(clients) == 0 {
-		log.Fatal("no MQTT connections established")
+		log.Fatal("no MQTT connections established — check broker is running (default: mqtt://localhost:1883). Set MQTT_BROKER env var or configure mqttSources in config.json")
 	}
 
 	log.Printf("Running — %d MQTT source(s) connected", len(clients))
@@ -162,15 +212,16 @@ func main() {
 
 	log.Println("Shutting down...")
 	retentionTicker.Stop()
+	metricsRetentionTicker.Stop()
 	statsTicker.Stop()
 	store.LogStats() // final stats on shutdown
 	for _, c := range clients {
-		c.Disconnect(1000)
+		c.Disconnect(5000) // 5s to allow in-flight messages to drain
 	}
 	log.Println("Done.")
 }
 
-func handleMessage(store *Store, tag string, source MQTTSource, m mqtt.Message, channelKeys map[string]string) {
+func handleMessage(store *Store, tag string, source MQTTSource, m mqtt.Message, channelKeys map[string]string, geoFilter *GeoFilterConfig) {
 	defer func() {
 		if r := recover(); r != nil {
 			log.Printf("MQTT [%s] panic in handler: %v", tag, r)
@@ -214,6 +265,22 @@ func handleMessage(store *Store, tag string, source MQTTSource, m mqtt.Message, 
 		if err := store.UpsertObserver(observerID, name, iata, meta); err != nil {
 			log.Printf("MQTT [%s] observer status error: %v", tag, err)
 		}
+		// Insert metrics sample from status message
+		if meta != nil {
+			metricsData := &MetricsData{
+				ObserverID:  observerID,
+				NoiseFloor:  meta.NoiseFloor,
+				TxAirSecs:   meta.TxAirSecs,
+				RxAirSecs:   meta.RxAirSecs,
+				RecvErrors:  meta.RecvErrors,
+				BatteryMv:   meta.BatteryMv,
+				PacketsSent: meta.PacketsSent,
+				PacketsRecv: meta.PacketsRecv,
+			}
+			if err := store.InsertMetrics(metricsData); err != nil {
+				log.Printf("MQTT [%s] metrics insert error: %v", tag, err)
+			}
+		}
 		log.Printf("MQTT [%s] status: %s (%s)", tag, firstNonEmpty(name, observerID), iata)
 		return
 	}
@@ -241,43 +308,75 @@ func handleMessage(store *Store, tag string, source MQTTSource, m mqtt.Message, 
 			if f, ok := toFloat64(v); ok {
 				mqttMsg.SNR = &f
 			}
+		} else if v, ok := msg["snr"]; ok {
+			if f, ok := toFloat64(v); ok {
+				mqttMsg.SNR = &f
+			}
 		}
 		if v, ok := msg["RSSI"]; ok {
 			if f, ok := toFloat64(v); ok {
 				mqttMsg.RSSI = &f
 			}
+		} else if v, ok := msg["rssi"]; ok {
+			if f, ok := toFloat64(v); ok {
+				mqttMsg.RSSI = &f
+			}
+		}
+		if v, ok := msg["score"]; ok {
+			if f, ok := toFloat64(v); ok {
+				mqttMsg.Score = &f
+			}
+		} else if v, ok := msg["Score"]; ok {
+			if f, ok := toFloat64(v); ok {
+				mqttMsg.Score = &f
+			}
+		}
+		if v, ok := msg["direction"].(string); ok {
+			mqttMsg.Direction = &v
+		} else if v, ok := msg["Direction"].(string); ok {
+			mqttMsg.Direction = &v
 		}
 		if v, ok := msg["origin"].(string); ok {
 			mqttMsg.Origin = v
 		}
 
-		pktData := BuildPacketData(mqttMsg, decoded, observerID, region)
-		isNew, err := store.InsertTransmission(pktData)
-		if err != nil {
-			log.Printf("MQTT [%s] db insert error: %v", tag, err)
-		}
-
-		// Process ADVERT → upsert node
+		// For ADVERT packets with known coordinates, enforce geo_filter before
+		// storing anything — drop the entire message if outside the area.
 		if decoded.Header.PayloadTypeName == "ADVERT" && decoded.Payload.PubKey != "" {
 			ok, reason := ValidateAdvert(&decoded.Payload)
-			if ok {
-				role := advertRole(decoded.Payload.Flags)
-				if err := store.UpsertNode(decoded.Payload.PubKey, decoded.Payload.Name, role, decoded.Payload.Lat, decoded.Payload.Lon, pktData.Timestamp); err != nil {
-					log.Printf("MQTT [%s] node upsert error: %v", tag, err)
-				}
-				if isNew {
-					if err := store.IncrementAdvertCount(decoded.Payload.PubKey); err != nil {
-						log.Printf("MQTT [%s] advert count error: %v", tag, err)
-					}
-				}
-				// Update telemetry if present in advert
-				if decoded.Payload.BatteryMv != nil || decoded.Payload.TemperatureC != nil {
-					if err := store.UpdateNodeTelemetry(decoded.Payload.PubKey, decoded.Payload.BatteryMv, decoded.Payload.TemperatureC); err != nil {
-						log.Printf("MQTT [%s] node telemetry update error: %v", tag, err)
-					}
-				}
-			} else {
+			if !ok {
 				log.Printf("MQTT [%s] skipping corrupted ADVERT: %s", tag, reason)
+				return
+			}
+			if !NodePassesGeoFilter(decoded.Payload.Lat, decoded.Payload.Lon, geoFilter) {
+				return
+			}
+			pktData := BuildPacketData(mqttMsg, decoded, observerID, region)
+			isNew, err := store.InsertTransmission(pktData)
+			if err != nil {
+				log.Printf("MQTT [%s] db insert error: %v", tag, err)
+			}
+			role := advertRole(decoded.Payload.Flags)
+			if err := store.UpsertNode(decoded.Payload.PubKey, decoded.Payload.Name, role, decoded.Payload.Lat, decoded.Payload.Lon, pktData.Timestamp); err != nil {
+				log.Printf("MQTT [%s] node upsert error: %v", tag, err)
+			}
+			if isNew {
+				if err := store.IncrementAdvertCount(decoded.Payload.PubKey); err != nil {
+					log.Printf("MQTT [%s] advert count error: %v", tag, err)
+				}
+			}
+			// Update telemetry if present in advert
+			if decoded.Payload.BatteryMv != nil || decoded.Payload.TemperatureC != nil {
+				if err := store.UpdateNodeTelemetry(decoded.Payload.PubKey, decoded.Payload.BatteryMv, decoded.Payload.TemperatureC); err != nil {
+					log.Printf("MQTT [%s] node telemetry update error: %v", tag, err)
+				}
+			}
+		} else {
+			// Non-ADVERT packets: store normally (routing/channel messages from
+			// in-area observers are relevant regardless of relay hop origin).
+			pktData := BuildPacketData(mqttMsg, decoded, observerID, region)
+			if _, err := store.InsertTransmission(pktData); err != nil {
+				log.Printf("MQTT [%s] db insert error: %v", tag, err)
 			}
 		}
 
@@ -333,7 +432,8 @@ func handleMessage(store *Store, tag string, source MQTTSource, m mqtt.Message, 
 		h := sha256.Sum256([]byte(hashInput))
 		hash := hex.EncodeToString(h[:])[:16]
 
-		var snr, rssi *float64
+		var snr, rssi, score *float64
+		var direction *string
 		if v, ok := msg["SNR"]; ok {
 			if f, ok := toFloat64(v); ok {
 				snr = &f
@@ -352,6 +452,20 @@ func handleMessage(store *Store, tag string, source MQTTSource, m mqtt.Message, 
 				rssi = &f
 			}
 		}
+		if v, ok := msg["score"]; ok {
+			if f, ok := toFloat64(v); ok {
+				score = &f
+			}
+		} else if v, ok := msg["Score"]; ok {
+			if f, ok := toFloat64(v); ok {
+				score = &f
+			}
+		}
+		if v, ok := msg["direction"].(string); ok {
+			direction = &v
+		} else if v, ok := msg["Direction"].(string); ok {
+			direction = &v
+		}
 
 		pktData := &PacketData{
 			Timestamp:    now,
@@ -359,6 +473,8 @@ func handleMessage(store *Store, tag string, source MQTTSource, m mqtt.Message, 
 			ObserverName: "L1 Pro (BLE)",
 			SNR:          snr,
 			RSSI:         rssi,
+			Score:        score,
+			Direction:    direction,
 			Hash:         hash,
 			RouteType:    1, // FLOOD
 			PayloadType:  5, // GRP_TXT
@@ -410,7 +526,8 @@ func handleMessage(store *Store, tag string, source MQTTSource, m mqtt.Message, 
 		h := sha256.Sum256([]byte(hashInput))
 		hash := hex.EncodeToString(h[:])[:16]
 
-		var snr, rssi *float64
+		var snr, rssi, score *float64
+		var direction *string
 		if v, ok := msg["SNR"]; ok {
 			if f, ok := toFloat64(v); ok {
 				snr = &f
@@ -429,6 +546,20 @@ func handleMessage(store *Store, tag string, source MQTTSource, m mqtt.Message, 
 				rssi = &f
 			}
 		}
+		if v, ok := msg["score"]; ok {
+			if f, ok := toFloat64(v); ok {
+				score = &f
+			}
+		} else if v, ok := msg["Score"]; ok {
+			if f, ok := toFloat64(v); ok {
+				score = &f
+			}
+		}
+		if v, ok := msg["direction"].(string); ok {
+			direction = &v
+		} else if v, ok := msg["Direction"].(string); ok {
+			direction = &v
+		}
 
 		pktData := &PacketData{
 			Timestamp:    now,
@@ -436,6 +567,8 @@ func handleMessage(store *Store, tag string, source MQTTSource, m mqtt.Message, 
 			ObserverName: "L1 Pro (BLE)",
 			SNR:          snr,
 			RSSI:         rssi,
+			Score:        score,
+			Direction:    direction,
 			Hash:         hash,
 			RouteType:    1, // FLOOD
 			PayloadType:  2, // TXT_MSG
@@ -465,9 +598,33 @@ func toFloat64(v interface{}) (float64, bool) {
 	case json.Number:
 		f, err := n.Float64()
 		return f, err == nil
+	case string:
+		s := strings.TrimSpace(n)
+		s = stripUnitSuffix(s)
+		f, err := strconv.ParseFloat(s, 64)
+		return f, err == nil
+	case uint:
+		return float64(n), true
+	case uint64:
+		return float64(n), true
 	default:
 		return 0, false
 	}
+}
+
+// unitSuffixes lists common RF/signal unit suffixes to strip before parsing.
+var unitSuffixes = []string{"dBm", "dB", "mW", "km", "mi", "m"}
+
+// stripUnitSuffix removes a trailing unit suffix (case-insensitive) from a
+// numeric string so that values like "-110dBm" can be parsed as float64.
+func stripUnitSuffix(s string) string {
+	lower := strings.ToLower(s)
+	for _, suffix := range unitSuffixes {
+		if strings.HasSuffix(lower, strings.ToLower(suffix)) {
+			return strings.TrimSpace(s[:len(s)-len(suffix)])
+		}
+	}
+	return s
 }
 
 // extractObserverMeta extracts hardware metadata from an MQTT status message.
@@ -476,23 +633,87 @@ func extractObserverMeta(msg map[string]interface{}) *ObserverMeta {
 	meta := &ObserverMeta{}
 	hasData := false
 
-	if v, ok := msg["battery_mv"]; ok {
+	if v, ok := msg["model"].(string); ok && v != "" {
+		meta.Model = &v
+		hasData = true
+	}
+	if v, ok := msg["firmware"].(string); ok && v != "" {
+		meta.Firmware = &v
+		hasData = true
+	}
+	if v, ok := msg["firmware_version"].(string); ok && v != "" {
+		meta.Firmware = &v
+		hasData = true
+	}
+	if v, ok := msg["client_version"].(string); ok && v != "" {
+		meta.ClientVersion = &v
+		hasData = true
+	}
+	if v, ok := msg["clientVersion"].(string); ok && v != "" {
+		meta.ClientVersion = &v
+		hasData = true
+	}
+	if v, ok := msg["radio"].(string); ok && v != "" {
+		meta.Radio = &v
+		hasData = true
+	}
+
+	// Stats fields may be nested under a "stats" object or at top level.
+	// Try nested first, fall back to top-level for backward compatibility.
+	stats, _ := msg["stats"].(map[string]interface{})
+
+	if v := nestedOrTopLevel(stats, msg, "battery_mv"); v != nil {
 		if f, ok := toFloat64(v); ok {
 			iv := int(math.Round(f))
 			meta.BatteryMv = &iv
 			hasData = true
 		}
 	}
-	if v, ok := msg["uptime_secs"]; ok {
+	if v := nestedOrTopLevel(stats, msg, "uptime_secs"); v != nil {
 		if f, ok := toFloat64(v); ok {
 			iv := int64(math.Round(f))
 			meta.UptimeSecs = &iv
 			hasData = true
 		}
 	}
-	if v, ok := msg["noise_floor"]; ok {
+	if v := nestedOrTopLevel(stats, msg, "noise_floor"); v != nil {
 		if f, ok := toFloat64(v); ok {
 			meta.NoiseFloor = &f
+			hasData = true
+		}
+	}
+	if v := nestedOrTopLevel(stats, msg, "tx_air_secs"); v != nil {
+		if f, ok := toFloat64(v); ok {
+			iv := int(math.Round(f))
+			meta.TxAirSecs = &iv
+			hasData = true
+		}
+	}
+	if v := nestedOrTopLevel(stats, msg, "rx_air_secs"); v != nil {
+		if f, ok := toFloat64(v); ok {
+			iv := int(math.Round(f))
+			meta.RxAirSecs = &iv
+			hasData = true
+		}
+	}
+	if v := nestedOrTopLevel(stats, msg, "recv_errors"); v != nil {
+		if f, ok := toFloat64(v); ok {
+			iv := int(math.Round(f))
+			meta.RecvErrors = &iv
+			hasData = true
+		}
+	}
+	if v := nestedOrTopLevel(stats, msg, "packets_sent"); v != nil {
+		if f, ok := toFloat64(v); ok {
+			iv := int(math.Round(f))
+			meta.PacketsSent = &iv
+			hasData = true
+		}
+	}
+	if v := nestedOrTopLevel(stats, msg, "packets_recv"); v != nil {
+		if f, ok := toFloat64(v); ok {
+			iv := int(math.Round(f))
+			meta.PacketsRecv = &iv
 			hasData = true
 		}
 	}
@@ -501,6 +722,19 @@ func extractObserverMeta(msg map[string]interface{}) *ObserverMeta {
 		return nil
 	}
 	return meta
+}
+
+// nestedOrTopLevel looks up a key in the nested map first, then the top-level map.
+func nestedOrTopLevel(nested, toplevel map[string]interface{}, key string) interface{} {
+	if nested != nil {
+		if v, ok := nested[key]; ok {
+			return v
+		}
+	}
+	if v, ok := toplevel[key]; ok {
+		return v
+	}
+	return nil
 }
 
 func firstNonEmpty(vals ...string) string {
@@ -574,6 +808,34 @@ func loadChannelKeys(cfg *Config, configPath string) map[string]string {
 		keys[k] = v
 	}
 
+	return keys
+}
+
+// loadUserChannels reads user-channels.json from the data directory and derives
+// keys for each channel name. Returns an empty map if the file doesn't exist.
+func loadUserChannels(dataDir string) map[string]string {
+	path := filepath.Join(dataDir, "user-channels.json")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return map[string]string{}
+	}
+	var names []string
+	if err := json.Unmarshal(data, &names); err != nil {
+		log.Printf("[channels] failed to parse %s: %v", path, err)
+		return map[string]string{}
+	}
+	keys := make(map[string]string, len(names))
+	for _, name := range names {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		if !strings.HasPrefix(name, "#") {
+			name = "#" + name
+		}
+		h := sha256.Sum256([]byte(name))
+		keys[name] = hex.EncodeToString(h[:16])
+	}
 	return keys
 }
 

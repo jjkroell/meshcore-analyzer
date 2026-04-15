@@ -1,0 +1,13 @@
+:80 {
+    header {
+        X-Content-Type-Options "nosniff"
+        X-Frame-Options "SAMEORIGIN"
+        Referrer-Policy "strict-origin-when-cross-origin"
+        Permissions-Policy "geolocation=(), microphone=(), camera=(), payment=()"
+        # CSP: self + unpkg CDN (Leaflet, Chart.js) + tile servers for maps
+        # unsafe-inline needed for inline styles used throughout the app
+        Content-Security-Policy "default-src 'self'; script-src 'self' https://unpkg.com https://static.cloudflareinsights.com 'sha256-YtbIy3miZTNYHsbUj8//Vlvbaf9b7c3hwA0/q1YKHeU=' 'sha256-bPRIOhQIdfRlsA2xC9aws3yGCfOggN9wkhem3UXP2QQ=' 'sha256-uPcI67rT4G0Jl0SDZ16NCINIEqsSQwOnlrugeR4Eo1A='; style-src 'self' https://unpkg.com 'unsafe-inline'; img-src 'self' data: https://unpkg.com https://*.basemaps.cartocdn.com https://*.tile.openstreetmap.org https://*.tile.opentopomap.org https://raw.githubusercontent.com; connect-src 'self' ws: wss: https://unpkg.com https://cloudflareinsights.com; font-src 'self' data: https://unpkg.com https://*.basemaps.cartocdn.com; frame-ancestors 'none'; object-src 'none'; base-uri 'self'"
+        -Server
+    }
+    reverse_proxy localhost:3000
+}

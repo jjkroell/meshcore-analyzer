@@ -1,6 +1,53 @@
 /* === CoreScope — app.js === */
 'use strict';
 
+// --- Easter egg: Konami code + 7x logo tap ---
+(function () {
+  const SEQ = ['ArrowUp','ArrowUp','ArrowDown','ArrowDown','ArrowLeft','ArrowRight','ArrowLeft','ArrowRight','b','a'];
+  let pos = 0;
+  document.addEventListener('keydown', function (e) {
+    if (e.key === SEQ[pos]) {
+      pos++;
+      if (pos === SEQ.length) { pos = 0; showEasterEgg(); }
+    } else {
+      pos = e.key === SEQ[0] ? 1 : 0;
+    }
+  });
+
+  // 7 taps on the nav logo
+  let tapCount = 0, tapTimer = null;
+  document.addEventListener('click', function (e) {
+    if (!e.target.closest('.nav-brand')) { tapCount = 0; return; }
+    tapCount++;
+    clearTimeout(tapTimer);
+    if (tapCount >= 7) { tapCount = 0; showEasterEgg(); return; }
+    tapTimer = setTimeout(() => { tapCount = 0; }, 2000);
+  });
+  function showEasterEgg() {
+    if (document.getElementById('easterEggOverlay')) return;
+    const overlay = document.createElement('div');
+    overlay.id = 'easterEggOverlay';
+    overlay.style.cssText = 'position:fixed;inset:0;z-index:99999;background:rgba(0,0,0,0.92);display:flex;flex-direction:column;align-items:center;justify-content:center;cursor:pointer;animation:eggFadeIn 0.4s ease';
+    overlay.innerHTML = `
+      <style>
+        @keyframes eggFadeIn { from { opacity:0; transform:scale(0.92); } to { opacity:1; transform:scale(1); } }
+        @keyframes eggSpin { 0% { transform:rotate(0deg) scale(1); } 50% { transform:rotate(180deg) scale(1.08); } 100% { transform:rotate(360deg) scale(1); } }
+        #easterEggLogo { animation: eggSpin 8s linear infinite; filter:brightness(0) invert(1) drop-shadow(0 0 28px rgba(74,158,255,0.7)); }
+        #easterEggOverlay h2 { color:#fff; font-size:1.6rem; font-weight:700; margin:28px 0 8px; letter-spacing:0.04em; }
+        #easterEggOverlay p { color:#64748b; font-size:0.9rem; margin:0; }
+        #easterEggOverlay small { color:#334155; font-size:0.75rem; margin-top:32px; }
+      </style>
+      <img id="easterEggLogo" src="salishmesh-logo.svg" width="220" height="220" alt="Salish Mesh">
+      <h2>Salish Mesh</h2>
+      <p>You found the secret. Welcome to the mesh.</p>
+      <small>click or press Esc to close</small>`;
+    document.body.appendChild(overlay);
+    const close = () => overlay.remove();
+    overlay.addEventListener('click', close);
+    document.addEventListener('keydown', function esc(e) { if (e.key === 'Escape') { close(); document.removeEventListener('keydown', esc); } });
+  }
+})();
+
 // --- Route/Payload name maps ---
 const ROUTE_TYPES = { 0: 'TRANSPORT_FLOOD', 1: 'FLOOD', 2: 'DIRECT', 3: 'TRANSPORT_DIRECT' };
 const PAYLOAD_TYPES = { 0: 'Request', 1: 'Response', 2: 'Direct Msg', 3: 'ACK', 4: 'Advert', 5: 'Channel Msg', 6: 'Group Data', 7: 'Anon Req', 8: 'Path', 9: 'Trace', 10: 'Multipart', 11: 'Control', 15: 'Raw Custom' };
@@ -9,6 +56,8 @@ const PAYLOAD_COLORS = { 0: 'req', 1: 'response', 2: 'txt-msg', 3: 'ack', 4: 'ad
 function routeTypeName(n) { return ROUTE_TYPES[n] || 'UNKNOWN'; }
 function payloadTypeName(n) { return PAYLOAD_TYPES[n] || 'UNKNOWN'; }
 function payloadTypeColor(n) { return PAYLOAD_COLORS[n] || 'unknown'; }
+function isTransportRoute(rt) { return rt === 0 || rt === 3; }
+function transportBadge(rt) { return isTransportRoute(rt) ? ' <span class="badge badge-transport" title="' + routeTypeName(rt) + '">T</span>' : ''; }
 
 // --- Utilities ---
 const _apiPerf = { calls: 0, totalMs: 0, log: [], cacheHits: 0 };
@@ -88,16 +137,177 @@ window.apiPerf = function() {
 
 function timeAgo(iso) {
   if (!iso) return '—';
-  const s = Math.floor((Date.now() - new Date(iso).getTime()) / 1000);
-  if (s < 60) return s + 's ago';
-  if (s < 3600) return Math.floor(s / 60) + 'm ago';
-  if (s < 86400) return Math.floor(s / 3600) + 'h ago';
-  return Math.floor(s / 86400) + 'd ago';
+  const ms = new Date(iso).getTime();
+  if (!isFinite(ms)) return '—';
+  const s = Math.floor((Date.now() - ms) / 1000);
+  const abs = Math.abs(s);
+  let value;
+  let suffix;
+  if (abs < 60) { value = abs; suffix = 's'; }
+  else if (abs < 3600) { value = Math.floor(abs / 60); suffix = 'm'; }
+  else if (abs < 86400) { value = Math.floor(abs / 3600); suffix = 'h'; }
+  else { value = Math.floor(abs / 86400); suffix = 'd'; }
+  if (s < 0) return 'in ' + value + suffix;
+  return value + suffix + ' ago';
+}
+
+function getHashParams() {
+  return new URLSearchParams(location.hash.split('?')[1] || '');
+}
+
+function getDistanceUnit() {
+  var stored = localStorage.getItem('meshcore-distance-unit');
+  if (stored === 'km') return 'km';
+  if (stored === 'mi') return 'mi';
+  // 'auto' or no value — locale detection
+  var milesLocales = ['en-us', 'en-gb'];
+  var lang = (typeof navigator !== 'undefined' && navigator.language || '').toLowerCase();
+  for (var i = 0; i < milesLocales.length; i++) {
+    if (lang === milesLocales[i] || lang.startsWith(milesLocales[i] + '-')) return 'mi';
+  }
+  return 'km';
+}
+window.getDistanceUnit = getDistanceUnit;
+
+function formatDistance(km) {
+  if (km == null || isNaN(+km)) return '—';
+  var d = +km;
+  var unit = getDistanceUnit();
+  if (unit === 'mi') {
+    var mi = d / 1.60934;
+    if (mi < 0.1) return Math.round(mi * 5280) + ' ft';
+    return mi.toFixed(1) + ' mi';
+  }
+  if (d < 1) return Math.round(d * 1000) + ' m';
+  return d.toFixed(1) + ' km';
+}
+window.formatDistance = formatDistance;
+
+function formatDistanceRound(km) {
+  if (km == null || isNaN(+km)) return '—';
+  var unit = getDistanceUnit();
+  if (unit === 'mi') return Math.round(+km / 1.60934) + ' mi';
+  return Math.round(+km) + ' km';
+}
+window.formatDistanceRound = formatDistanceRound;
+
+function getTimestampMode() {
+  const saved = localStorage.getItem('meshcore-timestamp-mode');
+  if (saved === 'ago' || saved === 'absolute') return saved;
+  const serverDefault = window.SITE_CONFIG?.timestamps?.defaultMode;
+  return serverDefault === 'absolute' ? 'absolute' : 'ago';
+}
+
+function getTimestampTimezone() {
+  const saved = localStorage.getItem('meshcore-timestamp-timezone');
+  if (saved === 'utc' || saved === 'local') return saved;
+  const serverDefault = window.SITE_CONFIG?.timestamps?.timezone;
+  return serverDefault === 'utc' ? 'utc' : 'local';
+}
+
+function getTimestampFormatPreset() {
+  const saved = localStorage.getItem('meshcore-timestamp-format');
+  if (saved === 'iso' || saved === 'iso-seconds' || saved === 'locale') return saved;
+  const serverDefault = window.SITE_CONFIG?.timestamps?.formatPreset;
+  return (serverDefault === 'iso' || serverDefault === 'iso-seconds' || serverDefault === 'locale') ? serverDefault : 'iso';
+}
+
+function getTimestampCustomFormat() {
+  if (window.SITE_CONFIG?.timestamps?.allowCustomFormat !== true) return '';
+  const saved = localStorage.getItem('meshcore-timestamp-custom-format');
+  if (saved != null) return String(saved);
+  const serverDefault = window.SITE_CONFIG?.timestamps?.customFormat;
+  return serverDefault == null ? '' : String(serverDefault);
+}
+
+function pad2(v) { return String(v).padStart(2, '0'); }
+function pad3(v) { return String(v).padStart(3, '0'); }
+
+function formatIsoLike(d, timezone, includeMs) {
+  const useUtc = timezone === 'utc';
+  const year = useUtc ? d.getUTCFullYear() : d.getFullYear();
+  const month = useUtc ? d.getUTCMonth() + 1 : d.getMonth() + 1;
+  const day = useUtc ? d.getUTCDate() : d.getDate();
+  const hour = useUtc ? d.getUTCHours() : d.getHours();
+  const minute = useUtc ? d.getUTCMinutes() : d.getMinutes();
+  const second = useUtc ? d.getUTCSeconds() : d.getSeconds();
+  const ms = useUtc ? d.getUTCMilliseconds() : d.getMilliseconds();
+  let out = year + '-' + pad2(month) + '-' + pad2(day) + ' ' + pad2(hour) + ':' + pad2(minute) + ':' + pad2(second);
+  if (includeMs) out += '.' + pad3(ms);
+  return out;
+}
+
+function formatTimestampCustom(d, formatString, timezone) {
+  if (!/YYYY|MM|DD|HH|mm|ss|SSS|Z/.test(String(formatString))) return '';
+  const useUtc = timezone === 'utc';
+  const replacements = {
+    YYYY: String(useUtc ? d.getUTCFullYear() : d.getFullYear()),
+    MM: pad2((useUtc ? d.getUTCMonth() : d.getMonth()) + 1),
+    DD: pad2(useUtc ? d.getUTCDate() : d.getDate()),
+    HH: pad2(useUtc ? d.getUTCHours() : d.getHours()),
+    mm: pad2(useUtc ? d.getUTCMinutes() : d.getMinutes()),
+    ss: pad2(useUtc ? d.getUTCSeconds() : d.getSeconds()),
+    SSS: pad3(useUtc ? d.getUTCMilliseconds() : d.getMilliseconds()),
+    Z: (timezone === 'utc' ? 'UTC' : 'local')
+  };
+  return String(formatString).replace(/YYYY|MM|DD|HH|mm|ss|SSS|Z/g, token => replacements[token] || token);
+}
+
+function formatAbsoluteTimestamp(iso) {
+  if (!iso) return '—';
+  const d = new Date(iso);
+  if (!isFinite(d.getTime())) return '—';
+  const timezone = getTimestampTimezone();
+  const preset = getTimestampFormatPreset();
+  const customFormat = getTimestampCustomFormat().trim();
+  if (customFormat) {
+    const customOut = formatTimestampCustom(d, customFormat, timezone);
+    if (customOut && !/Invalid Date|NaN|undefined|null/.test(customOut)) return customOut;
+  }
+  if (preset === 'iso-seconds') return formatIsoLike(d, timezone, true);
+  if (preset === 'locale') {
+    if (timezone === 'utc') return d.toLocaleString([], { timeZone: 'UTC' });
+    return d.toLocaleString();
+  }
+  return formatIsoLike(d, timezone, false);
+}
+
+function formatTimestamp(isoString, mode) {
+  return formatTimestampWithTooltip(isoString, mode).text;
+}
+
+function formatTimestampWithTooltip(isoString, mode) {
+  if (!isoString) return { text: '—', tooltip: '—', isFuture: false };
+  const d = new Date(isoString);
+  if (!isFinite(d.getTime())) return { text: '—', tooltip: '—', isFuture: false };
+  const activeMode = mode === 'absolute' || mode === 'ago' ? mode : getTimestampMode();
+  const isFuture = d.getTime() > Date.now();
+  const absolute = formatAbsoluteTimestamp(isoString);
+  const relative = timeAgo(isoString);
+  const text = isFuture ? absolute : (activeMode === 'absolute' ? absolute : relative);
+  const tooltip = isFuture ? relative : (activeMode === 'absolute' ? relative : absolute);
+  return { text, tooltip, isFuture };
 }
 
 function truncate(str, len) {
   if (!str) return '';
   return str.length > len ? str.slice(0, len) + '…' : str;
+}
+function midTruncate(str, n) {
+  if (!str) return '';
+  if (str.length <= n * 2) return str;
+  return str.slice(0, n) + '…' + str.slice(-n);
+}
+
+function formatPubKey(pubkey, hashSize, truncLen) {
+  if (!pubkey) return '';
+  const pk = pubkey.toUpperCase();
+  const prefixChars = (hashSize || 0) * 2;
+  let full = truncLen && pk.length > truncLen ? pk.slice(0, truncLen) + '…' : pk;
+  if (!prefixChars || prefixChars > full.length) return escapeHtml(full);
+  const prefix = full.slice(0, prefixChars);
+  const rest   = full.slice(prefixChars);
+  return `<span class="pubkey-hash-prefix" title="${prefixChars/2}-byte hash ID">${escapeHtml(prefix)}</span>${escapeHtml(rest)}`;
 }
 
 function formatEngineBadge(engine) {
@@ -105,8 +315,13 @@ function formatEngineBadge(engine) {
   return ` <span class="engine-badge">${engine}</span>`;
 }
 
-function formatVersionBadge(version, commit, engine) {
+function formatVersionBadge(version, commit, engine, buildTime) {
   if (!version && !commit && !engine) return '';
+  var buildAge = '';
+  if (buildTime && buildTime !== 'unknown') {
+    var age = timeAgo(buildTime);
+    if (age && age !== '—') buildAge = ' <span class="build-age">(' + age + ')</span>';
+  }
   var port = (typeof location !== 'undefined' && location.port) || '';
   var isProd = !port || port === '80' || port === '443';
   var GH = 'https://github.com/Kpa-clawbot/corescope';
@@ -117,7 +332,7 @@ function formatVersionBadge(version, commit, engine) {
   }
   if (commit && commit !== 'unknown') {
     var short = commit.length > 7 ? commit.slice(0, 7) : commit;
-    parts.push('<a href="' + GH + '/commit/' + commit + '" target="_blank" rel="noopener">' + short + '</a>');
+    parts.push('<a href="' + GH + '/commit/' + commit + '" target="_blank" rel="noopener">' + short + '</a>' + buildAge);
   }
   if (engine) parts.push('<span class="engine-badge">' + engine + '</span>');
   if (parts.length === 0) return '';
@@ -137,19 +352,20 @@ function toggleFavorite(pubkey) {
   localStorage.setItem(FAV_KEY, JSON.stringify(favs));
   return idx < 0; // true if now favorited
 }
-function favStar(pubkey, cls) {
+function favStar(pubkey, cls, name) {
   const on = isFavorite(pubkey);
-  return '<button class="fav-star ' + (cls || '') + (on ? ' on' : '') + '" data-fav="' + pubkey + '" title="' + (on ? 'Remove from favorites' : 'Add to favorites') + '">' + (on ? '★' : '☆') + '</button>';
+  return '<button class="fav-star ' + (cls || '') + (on ? ' on' : '') + '" data-fav="' + pubkey + '" data-name="' + escapeHtml(name || '') + '" title="' + (on ? 'Remove from Favorites' : 'Add to Favorites') + '">' + (on ? '★' : '☆') + '</button>';
 }
 function bindFavStars(container, onToggle) {
   container.querySelectorAll('.fav-star').forEach(btn => {
     btn.addEventListener('click', (e) => {
       e.stopPropagation();
       const pk = btn.dataset.fav;
-      const nowOn = toggleFavorite(pk);
+      const nodeName = btn.dataset.name || '';
+      const nowOn = toggleFavorite(pk, nodeName);
       btn.textContent = nowOn ? '★' : '☆';
       btn.classList.toggle('on', nowOn);
-      btn.title = nowOn ? 'Remove from favorites' : 'Add to favorites';
+      btn.title = nowOn ? 'Remove from My Nodes' : 'Add to My Nodes';
       if (onToggle) onToggle(pk, nowOn);
     });
   });
@@ -221,12 +437,34 @@ function buildHexLegend(ranges) {
 let ws = null;
 let wsListeners = [];
 
+function setTraceColor(color) {
+  const line  = document.getElementById('brandTraceLine');
+  const pulse = document.getElementById('brandTracePulse');
+  const nodes = document.getElementById('brandTraceNodes');
+  if (line)  line.setAttribute('stroke', color);
+  if (pulse) pulse.setAttribute('stroke', color);
+  if (nodes) nodes.setAttribute('fill', color);
+}
+
+function fireBrandPulse() {
+  const pulse = document.getElementById('brandTracePulse');
+  if (!pulse) return;
+  pulse.classList.remove('trace-pulsing');
+  void pulse.getBoundingClientRect();
+  pulse.classList.add('trace-pulsing');
+}
+
 function connectWS() {
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
   ws = new WebSocket(`${proto}//${location.host}`);
-  ws.onopen = () => document.getElementById('liveDot')?.classList.add('connected');
+  ws.onopen = () => {
+    document.getElementById('liveDot')?.classList.add('connected');
+    setTraceColor('#22c55e');
+    fireBrandPulse();
+  };
   ws.onclose = () => {
     document.getElementById('liveDot')?.classList.remove('connected');
+    setTraceColor('#94a3b8');
     setTimeout(connectWS, 3000);
   };
   ws.onerror = () => ws.close();
@@ -288,7 +526,26 @@ function registerPage(name, mod) { pages[name] = mod; }
 
 let currentPage = null;
 
+function closeNav() {
+  document.querySelector('.nav-links')?.classList.remove('open');
+  document.getElementById('navSheet')?.classList.remove('open');
+  document.getElementById('navSheetBackdrop')?.classList.remove('open');
+  document.body.classList.remove('nav-open');
+  var bottomBtn = document.getElementById('bottomHamburger');
+  if (bottomBtn) bottomBtn.setAttribute('aria-expanded', 'false');
+  closeMoreMenu();
+}
+
+function closeMoreMenu() {
+  var menu = document.getElementById('navMoreMenu');
+  var btn = document.getElementById('navMoreBtn');
+  if (menu) menu.classList.remove('open');
+  if (btn) btn.setAttribute('aria-expanded', 'false');
+}
+
 function navigate() {
+  closeNav();
+
   const hash = location.hash.replace('#/', '') || 'packets';
   const route = hash.split('?')[0];
 
@@ -320,6 +577,19 @@ function navigate() {
   document.querySelectorAll('.nav-link[data-route]').forEach(el => {
     el.classList.toggle('active', el.dataset.route === basePage);
   });
+  document.querySelectorAll('.bottom-nav-item[data-route]').forEach(el => {
+    el.classList.toggle('active', el.dataset.route === basePage);
+  });
+  document.querySelectorAll('#navSheet .nav-link[data-route]').forEach(el => {
+    el.classList.toggle('active', el.dataset.route === basePage);
+  });
+  // Update "More" button to show active state if a low-priority page is selected
+  var moreBtn = document.getElementById('navMoreBtn');
+  if (moreBtn) {
+    var moreMenu = document.getElementById('navMoreMenu');
+    var hasActiveMore = moreMenu && moreMenu.querySelector('.nav-link.active');
+    moreBtn.classList.toggle('active', !!hasActiveMore);
+  }
 
   if (currentPage && pages[currentPage]?.destroy) {
     pages[currentPage].destroy();
@@ -327,12 +597,24 @@ function navigate() {
   currentPage = basePage;
 
   const app = document.getElementById('app');
+  // Pages with fixed-height containers (maps, virtual-scroll, split-panels)
+  const fixedPages = { packets: 1, nodes: 1, map: 1, live: 1, channels: 1, 'audio-lab': 1 };
+  app.classList.toggle('app-fixed', basePage in fixedPages);
   if (pages[basePage]?.init) {
     const t0 = performance.now();
     pages[basePage].init(app, routeParam);
     const ms = performance.now() - t0;
     if (ms > 100) console.warn(`[SLOW PAGE] ${basePage} init took ${Math.round(ms)}ms`);
     app.classList.remove('page-enter'); void app.offsetWidth; app.classList.add('page-enter');
+    // #630-7: SPA focus management — move focus to first heading or main content
+    requestAnimationFrame(function() {
+      var heading = app.querySelector('h1, h2, h3, [role="heading"]');
+      if (heading) { heading.setAttribute('tabindex', '-1'); heading.focus({ preventScroll: true }); }
+      else { app.setAttribute('tabindex', '-1'); app.focus({ preventScroll: true }); }
+      // iOS Safari: force fixed elements to reposition after content renders
+      window.scrollTo(0, window.scrollY + 1);
+      window.scrollTo(0, window.scrollY - 1);
+    });
   } else {
     app.innerHTML = `<div style="padding:40px;text-align:center;color:#6b7280"><h2>${route}</h2><p>Page not yet implemented.</p></div>`;
   }
@@ -347,7 +629,17 @@ window.addEventListener('theme-changed', () => {
     window.dispatchEvent(new CustomEvent('theme-refresh'));
   }, 300);
 });
+window.addEventListener('timestamp-mode-changed', () => {
+  window.dispatchEvent(new CustomEvent('theme-refresh'));
+});
 window.addEventListener('DOMContentLoaded', () => {
+  // Reposition trace nodes for mobile: dot 1 at start, dot 2 at midpoint
+  if (window.matchMedia('(max-width: 767px)').matches) {
+    const nodes = document.querySelectorAll('#brandTraceNodes circle');
+    if (nodes[0]) nodes[0].setAttribute('cx', '4');
+    if (nodes[1]) nodes[1].setAttribute('cx', '115');
+  }
+  fireBrandPulse();
   connectWS();
 
   // --- Dark Mode ---
@@ -408,13 +700,74 @@ window.addEventListener('DOMContentLoaded', () => {
     applyTheme(isDark ? 'light' : 'dark');
   });
 
-  // --- Hamburger Menu ---
-  const hamburger = document.getElementById('hamburger');
+  // --- Navigation Menu ---
+  const bottomHamburger = document.getElementById('bottomHamburger');
   const navLinks = document.querySelector('.nav-links');
-  hamburger.addEventListener('click', () => navLinks.classList.toggle('open'));
-  // Close menu on nav link click
+  const navSheet = document.getElementById('navSheet');
+  const navSheetBackdrop = document.getElementById('navSheetBackdrop');
+  function isBottomNavActive() { return window.innerWidth <= 1023; }
+  function toggleNav() {
+    if (isBottomNavActive() && navSheet) {
+      const opening = !navSheet.classList.contains('open');
+      navSheet.classList.toggle('open');
+      if (navSheetBackdrop) navSheetBackdrop.classList.toggle('open');
+      document.body.classList.toggle('nav-open', opening);
+      if (bottomHamburger) bottomHamburger.setAttribute('aria-expanded', String(opening));
+    } else {
+      const opening = !navLinks.classList.contains('open');
+      navLinks.classList.toggle('open');
+      document.body.classList.toggle('nav-open');
+    }
+  }
+  if (bottomHamburger) bottomHamburger.addEventListener('click', toggleNav);
+  if (navSheetBackdrop) navSheetBackdrop.addEventListener('click', closeNav);
+  // Close sheet on nav link click
+  if (navSheet) navSheet.querySelectorAll('.nav-link').forEach(link => link.addEventListener('click', closeNav));
   navLinks.querySelectorAll('.nav-link').forEach(link => {
-    link.addEventListener('click', () => navLinks.classList.remove('open'));
+    link.addEventListener('click', closeNav);
+  });
+
+  // --- "More" dropdown (tablet Priority+ nav) ---
+  const navMoreBtn = document.getElementById('navMoreBtn');
+  const navMoreMenu = document.getElementById('navMoreMenu');
+  if (navMoreBtn && navMoreMenu) {
+    // Build More menu dynamically from non-priority nav links (DRY)
+    navMoreMenu.innerHTML = '';
+    document.querySelectorAll('.nav-links a:not([data-priority="high"])').forEach(function(link) {
+      var clone = link.cloneNode(true);
+      clone.setAttribute('role', 'menuitem');
+      clone.addEventListener('click', closeMoreMenu);
+      navMoreMenu.appendChild(clone);
+    });
+    navMoreBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const opening = !navMoreMenu.classList.contains('open');
+      navMoreMenu.classList.toggle('open');
+      navMoreBtn.setAttribute('aria-expanded', String(opening));
+      if (opening) {
+        var firstLink = navMoreMenu.querySelector('.nav-link');
+        if (firstLink) firstLink.focus();
+      }
+    });
+  }
+
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+      if (navMoreMenu && navMoreMenu.classList.contains('open')) closeMoreMenu();
+      if (navLinks.classList.contains('open')) closeNav();
+    }
+  });
+  document.addEventListener('click', (e) => {
+    if (navLinks.classList.contains('open') &&
+        !navLinks.contains(e.target) &&
+        !(bottomHamburger && bottomHamburger.contains(e.target))) {
+      closeNav();
+    }
+    if (navMoreMenu && navMoreMenu.classList.contains('open') &&
+        !navMoreMenu.contains(e.target) &&
+        !navMoreBtn.contains(e.target)) {
+      closeMoreMenu();
+    }
   });
 
   // --- Favorites dropdown ---
@@ -451,7 +804,8 @@ window.addEventListener('DOMContentLoaded', () => {
       try {
         const h = await api('/nodes/' + pk + '/health', { ttl: CLIENT_TTL.nodeHealth });
         const age = h.stats.lastHeard ? Date.now() - new Date(h.stats.lastHeard).getTime() : null;
-        const status = age === null ? '🔴' : age < HEALTH_THRESHOLDS.nodeDegradedMs ? '🟢' : age < HEALTH_THRESHOLDS.nodeSilentMs ? '🟡' : '🔴';
+        const _fth = getHealthThresholds(h.node && h.node.role);
+        const status = age === null ? '🔴' : age < _fth.degradedMs ? '🟢' : age < _fth.silentMs ? '🟡' : '🔴';
         return '<a href="#/nodes/' + pk + '" class="fav-dd-item" data-key="' + pk + '">'
           + '<span class="fav-dd-status">' + status + '</span>'
           + '<span class="fav-dd-name">' + (h.node.name || truncate(pk, 12)) + '</span>'
@@ -531,14 +885,14 @@ window.addEventListener('DOMContentLoaded', () => {
         for (const n of nodeList.slice(0, 5)) {
           if (n.name && n.name.toLowerCase().includes(q.toLowerCase())) {
             html += `<div class="search-result-item" tabindex="0" role="option" data-href="#/nodes/${n.public_key}">
-              <span class="search-result-type">Node</span>${n.name} — ${truncate(n.public_key || '', 16)}</div>`;
+              <span class="search-result-type">Node</span>${escapeHtml(n.name)} — ${formatPubKey(n.public_key || '', n.hash_size, 16)}</div>`;
           }
         }
         const chList = Array.isArray(channels) ? channels : [];
         for (const c of chList) {
           if (c.name && c.name.toLowerCase().includes(q.toLowerCase())) {
             html += `<div class="search-result-item" tabindex="0" role="option" data-href="#/channels/${c.channel_hash}">
-              <span class="search-result-type">Channel</span>${c.name}</div>`;
+              <span class="search-result-type">Channel</span>${escapeHtml(c.name)}</div>`;
           }
         }
         if (!html) html = '<div class="search-no-results">No results found</div>';
@@ -590,9 +944,7 @@ window.addEventListener('DOMContentLoaded', () => {
       const stats = await api('/stats', { ttl: CLIENT_TTL.stats });
       const el = document.getElementById('navStats');
       if (el) {
-        el.innerHTML = `<span class="stat-val">${stats.totalPackets}</span> pkts · <span class="stat-val">${stats.totalNodes}</span> nodes · <span class="stat-val">${stats.totalObservers}</span> obs${formatVersionBadge(stats.version, stats.commit, stats.engine)}`;
-        el.querySelectorAll('.stat-val').forEach(s => s.classList.add('updated'));
-        setTimeout(() => { el.querySelectorAll('.stat-val').forEach(s => s.classList.remove('updated')); }, 600);
+        el.innerHTML = `<span class="stat-val">${stats.totalPackets}</span> pkts · <span class="stat-val">${stats.totalNodes}</span> nodes · <span class="stat-val">${stats.totalObservers}</span> obs${formatVersionBadge(stats.version, stats.commit, stats.engine, stats.buildTime)}`;
       }
     } catch {}
   }
@@ -601,83 +953,30 @@ window.addEventListener('DOMContentLoaded', () => {
   debouncedOnWS(function () { updateNavStats(); });
 
   // --- Theme Customization ---
-  // Fetch theme config and apply branding/colors before first render
+  // Fetch theme config and apply via customizer v2 pipeline
   fetch('/api/config/theme', { cache: 'no-store' }).then(r => r.json()).then(cfg => {
-    window.SITE_CONFIG = cfg;
+    // Normalize timestamp defaults
+    cfg = cfg || {};
+    if (!cfg.timestamps) cfg.timestamps = {};
+    const tsCfg = cfg.timestamps;
+    if (tsCfg.defaultMode !== 'absolute' && tsCfg.defaultMode !== 'ago') tsCfg.defaultMode = 'ago';
+    if (tsCfg.timezone !== 'utc' && tsCfg.timezone !== 'local') tsCfg.timezone = 'local';
+    if (tsCfg.formatPreset !== 'iso' && tsCfg.formatPreset !== 'iso-seconds' && tsCfg.formatPreset !== 'locale') tsCfg.formatPreset = 'iso';
+    if (typeof tsCfg.customFormat !== 'string') tsCfg.customFormat = '';
+    tsCfg.allowCustomFormat = tsCfg.allowCustomFormat === true;
 
-    // User's localStorage preferences take priority over server config
-    const userTheme = (() => { try { return JSON.parse(localStorage.getItem('meshcore-user-theme') || '{}'); } catch { return {}; } })();
-
-    // Apply CSS variable overrides from theme config (skipped if user has local overrides)
-    if (!userTheme.theme && !userTheme.themeDark) {
-      const dark = document.documentElement.getAttribute('data-theme') === 'dark' ||
-        (document.documentElement.getAttribute('data-theme') !== 'light' && window.matchMedia('(prefers-color-scheme: dark)').matches);
-      const themeData = dark ? { ...(cfg.theme || {}), ...(cfg.themeDark || {}) } : (cfg.theme || {});
-      const root = document.documentElement.style;
-      const varMap = {
-        accent: '--accent', accentHover: '--accent-hover',
-        navBg: '--nav-bg', navBg2: '--nav-bg2', navText: '--nav-text', navTextMuted: '--nav-text-muted',
-        background: '--surface-0', text: '--text', textMuted: '--text-muted', border: '--border',
-        statusGreen: '--status-green', statusYellow: '--status-yellow', statusRed: '--status-red',
-        surface1: '--surface-1', surface2: '--surface-2', surface3: '--surface-3',
-        cardBg: '--card-bg', contentBg: '--content-bg', inputBg: '--input-bg',
-        rowStripe: '--row-stripe', rowHover: '--row-hover', detailBg: '--detail-bg',
-        selectedBg: '--selected-bg', sectionBg: '--section-bg',
-        font: '--font', mono: '--mono'
-      };
-      for (const [key, cssVar] of Object.entries(varMap)) {
-        if (themeData[key]) root.setProperty(cssVar, themeData[key]);
-      }
-      // Derived vars
-      if (themeData.background) root.setProperty('--content-bg', themeData.contentBg || themeData.background);
-      if (themeData.surface1) root.setProperty('--card-bg', themeData.cardBg || themeData.surface1);
-      // Nav gradient
-      if (themeData.navBg) {
-        const nav = document.querySelector('.top-nav');
-        if (nav) nav.style.background = `linear-gradient(135deg, ${themeData.navBg} 0%, ${themeData.navBg2 || themeData.navBg} 50%, ${themeData.navBg} 100%)`;
-      }
+    // Customizer v2: set server defaults and run full pipeline
+    // (reads localStorage overrides → merges → sets SITE_CONFIG → applies CSS → dispatches theme-changed)
+    if (window._customizerV2) {
+      window._customizerV2.init(cfg);
+    } else {
+      // Fallback if customize-v2.js didn't load
+      window.SITE_CONFIG = cfg;
     }
-
-    // Apply node color overrides (skip if user has local preferences)
-    if (cfg.nodeColors && !userTheme.nodeColors) {
-      for (const [role, color] of Object.entries(cfg.nodeColors)) {
-        if (window.ROLE_COLORS && role in window.ROLE_COLORS) window.ROLE_COLORS[role] = color;
-        if (window.ROLE_STYLE && window.ROLE_STYLE[role]) window.ROLE_STYLE[role].color = color;
-      }
-    }
-
-    // Apply type color overrides (skip if user has local preferences)
-    if (cfg.typeColors && !userTheme.typeColors) {
-      for (const [type, color] of Object.entries(cfg.typeColors)) {
-        if (window.TYPE_COLORS && type in window.TYPE_COLORS) window.TYPE_COLORS[type] = color;
-      }
-      if (window.syncBadgeColors) window.syncBadgeColors();
-    }
-
-    // Apply branding (skip if user has local preferences)
-    if (cfg.branding && !userTheme.branding) {
-      if (cfg.branding.siteName) {
-        document.title = cfg.branding.siteName;
-        const brandText = document.querySelector('.brand-text');
-        if (brandText) brandText.textContent = cfg.branding.siteName;
-      }
-      if (cfg.branding.logoUrl) {
-        const brandIcon = document.querySelector('.brand-icon');
-        if (brandIcon) {
-          const img = document.createElement('img');
-          img.src = cfg.branding.logoUrl;
-          img.alt = cfg.branding.siteName || 'Logo';
-          img.style.height = '24px';
-          img.style.width = 'auto';
-          brandIcon.replaceWith(img);
-        }
-      }
-      if (cfg.branding.faviconUrl) {
-        const favicon = document.querySelector('link[rel="icon"]');
-        if (favicon) favicon.href = cfg.branding.faviconUrl;
-      }
-    }
-  }).catch(() => { window.SITE_CONFIG = null; }).finally(() => {
+  }).catch(() => {
+    window.SITE_CONFIG = { timestamps: { defaultMode: 'ago', timezone: 'local', formatPreset: 'iso', customFormat: '', allowCustomFormat: false } };
+    if (window._customizerV2) window._customizerV2.init(window.SITE_CONFIG);
+  }).finally(() => {
     if (!location.hash || location.hash === '#/') location.hash = '#/home';
     else navigate();
   });

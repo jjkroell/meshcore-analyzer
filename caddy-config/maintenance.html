@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SWBC/Salish Mesh — Maintenance</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      background: #0f0f23;
+      color: #e2e8f0;
+      font-family: 'Segoe UI', system-ui, sans-serif;
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .container {
+      text-align: center;
+      padding: 40px 24px;
+      max-width: 480px;
+    }
+    .icon { font-size: 56px; margin-bottom: 24px; animation: pulse 2s ease-in-out infinite; }
+    @keyframes pulse { 0%,100% { opacity:1; } 50% { opacity:0.5; } }
+    h1 { font-size: 22px; font-weight: 700; color: #fff; margin-bottom: 12px; letter-spacing: 0.05em; }
+    p { font-size: 15px; color: #94a3b8; line-height: 1.6; }
+    .dot {
+      display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+      background: #4a9eff; margin: 24px auto 0; animation: blink 1.2s ease-in-out infinite;
+    }
+    .dot:nth-child(2) { animation-delay: 0.2s; margin: 24px 4px 0; }
+    .dot:nth-child(3) { animation-delay: 0.4s; }
+    @keyframes blink { 0%,100% { opacity:0.2; } 50% { opacity:1; } }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="icon">📡</div>
+    <h1>SWBC / SALISH MESH</h1>
+    <p>We're upgrading the analyzer.<br>Back online shortly.</p>
+    <div><span class="dot"></span><span class="dot"></span><span class="dot"></span></div>
+  </div>
+</body>
+</html>

@@ -1,0 +1,40 @@
+services:
+  staging-go:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        APP_VERSION: ${APP_VERSION:-unknown}
+        GIT_COMMIT: ${GIT_COMMIT:-unknown}
+        BUILD_TIME: ${BUILD_TIME:-unknown}
+    image: corescope-go:latest
+    container_name: corescope-staging-go
+    restart: unless-stopped
+    stop_grace_period: 30s
+    stop_signal: SIGTERM
+    deploy:
+      resources:
+        limits:
+          memory: 3g
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "${STAGING_GO_HTTP_PORT:-82}:80"
+      - "6060:6060"
+      - "6061:6061"
+    volumes:
+      - ${STAGING_DATA_DIR:-~/meshcore-staging-data}:/app/data
+      - caddy-data-staging-go:/data/caddy
+    environment:
+      - NODE_ENV=staging
+      - ENABLE_PPROF=true
+      - DISABLE_MOSQUITTO=true
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/api/stats"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+
+volumes:
+  caddy-data-staging-go:

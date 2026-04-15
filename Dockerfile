@@ -9,6 +9,7 @@ ARG BUILD_TIME=unknown
 # Build server
 WORKDIR /build/server
 COPY cmd/server/go.mod cmd/server/go.sum ./
+COPY internal/geofilter/ ../../internal/geofilter/
 RUN go mod download
 COPY cmd/server/ ./
 RUN go build -ldflags "-X main.Version=${APP_VERSION} -X main.Commit=${GIT_COMMIT} -X main.BuildTime=${BUILD_TIME}" -o /corescope-server .
@@ -40,6 +41,9 @@ RUN echo "unknown" > .git-commit
 
 # Supervisor + Mosquitto + Caddy config
 COPY docker/supervisord-go.conf /etc/supervisor/conf.d/supervisord.conf
+COPY docker/supervisord-go-no-mosquitto.conf /etc/supervisor/conf.d/supervisord-no-mosquitto.conf
+COPY docker/supervisord-go-no-caddy.conf /etc/supervisor/conf.d/supervisord-no-caddy.conf
+COPY docker/supervisord-go-no-mosquitto-no-caddy.conf /etc/supervisor/conf.d/supervisord-no-mosquitto-no-caddy.conf
 COPY docker/mosquitto.conf /etc/mosquitto/mosquitto.conf
 COPY docker/Caddyfile /etc/caddy/Caddyfile
 

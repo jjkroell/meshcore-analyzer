@@ -68,6 +68,8 @@ type StatsResponse struct {
 	Commit             string     `json:"commit"`
 	BuildTime          string     `json:"buildTime"`
 	Counts             RoleCounts `json:"counts"`
+	Backfilling        bool       `json:"backfilling"`
+	BackfillProgress   float64    `json:"backfillProgress"`
 }
 
 // ─── Health ────────────────────────────────────────────────────────────────────
@@ -240,6 +242,7 @@ type TransmissionResp struct {
 	SNR              interface{}      `json:"snr"`
 	RSSI             interface{}      `json:"rssi"`
 	PathJSON         interface{}      `json:"path_json"`
+	ResolvedPath     []*string        `json:"resolved_path,omitempty"`
 	Direction        interface{}      `json:"direction"`
 	Score            interface{}      `json:"score,omitempty"`
 	Observations     []ObservationResp `json:"observations,omitempty"`
@@ -254,6 +257,7 @@ type ObservationResp struct {
 	SNR            interface{} `json:"snr"`
 	RSSI           interface{} `json:"rssi"`
 	PathJSON       interface{} `json:"path_json"`
+	ResolvedPath   []*string   `json:"resolved_path,omitempty"`
 	Timestamp      interface{} `json:"timestamp"`
 }
 
@@ -289,7 +293,7 @@ type PacketTimestampsResponse struct {
 type PacketDetailResponse struct {
 	Packet           interface{}       `json:"packet"`
 	Path             []interface{}     `json:"path"`
-	Breakdown        interface{}       `json:"breakdown"`
+	Breakdown        *Breakdown        `json:"breakdown"`
 	ObservationCount int               `json:"observation_count"`
 	Observations     []ObservationResp `json:"observations,omitempty"`
 }
@@ -873,18 +877,21 @@ type TraceResponse struct {
 // ─── Resolve Hops ──────────────────────────────────────────────────────────────
 
 type HopCandidate struct {
-	Name   interface{} `json:"name"`
-	Pubkey string      `json:"pubkey"`
-	Lat    interface{} `json:"lat"`
-	Lon    interface{} `json:"lon"`
+	Name          interface{} `json:"name"`
+	Pubkey        string      `json:"pubkey"`
+	Lat           interface{} `json:"lat"`
+	Lon           interface{} `json:"lon"`
+	AffinityScore *float64    `json:"affinityScore"`
 }
 
 type HopResolution struct {
-	Name       interface{}    `json:"name"`
-	Pubkey     interface{}    `json:"pubkey,omitempty"`
-	Ambiguous  *bool          `json:"ambiguous,omitempty"`
-	Candidates []HopCandidate `json:"candidates"`
-	Conflicts  []interface{}  `json:"conflicts"`
+	Name          interface{}    `json:"name"`
+	Pubkey        interface{}    `json:"pubkey,omitempty"`
+	Ambiguous     *bool          `json:"ambiguous,omitempty"`
+	Candidates    []HopCandidate `json:"candidates"`
+	Conflicts     []interface{}  `json:"conflicts"`
+	BestCandidate *string        `json:"bestCandidate,omitempty"`
+	Confidence    string         `json:"confidence,omitempty"`
 }
 
 type ResolveHopsResponse struct {
@@ -919,7 +926,9 @@ type ClientConfigResponse struct {
 	WsReconnectMs      interface{} `json:"wsReconnectMs"`
 	CacheInvalidateMs  interface{} `json:"cacheInvalidateMs"`
 	ExternalUrls       interface{} `json:"externalUrls"`
-	PropagationBufferMs float64    `json:"propagationBufferMs"`
+	PropagationBufferMs float64         `json:"propagationBufferMs"`
+	Timestamps          TimestampConfig `json:"timestamps"`
+	DebugAffinity       bool            `json:"debugAffinity,omitempty"`
 }
 
 // ─── IATA Coords ───────────────────────────────────────────────────────────────

@@ -1,10 +1,10 @@
 # CoreScope
 
-[![Go Server Coverage](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/Kpa-clawbot/CoreScope/master/.badges/go-server-coverage.json)](https://github.com/Kpa-clawbot/CoreScope/actions/workflows/deploy.yml)
-[![Go Ingestor Coverage](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/Kpa-clawbot/CoreScope/master/.badges/go-ingestor-coverage.json)](https://github.com/Kpa-clawbot/CoreScope/actions/workflows/deploy.yml)
-[![E2E Tests](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/Kpa-clawbot/CoreScope/master/.badges/e2e-tests.json)](https://github.com/Kpa-clawbot/CoreScope/actions/workflows/deploy.yml)
-[![Frontend Coverage](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/Kpa-clawbot/CoreScope/master/.badges/frontend-coverage.json)](https://github.com/Kpa-clawbot/CoreScope/actions/workflows/deploy.yml)
-[![Deploy](https://github.com/Kpa-clawbot/CoreScope/actions/workflows/deploy.yml/badge.svg)](https://github.com/Kpa-clawbot/CoreScope/actions/workflows/deploy.yml)
+[![Go Server Coverage](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/jjkroell/CoreScope/master/.badges/go-server-coverage.json)](https://github.com/jjkroell/CoreScope/actions/workflows/deploy.yml)
+[![Go Ingestor Coverage](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/jjkroell/CoreScope/master/.badges/go-ingestor-coverage.json)](https://github.com/jjkroell/CoreScope/actions/workflows/deploy.yml)
+[![E2E Tests](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/jjkroell/CoreScope/master/.badges/e2e-tests.json)](https://github.com/jjkroell/CoreScope/actions/workflows/deploy.yml)
+[![Frontend Coverage](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/jjkroell/CoreScope/master/.badges/frontend-coverage.json)](https://github.com/jjkroell/CoreScope/actions/workflows/deploy.yml)
+[![Deploy](https://github.com/jjkroell/CoreScope/actions/workflows/deploy.yml/badge.svg)](https://github.com/jjkroell/CoreScope/actions/workflows/deploy.yml)
 
 > High-performance mesh network analyzer powered by Go. Sub-millisecond packet queries, ~300 MB memory for 56K+ packets, real-time WebSocket broadcast, full channel decryption.
 
@@ -74,13 +74,27 @@ Full experience on your phone — proper touch controls, iOS safe area support, 
 
 ## Quick Start
 
-### Docker (Recommended)
+### Pre-built Image (Recommended)
 
-No Go installation needed — everything builds inside the container.
+No build step required — just run:
 
 ```bash
-git clone https://github.com/Kpa-clawbot/CoreScope.git
-cd corescope
+docker run -d --name corescope \
+  -p 80:80 \
+  -v corescope-data:/app/data \
+  ghcr.io/kpa-clawbot/corescope:latest
+```
+
+Open `http://localhost` — done. No config file needed; CoreScope starts with sensible defaults.
+
+See [DEPLOY.md](DEPLOY.md) for image tags, Docker Compose, and migration from `manage.sh`.
+See [docs/deployment.md](docs/deployment.md) for the full deployment guide — MQTT setup, HTTPS options, backups, monitoring, and troubleshooting.
+
+### Build from Source
+
+```bash
+git clone https://github.com/jjkroell/CoreScope.git
+cd CoreScope
 ./manage.sh setup
 ```
 
@@ -94,8 +108,6 @@ The setup wizard walks you through config, domain, HTTPS, build, and run.
 ./manage.sh mqtt-test    # Check if observer data is flowing
 ./manage.sh help         # All commands
 ```
-
-See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for the full deployment guide — HTTPS options (auto cert, bring your own, Cloudflare Tunnel), MQTT security, backups, and troubleshooting.
 
 ### Configure
 
@@ -241,6 +253,8 @@ If you're running an existing Node.js deployment, see [docs/go-migration.md](doc
 Contributions welcome. Please read [AGENTS.md](AGENTS.md) for coding conventions, testing requirements, and engineering principles before submitting a PR.
 
 **Live instance:** [analyzer.00id.net](https://analyzer.00id.net) — all API endpoints are public, no auth required.
+
+**API Documentation:** CoreScope auto-generates an OpenAPI 3.0 spec. Browse the interactive Swagger UI at [`/api/docs`](https://analyzer.00id.net/api/docs) or fetch the machine-readable spec at [`/api/spec`](https://analyzer.00id.net/api/spec).
 
 ## License
 

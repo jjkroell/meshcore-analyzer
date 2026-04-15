@@ -1,0 +1,1276 @@
+/* ================================================================
+   CoreScope — mobile.css
+   Complete mobile & tablet responsive layer.
+   Loaded LAST in index.html so it wins the cascade without !important.
+   Follows W3Schools mobile-first principles:
+     • Viewport meta already set in HTML
+     • 16px minimum font size everywhere (prevents iOS zoom on inputs)
+     • All tap targets ≥ 44px
+     • Fluid widths, no fixed px layouts
+     • Media queries: ≤767px phone, 768px–1023px tablet
+   ================================================================ */
+
+/* ----------------------------------------------------------------
+   PHONE  ≤ 767px
+   ---------------------------------------------------------------- */
+@media screen and (max-width: 767px) {
+
+  /* ── Base typography ──────────────────────────────────────── */
+  html {
+    font-size: 16px;
+  }
+  body {
+    font-size: 16px;
+    line-height: 1.6;
+  }
+
+  /* ── Navigation ───────────────────────────────────────────── */
+  .top-nav {
+    height: 56px;
+    padding: 0 12px;
+  }
+  .nav-brand {
+    font-size: 17px;
+    gap: 8px;
+  }
+  /* Always show brand text on mobile */
+  .brand-text { display: flex !important; align-items: center; }
+  .brand-core, .brand-sep, .brand-scope { font-size: 17px !important; }
+  .brand-stack { gap: 4px; display: flex; flex-direction: column; }
+  /* Mobile trace: 165px wide, 3 nodes, circles compensated for horizontal compression */
+  #brandTraceSvg { width: 165px !important; }
+  #brandTraceNodes circle:nth-child(3) { display: none; }
+  #brandTraceNodes circle {
+    transform: scaleX(1.40);
+    transform-box: fill-box;
+    transform-origin: center;
+  }
+  /* Hamburger: big enough to tap */
+  .hamburger {
+    display: inline-flex !important;
+    width: 48px;
+    height: 48px;
+    font-size: 22px;
+    align-items: center;
+    justify-content: center;
+  }
+  /* Nav icon buttons (search, dark mode, favorites) */
+  .nav-btn {
+    width: 48px;
+    height: 48px;
+    font-size: 20px;
+  }
+  /* Hamburger drawer links */
+  .nav-links {
+    top: 56px;
+  }
+  .nav-links .nav-link {
+    font-size: 17px !important;
+    padding: 18px 24px !important;
+    min-height: 56px !important;
+    border-bottom: 1px solid rgba(255,255,255,0.07);
+  }
+  /* Hide stat bar on phone */
+  .nav-stats { display: none !important; }
+
+  /* ── App shell ────────────────────────────────────────────── */
+  #app {
+    min-height: calc(100dvh - 56px);
+    padding-bottom: calc(56px + env(safe-area-inset-bottom, 0px));
+  }
+  #app.app-fixed {
+    height: calc(100dvh - 56px);
+    padding-bottom: calc(56px + env(safe-area-inset-bottom, 0px));
+  }
+
+  /* ── Page layout & content ────────────────────────────────── */
+  .page-content {
+    padding: 16px;
+  }
+  .page-header {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 10px;
+    padding: 16px;
+  }
+  .page-header h2 {
+    font-size: 22px;
+    font-weight: 700;
+  }
+  /* Packets page: keep title + buttons on one row — buttons must stay visible */
+  .pkt-page-header {
+    flex-direction: row !important;
+    align-items: center !important;
+    flex-wrap: nowrap !important;
+    gap: 8px !important;
+    padding: 12px 16px !important;
+  }
+  .pkt-page-header h2 {
+    font-size: 17px !important;
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .pkt-byop-pill {
+    font-size: 12px !important;
+    padding: 6px 12px !important;
+    min-height: 34px !important;
+    white-space: nowrap;
+  }
+  /* Packet detail modal: bottom sheet on phone */
+  .pkt-detail-overlay { padding-top: 0 !important; align-items: flex-end !important; }
+  .pkt-detail-modal {
+    max-width: 100% !important; width: 100% !important;
+    border-radius: 16px 16px 0 0 !important;
+    max-height: 92vh !important;
+  }
+  .pkt-detail-modal-header { padding: 14px 16px; }
+  .pkt-detail-modal-body { padding: 0 16px 20px; }
+  /* Filters modal: bottom sheet on phone */
+  .pkt-filters-overlay { padding-top: 0 !important; align-items: flex-end !important; }
+  .pkt-filters-modal {
+    max-width: 100% !important;
+    width: 100% !important;
+    border-radius: 16px 16px 0 0 !important;
+    max-height: 88vh !important;
+  }
+  .pkt-fm-body { padding: 16px; gap: 16px; }
+  .pkt-fm-row { flex-direction: column; gap: 12px; }
+  .pkt-fm-row.pkt-fm-toggles { flex-direction: row !important; flex-wrap: wrap; }
+  .pkt-fm-field { min-width: 0; }
+  .pkt-fm-select,
+  .pkt-fm-field input[type="text"],
+  .pkt-fm-field .multi-select-trigger,
+  .pkt-fm-field .col-toggle-btn,
+  .pkt-fm-field .btn-icon,
+  .pkt-fm-body .btn {
+    font-size: 16px !important;
+    height: 44px !important;
+    min-height: 44px !important;
+  }
+  .pkt-fm-divider { margin: 0 -16px; }
+  .pkt-fm-header { padding: 14px 16px; }
+  .pkt-fm-col-inline { grid-template-columns: repeat(2, 1fr) !important; }
+  .pkt-fm-col-inline label { font-size: 15px !important; padding: 6px 8px !important; min-height: 36px; }
+  /* Packets table: on phone hide observer too — enough columns remain (time, hash, type, path, details) */
+  #pktTable .col-observer { display: none; }
+  /* Packet table rows: tighter padding on phone for data density */
+  #pktTable td, #pktTable th { padding: 6px 5px; font-size: 12px; }
+  #pktTable .col-time { font-size: 11px; }
+
+  /* ── Buttons & form controls ──────────────────────────────── */
+  .btn {
+    font-size: 16px;
+    min-height: 48px;
+    padding: 0 20px;
+    border-radius: 8px;
+  }
+  /* 16px on ALL inputs prevents iOS from auto-zooming */
+  input,
+  select,
+  textarea {
+    font-size: 16px !important;
+    min-height: 48px;
+    padding: 10px 14px;
+  }
+  /* Filter bar */
+  .filter-bar {
+    gap: 8px;
+  }
+  .filter-bar input,
+  .filter-bar select {
+    font-size: 16px !important;
+    min-height: 48px !important;
+    padding: 10px 14px !important;
+  }
+  .filter-bar .btn,
+  .filter-toggle-btn {
+    font-size: 16px !important;
+    min-height: 48px !important;
+    padding: 0 18px !important;
+  }
+  /* Tab buttons */
+  .tab-btn {
+    font-size: 15px;
+    min-height: 48px;
+    padding: 12px 18px;
+  }
+
+  /* ── Badges & pills ───────────────────────────────────────── */
+  .badge {
+    font-size: 13px;
+    padding: 4px 10px;
+    border-radius: 10px;
+  }
+  .stat-pill {
+    font-size: 15px;
+    padding: 10px 16px;
+  }
+  .node-count-pill {
+    font-size: 14px;
+    padding: 8px 14px;
+  }
+
+  /* ── Split layout / detail panels ────────────────────────── */
+  .split-layout {
+    flex-direction: column;
+  }
+  .panel-left {
+    padding: 8px;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+  .panel-right {
+    width: 100% !important;
+    min-width: unset !important;
+    max-width: 100% !important;
+    border-left: none;
+    border-top: 1px solid var(--border);
+  }
+
+  /* ── Tables ───────────────────────────────────────────────── */
+  .data-table {
+    font-size: 14px;
+    min-width: 480px; /* forces horizontal scroll on narrow phones */
+  }
+  .data-table th {
+    font-size: 13px;
+    padding: 10px 8px;
+    white-space: nowrap;
+  }
+  .data-table td {
+    font-size: 14px;
+    padding: 10px 8px;
+  }
+  /* Wrap table in scrollable container */
+  .panel-left,
+  .obs-table-scroll {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  /* ── Modals ───────────────────────────────────────────────── */
+  .modal {
+    width: 96vw;
+    max-width: 96vw;
+    padding: 20px 16px;
+    border-radius: 12px;
+    font-size: 16px;
+  }
+  .modal h3 {
+    font-size: 20px;
+  }
+
+  /* ── Search ───────────────────────────────────────────────── */
+  .search-overlay {
+    padding-top: 16px;
+  }
+  .search-box {
+    width: calc(100vw - 24px);
+    margin: 0 12px;
+    border-radius: 12px;
+  }
+  #searchInput {
+    font-size: 17px !important;
+    padding: 14px 16px !important;
+    min-height: 52px;
+  }
+  .search-results .search-item,
+  .search-result-item {
+    font-size: 15px;
+    padding: 14px 16px;
+    min-height: 52px;
+  }
+
+  /* ── Channel sidebar & list ───────────────────────────────── */
+  .ch-sidebar-title {
+    font-size: 13px;
+    letter-spacing: .3px;
+  }
+  .ch-add-btn {
+    font-size: 14px;
+    padding: 8px 14px;
+    min-height: 40px;
+  }
+  .ch-blocked-badge {
+    font-size: 13px;
+    padding: 8px 14px;
+  }
+  /* Available Channels modal on mobile */
+  .ch-avail-panel {
+    height: 80vh;
+    border-radius: 16px 16px 0 0;
+    position: fixed;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    width: 100%;
+    max-width: 100%;
+  }
+  .ch-private-panel {
+    max-height: 90vh;
+  }
+  .ch-avail-modal {
+    align-items: flex-end;
+  }
+  /* Channel list items */
+  .ch-item {
+    padding: 16px 18px;
+    min-height: 72px;
+    gap: 14px;
+  }
+  .ch-badge {
+    width: 48px;
+    height: 48px;
+    min-width: 48px;
+    font-size: 15px;
+    border-radius: 14px;
+  }
+  .ch-item-name {
+    font-size: 17px;
+    font-weight: 600;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .ch-item-preview {
+    font-size: 14px;
+    margin-top: 2px;
+  }
+  .ch-item-time {
+    font-size: 13px;
+  }
+  /* Hide button always visible on touch */
+  .ch-block-btn {
+    display: flex !important;
+    width: 44px;
+    height: 44px;
+    font-size: 16px;
+    opacity: 0.7;
+  }
+  .ch-block-btn::after {
+    display: none; /* no hover tooltip on touch */
+  }
+
+  /* ── Channel main header ──────────────────────────────────── */
+  .ch-main-header {
+    padding: 16px 18px;
+    min-height: 60px;
+  }
+  .ch-header-name {
+    font-size: 19px;
+    font-weight: 700;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .ch-header-count {
+    font-size: 13px;
+  }
+  /* Sort pill — compact in the header row */
+  .ch-sort-pill {
+    font-size: 12px !important;
+    padding: 5px 10px !important;
+    min-height: 34px !important;
+    white-space: nowrap;
+    flex-shrink: 0;
+  }
+  /* Shared back-button pill style */
+  .ch-back-btn,
+  .detail-back-btn,
+  .node-back-btn,
+  a.btn-icon[aria-label="Back"] {
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    width: 38px !important;
+    height: 38px !important;
+    min-width: 38px !important;
+    min-height: 38px !important;
+    padding: 0 !important;
+    background: color-mix(in srgb, var(--accent) 18%, transparent) !important;
+    border: 1.5px solid color-mix(in srgb, var(--accent) 50%, transparent) !important;
+    border-radius: 8px !important;
+    color: var(--accent) !important;
+    line-height: 1 !important;
+  }
+  .ch-back-btn svg,
+  .detail-back-btn svg,
+  .node-back-btn svg,
+  a.btn-icon[aria-label="Back"] svg {
+    display: block;
+    flex-shrink: 0;
+  }
+  .ch-back-btn:active,
+  .detail-back-btn:active,
+  .node-back-btn:active,
+  a.btn-icon[aria-label="Back"]:active {
+    background: color-mix(in srgb, var(--accent) 32%, transparent) !important;
+  }
+
+
+  /* ── Channel messages ─────────────────────────────────────── */
+  .ch-messages {
+    padding: 16px;
+    gap: 20px;
+  }
+  .ch-msg {
+    gap: 12px;
+  }
+  .ch-avatar {
+    width: 44px;
+    height: 44px;
+    min-width: 44px;
+    font-size: 16px;
+    border-radius: 12px;
+  }
+  .ch-msg-sender {
+    font-size: 16px;
+    font-weight: 700;
+    margin-bottom: 6px;
+  }
+  .ch-msg-bubble {
+    font-size: 16px;
+    line-height: 1.65;
+    padding: 12px 16px;
+    border-radius: 6px 14px 14px 14px;
+    max-width: 100%;
+  }
+  .ch-msg-time {
+    font-size: 13px;
+  }
+
+  /* ── Channel node panel (slide up from bottom) ────────────── */
+  .ch-node-panel {
+    width: 100%;
+    max-width: 100%;
+    top: auto;
+    height: 70vh;
+    border-left: none;
+    border-top: 1px solid var(--border);
+    border-radius: 16px 16px 0 0;
+    transform: translateY(100%);
+  }
+  .ch-node-panel.open {
+    transform: translateY(0);
+  }
+  .ch-node-panel-header {
+    padding: 16px 20px;
+    font-size: 17px;
+  }
+  .ch-node-close {
+    width: 48px;
+    height: 48px;
+    font-size: 22px;
+  }
+  .ch-node-field {
+    font-size: 16px;
+    margin-bottom: 12px;
+  }
+  .ch-node-label {
+    font-size: 13px;
+    margin-bottom: 4px;
+  }
+
+  /* ── Hidden channels list ─────────────────────────────────── */
+  .ch-blocked-item {
+    padding: 14px 18px;
+    min-height: 56px;
+  }
+  .ch-blocked-name {
+    font-size: 16px;
+  }
+  .ch-unblock-btn {
+    font-size: 14px;
+    padding: 10px 16px;
+    min-height: 44px;
+  }
+
+  /* ── Node detail ──────────────────────────────────────────── */
+  .detail-meta {
+    grid-template-columns: 1fr;
+    gap: 12px;
+  }
+  .detail-meta dt {
+    font-size: 13px;
+    letter-spacing: .2px;
+  }
+  .detail-meta dd {
+    font-size: 15px;
+  }
+
+  /* ── Nodes page ───────────────────────────────────────────── */
+  .nodes-topbar {
+    flex-direction: column;
+    gap: 10px;
+    padding: 12px 16px;
+  }
+  .nodes-counts {
+    display: flex !important;
+    flex-wrap: nowrap !important;
+    gap: 6px !important;
+    width: 100%;
+  }
+  .node-count-pill {
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    flex: 1 1 0 !important;
+    font-size: 11px !important;
+    padding: 5px 4px !important;
+    white-space: nowrap !important;
+  }
+  .node-name {
+    font-size: 17px;
+  }
+
+  /* ── Observer detail ─────────────────────────────────────── */
+  .observer-detail-page .page-header {
+    flex-direction: row !important;
+    flex-wrap: nowrap !important;
+    align-items: center !important;
+    gap: 10px !important;
+  }
+  .observer-detail-page .page-header h2 {
+    flex: 1 1 auto !important;
+    min-width: 0 !important;
+    overflow: hidden !important;
+    text-overflow: ellipsis !important;
+    white-space: nowrap !important;
+    font-size: 16px !important;
+    margin: 0 !important;
+  }
+  /* Info cards: consistent font size, centered */
+  .observer-detail-page .stat-card {
+    padding: 12px !important;
+    text-align: center !important;
+  }
+  .observer-detail-page .stat-label {
+    font-size: 11px !important;
+    text-transform: uppercase !important;
+    letter-spacing: 0.4px !important;
+    color: var(--text-muted) !important;
+    margin-bottom: 4px !important;
+  }
+  .observer-detail-page .stat-value {
+    font-size: 15px !important;
+    font-weight: 600 !important;
+    word-break: break-word !important;
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    gap: 6px !important;
+    flex-wrap: wrap !important;
+  }
+  /* Health dot vertical alignment */
+  .observer-detail-page .health-dot {
+    display: inline-block !important;
+    flex-shrink: 0 !important;
+    vertical-align: middle !important;
+  }
+  /* Region badge: no background box, just plain styled text */
+  .observer-detail-page .badge-region {
+    background: none !important;
+    border: none !important;
+    color: var(--text) !important;
+    font-size: 15px !important;
+    font-weight: 600 !important;
+    padding: 0 !important;
+    letter-spacing: 0.3px !important;
+    font-family: inherit !important;
+  }
+  .time-range-select {
+    appearance: none !important;
+    -webkit-appearance: none !important;
+    background: color-mix(in srgb, var(--accent) 12%, var(--surface-1, #1a1a1a)) !important;
+    border: 1.5px solid color-mix(in srgb, var(--accent) 40%, transparent) !important;
+    border-radius: 8px !important;
+    color: var(--text, #fff) !important;
+    font-size: 13px !important;
+    font-family: inherit !important;
+    padding: 6px 28px 6px 10px !important;
+    cursor: pointer !important;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23888' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E") !important;
+    background-repeat: no-repeat !important;
+    background-position: right 8px center !important;
+    min-height: 36px !important;
+  }
+  .time-range-select:focus {
+    outline: none !important;
+    border-color: var(--accent) !important;
+  }
+
+  /* ── Traces ───────────────────────────────────────────────── */
+  .trace-summary {
+    flex-direction: column;
+    gap: 12px;
+  }
+  .tl-header,
+  .tl-row {
+    font-size: 14px;
+    gap: 6px;
+  }
+
+  /* ── Analytics ────────────────────────────────────────────── */
+  .analytics-page {
+    padding: 16px;
+  }
+  .analytics-stats {
+    grid-template-columns: 1fr !important;
+  }
+  .analytics-grid {
+    grid-template-columns: 1fr !important;
+  }
+  .analytics-tabs {
+    overflow-x: auto;
+    flex-wrap: nowrap;
+    -webkit-overflow-scrolling: touch;
+  }
+  .analytics-tabs .tab-btn {
+    font-size: 15px;
+    padding: 12px 18px;
+    white-space: nowrap;
+  }
+  .analytics-card h3 {
+    font-size: 17px;
+  }
+  .analytics-table {
+    font-size: 14px;
+  }
+  .analytics-table th {
+    font-size: 13px;
+    padding: 10px 8px;
+  }
+  .analytics-table td {
+    font-size: 14px;
+    padding: 10px 8px;
+  }
+
+  /* ── RF Health ────────────────────────────────────────────── */
+  .rf-health-split {
+    flex-direction: column;
+    height: auto;
+  }
+  .rf-health-grid {
+    grid-template-columns: 1fr;
+    max-height: 50vh;
+  }
+  .rf-health-detail {
+    width: 100% !important;
+    max-width: 100% !important;
+    min-width: 0 !important;
+    border-left: none;
+    border-top: 1px solid var(--border);
+  }
+  .rf-cell-name {
+    font-size: 15px;
+    max-width: none;
+  }
+  .rf-cell-nf {
+    font-size: 15px;
+  }
+  .rf-detail-close {
+    width: 48px;
+    height: 48px;
+    font-size: 22px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+  }
+
+  /* ── Home page ────────────────────────────────────────────── */
+  .home-hero {
+    padding: 32px 16px 24px;
+  }
+  .home-hero h1 {
+    font-size: 1.9rem;
+    line-height: 1.2;
+  }
+  .home-hero p {
+    font-size: 1.05rem;
+    line-height: 1.6;
+  }
+  .home-stats {
+    gap: 10px;
+    padding: 16px;
+  }
+  .home-stat {
+    padding: 14px 18px;
+  }
+  .home-stat .val {
+    font-size: 1.7rem;
+  }
+  .home-stat .lbl {
+    font-size: 14px;
+  }
+  .health-metrics {
+    flex-direction: column;
+    gap: 12px;
+  }
+  .fav-grid {
+    grid-template-columns: 1fr;
+    gap: 14px;
+  }
+  .fav-card {
+    padding: 16px;
+  }
+  .fav-card-header strong {
+    font-size: 1.05rem;
+  }
+  .fav-card-stats {
+    font-size: 0.9rem;
+    gap: 12px;
+  }
+  .suggest-item {
+    padding: 16px;
+    min-height: 56px;
+    font-size: 16px;
+  }
+  .suggest-name {
+    font-size: 1.05rem;
+  }
+  .suggest-key {
+    font-size: 0.85rem;
+  }
+  .suggest-claim {
+    font-size: 0.9rem;
+    padding: 8px 14px;
+    min-height: 40px;
+  }
+  .home-section-header {
+    padding: 20px 16px 0;
+  }
+  .my-nodes-grid {
+    grid-template-columns: 1fr;
+    padding: 0 16px 16px;
+    gap: 16px;
+  }
+  .mnc-name {
+    font-size: 1.05rem;
+  }
+  .mnc-metric-val {
+    font-size: 1.2rem;
+  }
+  .mnc-metric-label {
+    font-size: 0.8rem;
+  }
+  .mnc-remove {
+    opacity: 1;
+    width: 44px;
+    height: 44px;
+    font-size: 18px;
+  }
+
+  /* ── Map controls ─────────────────────────────────────────── */
+  .map-controls {
+    width: calc(100vw - 24px);
+    right: 12px;
+    top: 8px;
+    font-size: 14px;
+    padding: 12px 14px;
+  }
+
+  /* ── Live map header ──────────────────────────────────────── */
+  .live-header {
+    /* Pin to top, span full width with small margin */
+    left: 8px !important;
+    right: 8px !important;
+    top: 64px !important;
+    max-width: calc(100vw - 16px) !important;
+    width: auto !important;
+    /* Stack title / stats / toggles as separate rows, centered */
+    flex-direction: column !important;
+    align-items: center !important;
+    gap: 8px !important;
+    padding: 10px 14px !important;
+  }
+  .live-title {
+    display: flex !important;
+    justify-content: center !important;
+    font-size: 13px !important;
+    letter-spacing: 1px !important;
+    width: 100%;
+  }
+  /* Stats pills row: wrap if needed */
+  .live-stats-row {
+    flex-wrap: wrap !important;
+    justify-content: center !important;
+    gap: 6px !important;
+    width: 100%;
+  }
+  .live-stat-pill {
+    font-size: 13px !important;
+    padding: 4px 10px !important;
+  }
+  /* Desktop toggles hidden on mobile — replaced by hamburger */
+  .live-toggles {
+    display: none !important;
+  }
+
+  /* Always show title — live.css hides it below 400px */
+  .live-title {
+    display: flex !important;
+  }
+
+  /* Options icon button — small, top-right corner of the stats panel */
+  .live-toggles-mobile {
+    display: flex;
+    position: absolute;
+    top: 6px;
+    right: 6px;
+    width: auto;
+  }
+  .live-options-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+    width: 28px;
+    height: 28px;
+    min-height: unset;
+    background: color-mix(in srgb, var(--text) 8%, transparent);
+    border: 1px solid color-mix(in srgb, var(--text) 18%, transparent);
+    border-radius: 6px;
+    color: var(--nav-text);
+    font-size: 14px;
+    font-family: inherit;
+    cursor: pointer;
+    opacity: 0.7;
+  }
+  .live-options-btn:active {
+    opacity: 1;
+    background: color-mix(in srgb, var(--accent) 20%, transparent);
+    border-color: color-mix(in srgb, var(--accent) 50%, transparent);
+  }
+
+  /* Backdrop */
+  .live-options-backdrop {
+    display: none;
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,0.5);
+    backdrop-filter: blur(2px);
+    -webkit-backdrop-filter: blur(2px);
+    z-index: 2000;
+  }
+  .live-options-backdrop.open { display: block; }
+
+  /* Centered popup modal */
+  .live-options-modal {
+    display: none;
+    position: fixed;
+    top: 50%; left: 50%;
+    transform: translate(-50%, -50%);
+    z-index: 2001;
+    background: var(--surface-1);
+    border-radius: 12px;
+    border: 1px solid var(--border);
+    box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+    flex-direction: column;
+    width: 220px;
+  }
+  .live-options-modal.open { display: flex; }
+
+  .live-options-modal-handle { display: none; }
+
+  .live-options-modal-title {
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    padding: 10px 14px 6px;
+    flex-shrink: 0;
+  }
+  .live-options-modal-body {
+    display: flex;
+    flex-direction: column;
+    padding: 2px 0 6px;
+  }
+  .live-options-modal-body label {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 14px;
+    font-size: 13px;
+    color: var(--text);
+    cursor: pointer;
+    min-height: unset;
+  }
+  .live-options-modal-body label:active { background: var(--hover-bg); }
+  .live-options-modal-body input[type="checkbox"] {
+    width: 16px; height: 16px; min-height: unset;
+    padding: 0; margin: 0; flex-shrink: 0;
+    accent-color: var(--accent);
+  }
+  .live-options-modal-body span { flex: 1; }
+  .live-options-menu label {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 14px;
+    font-size: 15px;
+    color: var(--text-primary);
+    cursor: pointer;
+    min-height: 44px;
+    border-radius: 6px;
+  }
+  .live-options-menu label:active {
+    background: color-mix(in srgb, var(--accent) 12%, transparent);
+  }
+  .live-options-menu input[type="checkbox"] {
+    width: 20px;
+    height: 20px;
+    min-height: unset;
+    padding: 0;
+    margin: 0;
+    cursor: pointer;
+    accent-color: var(--accent);
+  }
+
+  /* ── Live map node detail bottom sheet ───────────────────── */
+  /* Backdrop: covers map, tap to close. Only shown on mobile/tablet via JS. */
+  .node-detail-backdrop {
+    position: absolute;
+    inset: 0;
+    z-index: 999;
+    background: rgba(0, 0, 0, 0.35);
+  }
+  .node-detail-backdrop.hidden { display: none; }
+
+  /* Card: ID selector beats live.css attribute-selector !important rules.
+     top: 200px = live-header bottom (~188px) + 12px gap on stacked mobile header. */
+  #liveNodeDetail {
+    position: absolute !important;
+    top: 200px !important;
+    bottom: 0 !important;
+    left: 0 !important;
+    right: 0 !important;
+    width: 100% !important;
+    height: auto !important;
+    max-height: none !important;
+    border-radius: 16px 16px 0 0 !important;
+    overflow: hidden !important;
+    background: color-mix(in srgb, var(--surface-1) 97%, transparent) !important;
+    border: 1px solid color-mix(in srgb, var(--accent) 25%, var(--border)) !important;
+    border-bottom: none !important;
+    box-shadow: 0 -6px 32px rgba(0, 0, 0, 0.5) !important;
+    z-index: 1000 !important;
+  }
+  /* Drag-handle pill */
+  #liveNodeDetail::before {
+    content: '';
+    display: block;
+    width: 40px;
+    height: 4px;
+    background: color-mix(in srgb, var(--accent) 40%, var(--border));
+    border-radius: 2px;
+    margin: 10px auto 2px;
+    flex-shrink: 0;
+  }
+  /* Only panel-content scrolls */
+  #liveNodeDetail .panel-content {
+    overflow-y: auto !important;
+    flex: 1 !important;
+    min-height: 0 !important;
+  }
+  /* X button in top-right */
+  #liveNodeDetail .panel-header {
+    justify-content: flex-end !important;
+    padding: 2px 10px 4px !important;
+  }
+  #nodeDetailClose {
+    width: 32px !important;
+    height: 32px !important;
+    font-size: 15px !important;
+    opacity: 1 !important;
+    background: color-mix(in srgb, var(--accent) 18%, transparent) !important;
+    border: 1.5px solid color-mix(in srgb, var(--accent) 50%, transparent) !important;
+    color: var(--accent) !important;
+    border-radius: 8px !important;
+  }
+
+  /* ── Misc ─────────────────────────────────────────────────── */
+  .hex-dump {
+    font-size: 12px;
+    line-height: 1.7;
+  }
+  .mc-label {
+    font-size: 13px;
+  }
+  .section-label {
+    font-size: 13px;
+    letter-spacing: .2px;
+  }
+  .page-footer,
+  .home-footer-links {
+    flex-direction: column;
+    align-items: center;
+    gap: 12px;
+    font-size: 14px;
+  }
+}
+
+/* ----------------------------------------------------------------
+   TABLET  768px – 1023px
+   ---------------------------------------------------------------- */
+@media screen and (min-width: 768px) and (max-width: 1023px) {
+
+  html { font-size: 15px; }
+  body { font-size: 15px; line-height: 1.55; }
+
+  /* ── Nav ──────────────────────────────────────────────────── */
+  .nav-link {
+    font-size: 14px;
+    padding: 14px 10px;
+  }
+  .nav-btn {
+    width: 40px;
+    height: 40px;
+  }
+
+  /* ── Channel sidebar: comfortable width ───────────────────── */
+  .ch-sidebar {
+    width: 260px;
+    min-width: 240px;
+  }
+  .ch-item {
+    padding: 14px 16px;
+    min-height: 64px;
+  }
+  .ch-item-name {
+    font-size: 15px;
+  }
+  .ch-item-preview {
+    font-size: 13px;
+  }
+  .ch-badge {
+    width: 44px;
+    height: 44px;
+    min-width: 44px;
+    font-size: 14px;
+  }
+
+  /* ── Channel messages ─────────────────────────────────────── */
+  .ch-msg-bubble {
+    font-size: 15px;
+    line-height: 1.6;
+  }
+  .ch-msg-sender {
+    font-size: 14px;
+  }
+  .ch-header-name {
+    font-size: 17px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  /* Sort pill — tablet sizing */
+  .ch-sort-pill {
+    font-size: 12px;
+    padding: 5px 11px;
+    min-height: 34px;
+    white-space: nowrap;
+    flex-shrink: 0;
+  }
+
+  /* ── Inputs ───────────────────────────────────────────────── */
+  input,
+  select,
+  textarea {
+    font-size: 15px !important;
+  }
+
+  /* ── Tables ───────────────────────────────────────────────── */
+  .data-table {
+    font-size: 13px;
+  }
+  .data-table th {
+    font-size: 12px;
+    padding: 9px 8px;
+  }
+  .data-table td {
+    font-size: 13px;
+    padding: 9px 8px;
+  }
+
+  /* ── Packets page (tablet) ────────────────────────────────── */
+  /* Packet detail modal on tablet */
+  .pkt-detail-overlay { padding-top: 50px; }
+  .pkt-detail-modal { max-width: 680px; max-height: calc(100vh - 70px); }
+  /* Filters modal: wider sheet from bottom on tablet */
+  .pkt-filters-overlay { padding-top: 60px; align-items: flex-start; }
+  .pkt-filters-modal { max-width: 560px; }
+  /* Keep page-header as single row on tablet too */
+  .pkt-page-header {
+    flex-direction: row !important;
+    align-items: center !important;
+    flex-wrap: nowrap !important;
+    gap: 10px !important;
+    padding: 12px 16px !important;
+  }
+  .pkt-page-header h2 {
+    font-size: 18px !important;
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  /* Packets table: tighter cells to fit more columns */
+  #pktTable td, #pktTable th { padding: 7px 6px; }
+
+  /* ── Detail panel ─────────────────────────────────────────── */
+  .panel-right {
+    width: 340px;
+    min-width: 280px;
+  }
+
+  /* ── Analytics ────────────────────────────────────────────── */
+  .analytics-stats {
+    grid-template-columns: repeat(2, 1fr);
+  }
+  .analytics-grid {
+    grid-template-columns: 1fr;
+  }
+
+  /* ── Home ─────────────────────────────────────────────────── */
+  .home-hero h1 {
+    font-size: 2rem;
+  }
+  .home-stat .val {
+    font-size: 1.5rem;
+  }
+  .fav-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+  .my-nodes-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+
+  /* ── RF Health ────────────────────────────────────────────── */
+  .rf-health-detail {
+    width: 360px;
+    min-width: 300px;
+    max-width: 45vw;
+  }
+
+  /* ── Buttons ──────────────────────────────────────────────── */
+  .btn {
+    font-size: 15px;
+    min-height: 44px;
+  }
+  .tab-btn {
+    font-size: 14px;
+    min-height: 44px;
+    padding: 10px 16px;
+  }
+
+  /* ── Live map node detail: bottom sheet on tablet ─────────── */
+  .node-detail-backdrop {
+    position: absolute;
+    inset: 0;
+    z-index: 999;
+    background: rgba(0, 0, 0, 0.35);
+  }
+  .node-detail-backdrop.hidden { display: none; }
+
+  #liveNodeDetail {
+    position: absolute !important;
+    top: 126px !important;
+    bottom: 0 !important;
+    left: 0 !important;
+    right: 0 !important;
+    width: 100% !important;
+    height: auto !important;
+    max-height: none !important;
+    border-radius: 16px 16px 0 0 !important;
+    overflow: hidden !important;
+    background: color-mix(in srgb, var(--surface-1) 97%, transparent) !important;
+    border: 1px solid color-mix(in srgb, var(--accent) 25%, var(--border)) !important;
+    border-bottom: none !important;
+    box-shadow: 0 -6px 32px rgba(0, 0, 0, 0.5) !important;
+    z-index: 1000 !important;
+  }
+  #liveNodeDetail::before {
+    content: '';
+    display: block;
+    width: 40px;
+    height: 4px;
+    background: color-mix(in srgb, var(--accent) 40%, var(--border));
+    border-radius: 2px;
+    margin: 10px auto 2px;
+    flex-shrink: 0;
+  }
+  #liveNodeDetail .panel-content {
+    overflow-y: auto !important;
+    flex: 1 !important;
+    min-height: 0 !important;
+  }
+  #liveNodeDetail .panel-header {
+    justify-content: flex-end !important;
+    padding: 2px 10px 4px !important;
+  }
+  #nodeDetailClose {
+    width: 32px !important;
+    height: 32px !important;
+    font-size: 15px !important;
+    opacity: 1 !important;
+    background: color-mix(in srgb, var(--accent) 18%, transparent) !important;
+    border: 1.5px solid color-mix(in srgb, var(--accent) 50%, transparent) !important;
+    color: var(--accent) !important;
+    border-radius: 8px !important;
+  }
+}
+
+/* ── Live map mobile hamburger: hidden on tablet/desktop ─────── */
+@media screen and (min-width: 768px) {
+  .live-toggles-mobile {
+    display: none;
+  }
+}
+
+/* ----------------------------------------------------------------
+   VCR BAR  — mobile + tablet (≤ 1023px)
+   Row 1: ⏪ ⏸ LIVE 1x  |  1h 6h 12h 24h  |  LCD clock
+   Row 2: timeline scrubber (full width)
+   ---------------------------------------------------------------- */
+@media screen and (max-width: 1023px) {
+  .vcr-bar { display: none !important; }
+
+  /* VCR bar gone — reset feed/legend bottom offsets */
+  .live-feed { bottom: 8px !important; }
+  .feed-show-btn { bottom: 8px !important; }
+  .live-legend { bottom: 8px !important; }
+
+  /* ── Row 1 items ── */
+  .vcr-controls    { order: 1; flex-shrink: 0; gap: 3px; }
+  .vcr-scope-btns  { order: 2; flex-shrink: 0; gap: 2px; }
+  .vcr-lcd         { display: none !important; }
+
+  /* ── Row 2: timeline pushed to its own full-width row ── */
+  .vcr-timeline-container {
+    order: 4;
+    flex: 0 0 100%;
+    width: 100%;
+    height: 22px;
+  }
+
+  /* Hide mode text pill — LCD already shows LIVE/PAUSED/REPLAY */
+  .vcr-mode { display: none !important; }
+
+  /* Compact playback buttons */
+  .vcr-controls .vcr-btn {
+    padding: 4px 7px;
+    font-size: 0.78rem;
+  }
+
+  /* Compact scope buttons */
+  .vcr-scope-btn {
+    padding: 3px 7px;
+    font-size: 0.7rem;
+  }
+}

@@ -162,21 +162,47 @@ func TestEvictStale_NoEvictionWhenDisabled(t *testing.T) {
 
 func TestEvictStale_MemoryBasedEviction(t *testing.T) {
 	now := time.Now().UTC()
-	// Create enough packets to exceed a small memory limit
-	// 1000 packets * 5KB + 2000 obs * 500B ≈ 6MB
 	store := makeTestStore(1000, now.Add(-1*time.Hour), 0)
-	// All packets are recent (1h old) so time-based won't trigger
+	// All packets are recent (1h old) so time-based won't trigger.
 	store.retentionHours = 24
-	store.maxMemoryMB = 3 // ~3MB limit, should evict roughly half
+	store.maxMemoryMB = 3
+	// Inject deterministic estimator: simulates 6MB (over 3MB limit).
+	// Uses packet count so it scales correctly after eviction.
+	store.memoryEstimator = func() float64 {
+		return float64(len(store.packets)*5120+store.totalObs*500) / 1048576.0
+	}
 
 	evicted := store.EvictStale()
 	if evicted == 0 {
 		t.Fatal("expected some evictions for memory cap")
 	}
-	// After eviction, estimated memory should be <= 3MB
 	estMB := store.estimatedMemoryMB()
-	if estMB > 3.5 { // small tolerance
+	if estMB > 3.5 {
 		t.Fatalf("expected <=3.5MB after eviction, got %.1fMB", estMB)
+	}
+}
+
+// TestEvictStale_MemoryBasedEviction_UnderestimatedHeap verifies that eviction
+// fires correctly when actual heap is much larger than a formula-based estimate
+// would report — the scenario that caused OOM kills in production.
+func TestEvictStale_MemoryBasedEviction_UnderestimatedHeap(t *testing.T) {
+	now := time.Now().UTC()
+	store := makeTestStore(1000, now.Add(-1*time.Hour), 0)
+	store.retentionHours = 24
+	store.maxMemoryMB = 500
+	// Simulate actual heap 5x over budget (like production: ~5GB actual vs ~1GB limit).
+	store.memoryEstimator = func() float64 {
+		return 2500.0 // 2500MB actual vs 500MB limit
+	}
+
+	evicted := store.EvictStale()
+	if evicted == 0 {
+		t.Fatal("expected evictions when heap is 5x over limit")
+	}
+	// Should keep roughly 500/2500 * 0.9 = 18% of packets → ~180 of 1000.
+	remaining := len(store.packets)
+	if remaining > 250 {
+		t.Fatalf("expected most packets evicted (heap 5x over), but %d of 1000 remain", remaining)
 	}
 }
 
@@ -248,5 +274,31 @@ func TestNewPacketStoreNilConfig(t *testing.T) {
 	store := NewPacketStore(nil, nil)
 	if store.retentionHours != 0 {
 		t.Fatalf("expected retentionHours=0, got %f", store.retentionHours)
+	}
+}
+
+func TestCacheTTLFromConfig(t *testing.T) {
+	// With config values: analyticsHashSizes and analyticsRF should override defaults.
+	cacheTTL := map[string]interface{}{
+		"analyticsHashSizes": float64(7200),
+		"analyticsRF":        float64(300),
+	}
+	store := NewPacketStore(nil, nil, cacheTTL)
+	if store.collisionCacheTTL != 7200*time.Second {
+		t.Fatalf("expected collisionCacheTTL=7200s, got %v", store.collisionCacheTTL)
+	}
+	if store.rfCacheTTL != 300*time.Second {
+		t.Fatalf("expected rfCacheTTL=300s, got %v", store.rfCacheTTL)
+	}
+}
+
+func TestCacheTTLDefaults(t *testing.T) {
+	// Without config, defaults should apply.
+	store := NewPacketStore(nil, nil)
+	if store.collisionCacheTTL != 3600*time.Second {
+		t.Fatalf("expected default collisionCacheTTL=3600s, got %v", store.collisionCacheTTL)
+	}
+	if store.rfCacheTTL != 15*time.Second {
+		t.Fatalf("expected default rfCacheTTL=15s, got %v", store.rfCacheTTL)
 	}
 }

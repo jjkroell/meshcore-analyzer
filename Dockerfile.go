@@ -6,6 +6,9 @@ ARG APP_VERSION=unknown
 ARG GIT_COMMIT=unknown
 ARG BUILD_TIME=unknown
 
+# Copy internal modules (required by replace directives in go.mod)
+COPY internal/ /internal/
+
 # Build server
 WORKDIR /build/server
 COPY cmd/server/go.mod cmd/server/go.sum ./
@@ -40,6 +43,9 @@ RUN if [ ! -f .git-commit ]; then echo "unknown" > .git-commit; fi
 
 # Supervisor + Mosquitto + Caddy config
 COPY docker/supervisord-go.conf /etc/supervisor/conf.d/supervisord.conf
+COPY docker/supervisord-go-no-mosquitto.conf /etc/supervisor/conf.d/supervisord-no-mosquitto.conf
+COPY docker/supervisord-go-no-caddy.conf /etc/supervisor/conf.d/supervisord-no-caddy.conf
+COPY docker/supervisord-go-no-mosquitto-no-caddy.conf /etc/supervisor/conf.d/supervisord-no-mosquitto-no-caddy.conf
 COPY docker/mosquitto.conf /etc/mosquitto/mosquitto.conf
 COPY docker/Caddyfile /etc/caddy/Caddyfile
 

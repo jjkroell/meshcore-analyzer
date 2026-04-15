@@ -37,9 +37,9 @@
     }
 
     app.innerHTML = `
-      <div class="observer-detail-page" style="overflow-y:auto;height:calc(100vh - 56px);padding:16px">
+      <div class="observer-detail-page" style="padding:16px">
         <div class="page-header" style="display:flex;align-items:center;gap:12px;margin-bottom:16px">
-          <a href="#/observers" class="btn-icon" title="Back to Observers" aria-label="Back">←</a>
+          <a href="#/observers" class="btn-icon" title="Back to Observers" aria-label="Back"><svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="15 18 9 12 15 6"/></svg></a>
           <h2 style="margin:0" id="obsTitle">Observer Detail</h2>
           <div style="margin-left:auto;display:flex;gap:8px">
             <select id="obsDaysSelect" class="time-range-select" aria-label="Time range">
@@ -92,7 +92,8 @@
     let radioHtml = '—';
     if (obs.radio) {
       const rp = obs.radio.split(',');
-      radioHtml = rp[0] + ' MHz · SF' + (rp[2] || '?') + ' · BW' + (rp[1] || '?') + ' · CR' + (rp[3] || '?');
+      const freq = parseFloat(rp[0]);
+      radioHtml = (isNaN(freq) ? rp[0] : freq.toFixed(3)) + ' MHz · SF' + (rp[2] || '?') + ' · BW' + (rp[1] || '?') + ' · CR' + (rp[3] || '?');
     }
 
     // Health status

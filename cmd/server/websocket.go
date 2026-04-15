@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -14,7 +15,18 @@ import (
 var upgrader = websocket.Upgrader{
 	ReadBufferSize:  1024,
 	WriteBufferSize: 4096,
-	CheckOrigin:     func(r *http.Request) bool { return true },
+	CheckOrigin: func(r *http.Request) bool {
+		origin := r.Header.Get("Origin")
+		if origin == "" {
+			return true // same-origin requests (curl, native clients) have no Origin
+		}
+		u, err := url.Parse(origin)
+		if err != nil {
+			return false
+		}
+		// Allow same host (handles HTTP and HTTPS, any port forwarding via Caddy)
+		return u.Host == r.Host || u.Hostname() == r.Host
+	},
 }
 
 // Hub manages WebSocket clients and broadcasts.
@@ -25,8 +37,9 @@ type Hub struct {
 
 // Client is a single WebSocket connection.
 type Client struct {
-	conn *websocket.Conn
-	send chan []byte
+	conn     *websocket.Conn
+	send     chan []byte
+	closeOnce sync.Once
 }
 
 func NewHub() *Hub {
@@ -52,10 +65,26 @@ func (h *Hub) Unregister(c *Client) {
 	h.mu.Lock()
 	if _, ok := h.clients[c]; ok {
 		delete(h.clients, c)
-		close(c.send)
+		c.closeOnce.Do(func() { close(c.send) })
 	}
 	h.mu.Unlock()
 	log.Printf("[ws] client disconnected (%d total)", h.ClientCount())
+}
+
+// Close gracefully disconnects all WebSocket clients.
+func (h *Hub) Close() {
+	h.mu.Lock()
+	for c := range h.clients {
+		c.conn.WriteControl(
+			websocket.CloseMessage,
+			websocket.FormatCloseMessage(websocket.CloseGoingAway, "server shutting down"),
+			time.Now().Add(3*time.Second),
+		)
+		c.closeOnce.Do(func() { close(c.send) })
+		delete(h.clients, c)
+	}
+	h.mu.Unlock()
+	log.Println("[ws] all clients disconnected")
 }
 
 // Broadcast sends a message to all connected clients.
@@ -166,6 +195,17 @@ func NewPoller(db *DB, hub *Hub, interval time.Duration) *Poller {
 func (p *Poller) Start() {
 	lastID := p.db.GetMaxTransmissionID()
 	lastObsID := p.db.GetMaxObservationID()
+	// If the store already loaded data, use its max IDs as a floor.
+	// This prevents replaying the entire DB when the DB query fails
+	// (e.g., corrupted DB returns 0 from COALESCE).
+	if p.store != nil {
+		if storeMax := p.store.MaxTransmissionID(); storeMax > lastID {
+			lastID = storeMax
+		}
+		if storeMaxObs := p.store.MaxObservationID(); storeMaxObs > lastObsID {
+			lastObsID = storeMaxObs
+		}
+	}
 	log.Printf("[poller] starting from transmission ID %d, obs ID %d, interval %v", lastID, lastObsID, p.interval)
 
 	ticker := time.NewTicker(p.interval)

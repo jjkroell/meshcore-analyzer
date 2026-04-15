@@ -33,7 +33,7 @@ public/            — Frontend (vanilla JS, one file per page) — ACTIVE, NOT 
   style.css        — Main styles, CSS variables for theming
   live.css         — Live page styles
   home.css         — Home page styles
-  index.html       — SPA shell, script/style tags with cache busters
+  index.html       — SPA shell, script/style tags with __BUST__ placeholder (auto-replaced at server startup)
 test-fixtures/     — Real data SQLite fixture from staging (used for E2E tests)
 scripts/           — Tooling (coverage collector, fixture capture, frontend instrumentation)
 ```
@@ -51,18 +51,41 @@ The following were part of the old Node.js backend and have been removed:
 
 ## Rules — Read These First
 
+### 0. Performance is a feature — not an afterthought
+Every change must consider performance impact BEFORE implementation. This codebase handles 30K+ packets, 2K+ nodes, and real-time WebSocket updates. A single O(n²) loop or per-item API call can freeze the UI or stall the server.
+
+**Before writing code, ask:**
+- What's the worst-case data size this code will process?
+- Am I adding work inside a hot loop (render, ingest, WS broadcast)?
+- Am I fetching from the server what I could compute client-side?
+- Am I recomputing something that could be cached/incremental?
+- Does my change invalidate caches more broadly than necessary?
+
+**Hard rules:**
+- **No per-item API calls.** Fetch bulk, filter client-side.
+- **No O(n²) in hot paths.** Use Maps/Sets for lookups, not nested array scans.
+- **No full DOM rebuilds.** Diff or virtualize — never innerHTML entire tables.
+- **No unbounded data structures.** Every map/slice/array must have eviction or size limits.
+- **No expensive work under locks.** Copy data under lock, process outside.
+- **Cache expensive computations.** Invalidate surgically, not globally.
+- **Debounce/coalesce rapid events.** WebSocket messages, scroll, resize — never fire raw.
+
+**If your change touches a hot path (packet rendering, ingest, analytics), include a perf justification in the PR description:** what the complexity is, what the expected scale is, and why it won't degrade.
+
+**Perf claims require proof.** "This is faster" without data is not acceptable. Every PR claiming to fix or improve performance MUST include one of:
+- A benchmark test (before/after timings with realistic data sizes)
+- Profile output or timing measurements (e.g. "renderTableRows: 450ms → 12ms on 30K packets")
+- A test assertion that enforces the perf characteristic (e.g. "filters 30K packets in <50ms")
+No proof = no merge.
+
 ### 1. No commit without tests
 Every change that touches logic MUST have tests. For Go backend: `cd cmd/server && go test ./...` and `cd cmd/ingestor && go test ./...`. For frontend: `node test-packet-filter.js && node test-aging.js && node test-frontend-helpers.js`. If you add new logic, add tests. No exceptions.
 
 ### 2. No commit without browser validation
 After pushing, verify the change works in an actual browser. Use `browser profile=openclaw` against the running instance. Take a screenshot if the change is visual. If you can't validate it, say so — don't claim it works.
 
-### 3. Cache busters — ALWAYS bump them
-Every time you change a `.js` or `.css` file in `public/`, bump the cache buster in `index.html`. This has caused 7 separate production regressions. Use:
-```bash
-NEWV=$(date +%s) && sed -i "s/v=[0-9]*/v=$NEWV/g" public/index.html
-```
-Do this in the SAME commit as the code change, not as a follow-up.
+### 3. Cache busters are automatic — do NOT manually edit them
+Cache busters are injected automatically by the Go server at startup. The `__BUST__` placeholder in `index.html` is replaced with a Unix timestamp when the server reads the file. No manual bumping needed — every server restart picks up new asset versions. Do NOT replace `__BUST__` with hardcoded timestamps.
 
 ### 4. Verify API response shape before building UI
 Before writing client code that consumes an API endpoint, check what the endpoint ACTUALLY returns. Use `curl` or check the server code. Don't assume fields exist — grouped packets (`groupByHash=true`) have different fields than raw packets. This has caused multiple breakages.
@@ -90,6 +113,33 @@ Never use `git add -A` or `git add .`. Always list files explicitly: `git add fi
 
 ### 10. Don't regress performance
 The packets page loads 30K+ packets. Don't add per-packet API calls. Don't add O(n²) loops. Client-side filtering is preferred over server-side. If you need data from the server, fetch it once and cache it.
+
+### 11. PR descriptions must be clean markdown
+When opening a pull request, the description must be **valid, readable markdown**. Use real newlines (not `\n` literals), proper code fences, and correct heading syntax. Write it using `--body-file -` (piped from a heredoc or file), never inline `--body` with escaped characters. If the description renders as garbage, fix it before requesting review. This is the first thing reviewers see.
+
+### 12. Post a follow-up comment when review feedback is addressed
+When you push fixes for review comments, post a comment on the PR listing what was changed and the commit hash. Reviewers should not have to dig through commits to find what was fixed. Format: "Review feedback addressed (commit `abc1234`)" followed by a numbered list of what was done.
+
+### 13. Use git worktrees for parallel work — never pollute the main checkout
+Multiple agents work in parallel. The main clone (`C:\Projects\meshcore-analyzer\`) must stay on `master` and never be modified directly.
+
+**Implementation agents** must create a dedicated worktree before making any changes:
+```bash
+git worktree add _wt-<branch-name> -b <branch-name> origin/master
+cd _wt-<branch-name>
+# ... do all work here ...
+```
+After PR is merged, clean up: `git worktree remove _wt-<branch-name>`
+
+**Review agents** must NEVER read files from the working tree. Use git commands to read the remote branch directly:
+```bash
+git fetch origin <branch>
+git show origin/<branch>:<path/to/file>      # read a specific file
+git diff origin/master..origin/<branch>       # see the full diff
+```
+The working tree may have a different branch checked out. Reading it will give you wrong code.
+
+**Periodic cleanup**: run `git worktree prune` to remove stale worktree references.
 
 ## MeshCore Firmware — Source of Truth
 
@@ -297,7 +347,7 @@ One logical change per commit. Each commit is deployable. Each commit has its te
 
 | Pitfall | Times it happened | Prevention |
 |---------|-------------------|------------|
-| Forgot cache busters | 7 | Always bump in same commit |
+| Forgot cache busters | 7 | Now automatic — `__BUST__` replaced at server startup |
 | Grouped packets missing fields | 3 | curl the actual API first |
 | last_seen vs last_heard mismatch | 4 | Always use `last_heard \|\| last_seen` |
 | CSS selectors don't match SVG | 2 | Manipulate SVG in JS after generation |
@@ -311,6 +361,12 @@ One logical change per commit. Each commit is deployable. Each commit has its te
 ## File Naming
 - Tests: `test-{feature}.js` in repo root
 - No build step, no transpilation — write ES2020 for server, ES5/6 for frontend (broad browser support)
+
+### Deep Linking
+All new UI states that a user might want to share or bookmark MUST be reflected in the URL hash.
+This includes: tabs, filters, selected items, view modes. Use query parameters on the hash
+(e.g., `#/packets?observer=ABC&timeRange=24h`) for filter state.
+Existing patterns: `#/nodes/{pubkey}?section=node-neighbors`, `#/analytics?tab=collisions`, `#/packets/{hash}`.
 
 ## What NOT to Do
 - **Don't check in private information** — no names, API keys, tokens, passwords, IP addresses, personal data, or any identifying information. This is a PUBLIC repo.

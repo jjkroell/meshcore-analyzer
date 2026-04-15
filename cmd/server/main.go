@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"flag"
 	"fmt"
@@ -12,6 +13,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -100,6 +102,11 @@ func main() {
 	if dbPath != "" {
 		cfg.DBPath = dbPath
 	}
+	if cfg.APIKey == "" {
+		log.Printf("[security] WARNING: no apiKey configured — write endpoints are BLOCKED (set apiKey in config.json to enable them)")
+	} else if IsWeakAPIKey(cfg.APIKey) {
+		log.Printf("[security] WARNING: API key is weak or a known default — write endpoints are vulnerable")
+	}
 
 	// Resolve DB path
 	resolvedDB := cfg.ResolveDBPath(configDir)
@@ -110,7 +117,13 @@ func main() {
 	if err != nil {
 		log.Fatalf("[db] failed to open %s: %v", resolvedDB, err)
 	}
-	defer database.Close()
+	var dbCloseOnce sync.Once
+	dbClose := func() error {
+		var err error
+		dbCloseOnce.Do(func() { err = database.Close() })
+		return err
+	}
+	defer dbClose()
 
 	// Verify DB has expected tables
 	var tableName string
@@ -128,10 +141,86 @@ func main() {
 	}
 
 	// In-memory packet store
-	store := NewPacketStore(database, cfg.PacketStore)
+	store := NewPacketStore(database, cfg.PacketStore, cfg.CacheTTL)
 	if err := store.Load(); err != nil {
 		log.Fatalf("[store] failed to load: %v", err)
 	}
+
+	// Initialize persisted neighbor graph
+	dbPath = database.path
+	if err := ensureNeighborEdgesTable(dbPath); err != nil {
+		log.Printf("[neighbor] warning: could not create neighbor_edges table: %v", err)
+	}
+	// Add resolved_path column if missing.
+	// NOTE on startup ordering (review item #10): ensureResolvedPathColumn runs AFTER
+	// OpenDB/detectSchema, so db.hasResolvedPath will be false on first run with a
+	// pre-existing DB. This means Load() won't SELECT resolved_path from SQLite.
+	// Async backfill runs after HTTP starts (see backfillResolvedPathsAsync below)
+	// AND to SQLite. On next restart, detectSchema finds the column and Load() reads it.
+	if err := ensureResolvedPathColumn(dbPath); err != nil {
+		log.Printf("[store] warning: could not add resolved_path column: %v", err)
+	} else {
+		database.hasResolvedPath = true // detectSchema ran before column was added; fix the flag
+	}
+
+	// Load or build neighbor graph
+	if neighborEdgesTableExists(database.conn) {
+		store.graph = loadNeighborEdgesFromDB(database.conn)
+		log.Printf("[neighbor] loaded persisted neighbor graph")
+	} else {
+		log.Printf("[neighbor] no persisted edges found, will build in background...")
+		store.graph = NewNeighborGraph() // empty graph — gets populated by background goroutine
+		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					log.Printf("[neighbor] graph build panic recovered: %v", r)
+				}
+			}()
+			rw, rwErr := openRW(dbPath)
+			if rwErr == nil {
+				edgeCount := buildAndPersistEdges(store, rw)
+				rw.Close()
+				log.Printf("[neighbor] persisted %d edges", edgeCount)
+			}
+			built := BuildFromStore(store)
+			store.mu.Lock()
+			store.graph = built
+			store.mu.Unlock()
+			log.Printf("[neighbor] graph build complete")
+		}()
+	}
+
+	// Initial pickBestObservation runs in background — doesn't need to block HTTP.
+	// API serves best-effort data until this completes (~10s for 100K txs).
+	// Processes in chunks of 5000, releasing the lock between chunks so API
+	// handlers remain responsive.
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("[store] pickBestObservation panic recovered: %v", r)
+			}
+		}()
+		const chunkSize = 5000
+		store.mu.RLock()
+		totalPackets := len(store.packets)
+		store.mu.RUnlock()
+
+		for i := 0; i < totalPackets; i += chunkSize {
+			end := i + chunkSize
+			if end > totalPackets {
+				end = totalPackets
+			}
+			store.mu.Lock()
+			for j := i; j < end && j < len(store.packets); j++ {
+				pickBestObservation(store.packets[j])
+			}
+			store.mu.Unlock()
+			if end < totalPackets {
+				time.Sleep(10 * time.Millisecond) // yield to API handlers
+			}
+		}
+		log.Printf("[store] initial pickBestObservation complete (%d transmissions)", totalPackets)
+	}()
 
 	// WebSocket hub
 	hub := NewHub()
@@ -168,6 +257,110 @@ func main() {
 	stopEviction := store.StartEvictionTicker()
 	defer stopEviction()
 
+	// Auto-prune old packets if retention.packetDays is configured
+	var stopPrune func()
+	if cfg.Retention != nil && cfg.Retention.PacketDays > 0 {
+		days := cfg.Retention.PacketDays
+		pruneTicker := time.NewTicker(24 * time.Hour)
+		pruneDone := make(chan struct{})
+		stopPrune = func() {
+			pruneTicker.Stop()
+			close(pruneDone)
+		}
+		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					log.Printf("[prune] panic recovered: %v", r)
+				}
+			}()
+			time.Sleep(1 * time.Minute)
+			if n, err := database.PruneOldPackets(days); err != nil {
+				log.Printf("[prune] error: %v", err)
+			} else {
+				log.Printf("[prune] deleted %d transmissions older than %d days", n, days)
+			}
+			for {
+				select {
+				case <-pruneTicker.C:
+					if n, err := database.PruneOldPackets(days); err != nil {
+						log.Printf("[prune] error: %v", err)
+					} else {
+						log.Printf("[prune] deleted %d transmissions older than %d days", n, days)
+					}
+				case <-pruneDone:
+					return
+				}
+			}
+		}()
+		log.Printf("[prune] auto-prune enabled: packets older than %d days will be removed daily", days)
+	}
+
+	// Auto-prune old metrics
+	var stopMetricsPrune func()
+	{
+		metricsDays := cfg.MetricsRetentionDays()
+		metricsPruneTicker := time.NewTicker(24 * time.Hour)
+		metricsPruneDone := make(chan struct{})
+		stopMetricsPrune = func() {
+			metricsPruneTicker.Stop()
+			close(metricsPruneDone)
+		}
+		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					log.Printf("[metrics-prune] panic recovered: %v", r)
+				}
+			}()
+			time.Sleep(2 * time.Minute) // stagger after packet prune
+			database.PruneOldMetrics(metricsDays)
+			for {
+				select {
+				case <-metricsPruneTicker.C:
+					database.PruneOldMetrics(metricsDays)
+				case <-metricsPruneDone:
+					return
+				}
+			}
+		}()
+		log.Printf("[metrics-prune] auto-prune enabled: metrics older than %d days", metricsDays)
+	}
+
+	// Auto-prune old neighbor edges
+	var stopEdgePrune func()
+	{
+		maxAgeDays := cfg.NeighborMaxAgeDays()
+		edgePruneTicker := time.NewTicker(24 * time.Hour)
+		edgePruneDone := make(chan struct{})
+		stopEdgePrune = func() {
+			edgePruneTicker.Stop()
+			close(edgePruneDone)
+		}
+		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					log.Printf("[neighbor-prune] panic recovered: %v", r)
+				}
+			}()
+			time.Sleep(4 * time.Minute) // stagger after metrics prune
+			store.mu.RLock()
+			g := store.graph
+			store.mu.RUnlock()
+			PruneNeighborEdges(dbPath, g, maxAgeDays)
+			for {
+				select {
+				case <-edgePruneTicker.C:
+					store.mu.RLock()
+					g := store.graph
+					store.mu.RUnlock()
+					PruneNeighborEdges(dbPath, g, maxAgeDays)
+				case <-edgePruneDone:
+					return
+				}
+			}
+		}()
+		log.Printf("[neighbor-prune] auto-prune enabled: edges older than %d days", maxAgeDays)
+	}
+
 	// Graceful shutdown
 	httpServer := &http.Server{
 		Addr:         fmt.Sprintf(":%d", cfg.Port),
@@ -180,24 +373,80 @@ func main() {
 	go func() {
 		sigCh := make(chan os.Signal, 1)
 		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-		<-sigCh
-		log.Println("[server] shutting down...")
+		sig := <-sigCh
+		log.Printf("[server] received %v, shutting down...", sig)
+
+		// 1. Stop accepting new WebSocket/poll data
 		poller.Stop()
-		httpServer.Close()
+
+		// 1b. Stop auto-prune ticker
+		if stopPrune != nil {
+			stopPrune()
+		}
+		if stopMetricsPrune != nil {
+			stopMetricsPrune()
+		}
+		if stopEdgePrune != nil {
+			stopEdgePrune()
+		}
+
+		// 2. Gracefully drain HTTP connections (up to 15s)
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		if err := httpServer.Shutdown(ctx); err != nil {
+			log.Printf("[server] HTTP shutdown error: %v", err)
+		}
+
+		// 3. Close WebSocket hub
+		hub.Close()
+
+		// 4. Close database (release SQLite WAL lock)
+		if err := dbClose(); err != nil {
+			log.Printf("[server] DB close error: %v", err)
+		}
+		log.Println("[server] shutdown complete")
 	}()
 
 	log.Printf("[server] CoreScope (Go) listening on http://localhost:%d", cfg.Port)
+
+	// Start async backfill in background — HTTP is now available.
+	go backfillResolvedPathsAsync(store, dbPath, 5000, 100*time.Millisecond, cfg.BackfillHours())
+
 	if err := httpServer.ListenAndServe(); err != http.ErrServerClosed {
 		log.Fatalf("[server] %v", err)
 	}
 }
 
 // spaHandler serves static files, falling back to index.html for SPA routes.
+// It reads index.html once at creation time and replaces the __BUST__ placeholder
+// with a Unix timestamp so browsers fetch fresh JS/CSS after each server restart.
 func spaHandler(root string, fs http.Handler) http.Handler {
+	// Pre-process index.html: replace __BUST__ with a cache-bust timestamp
+	indexPath := filepath.Join(root, "index.html")
+	rawHTML, err := os.ReadFile(indexPath)
+	if err != nil {
+		log.Printf("[static] warning: could not read index.html for cache-bust: %v", err)
+		rawHTML = []byte("<!DOCTYPE html><html><body><h1>CoreScope</h1><p>index.html not found</p></body></html>")
+	}
+	bustValue := fmt.Sprintf("%d", time.Now().Unix())
+	indexHTML := []byte(strings.ReplaceAll(string(rawHTML), "__BUST__", bustValue))
+	log.Printf("[static] cache-bust value: %s", bustValue)
+
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Serve pre-processed index.html for root and /index.html
+		if r.URL.Path == "/" || r.URL.Path == "/index.html" {
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
+			w.Write(indexHTML)
+			return
+		}
+
 		path := filepath.Join(root, r.URL.Path)
 		if _, err := os.Stat(path); os.IsNotExist(err) {
-			http.ServeFile(w, r, filepath.Join(root, "index.html"))
+			// SPA fallback — serve pre-processed index.html
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
+			w.Write(indexHTML)
 			return
 		}
 		// Disable caching for JS/CSS/HTML

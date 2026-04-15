@@ -29,11 +29,13 @@
   function setLevel(level) { localStorage.setItem(PREF_KEY, level); }
 
   function init(container) {
-    if (!localStorage.getItem(PREF_KEY)) {
-      showChooser(container);
-      return;
-    }
     renderHome(container);
+    // iOS Safari: position:fixed elements mis-position after large content renders.
+    // Micro-scroll forces the browser to reposition fixed elements correctly.
+    setTimeout(function() {
+      window.scrollTo(0, window.scrollY + 1);
+      window.scrollTo(0, window.scrollY - 1);
+    }, 300);
   }
 
   function showChooser(container) {
@@ -69,13 +71,19 @@
       <section class="home-hero">
         <h1>${hasNodes ? 'My Mesh' : escapeHtml(homeCfg?.heroTitle || siteName)}</h1>
         <p>${hasNodes ? 'Your nodes at a glance. Add more by searching below.' : escapeHtml(homeCfg?.heroSubtitle || 'Find your nodes to start monitoring them.')}</p>
+        ${hasNodes ? '<p class="home-hero-sub">Favorited nodes appear below your claimed nodes.</p>' : ''}
         <div class="home-search-wrap">
           <input type="text" id="homeSearch" placeholder="Search by node name or public key…" autocomplete="off" aria-label="Search nodes" role="combobox" aria-expanded="false" aria-owns="homeSuggest" aria-autocomplete="list" aria-activedescendant="">
           <div class="home-suggest" id="homeSuggest" role="listbox"></div>
         </div>
       </section>
 
-      ${hasNodes ? '<div class="my-nodes-grid" id="myNodesGrid"><div class="my-nodes-loading">Loading your nodes…</div></div>' : '<div class="my-nodes-grid" id="myNodesGrid"></div>'}
+      <div class="home-section" id="myNodesSection" ${hasNodes ? '' : 'style="display:none"'}>
+        <div class="home-section-header">
+          <h2 class="home-section-title">My Nodes</h2>
+        </div>
+        <div class="my-nodes-grid" id="myNodesGrid">${hasNodes ? '<div class="my-nodes-loading">Loading your nodes…</div>' : ''}</div>
+      </div>
 
       ${!hasNodes ? `
         <div class="onboarding-prompt">
@@ -85,46 +93,58 @@
         </div>
       ` : ''}
 
+      <div class="home-section" id="favSection" style="display:none">
+        <div class="home-section-header">
+          <h2 class="home-section-title">Favorites</h2>
+        </div>
+        <div class="my-nodes-grid" id="favNodesGrid"></div>
+      </div>
+
       <div class="home-detail-area">
         <div class="home-health" id="homeHealth"></div>
         <div class="home-journey" id="homeJourney"></div>
       </div>
 
-      <div class="home-stats" id="homeStats"></div>
-
-      ${exp ? '' : `
-      <section class="home-checklist">
-        <h2>🚀 Getting on the mesh${homeCfg?.steps ? '' : ' — SF Bay Area'}</h2>
-        ${checklist(homeCfg)}
-      </section>`}
-
-      <section class="home-footer">
-        <div class="home-footer-links">
-          ${homeCfg?.footerLinks ? homeCfg.footerLinks.map(l => `<a href="${escapeAttr(l.url)}" class="home-footer-link" target="_blank" rel="noopener">${escapeHtml(l.label)}</a>`).join('') : `
-          <a href="#/packets" class="home-footer-link">📦 Packets</a>
-          <a href="#/map" class="home-footer-link">🗺️ Network Map</a>
-          <a href="#/live" class="home-footer-link">🔴 Live</a>
-          <a href="#/nodes" class="home-footer-link">📡 All Nodes</a>
-          <a href="#/channels" class="home-footer-link">💬 Channels</a>`}
+      <div class="home-appearance">
+        <span class="home-appearance-label">Appearance</span>
+        <div class="home-theme-toggle" id="homeThemeToggle">
+          <button class="theme-opt" data-theme="light" title="Light mode">☀️ Light</button>
+          <button class="theme-opt" data-theme="dark" title="Dark mode">🌙 Dark</button>
         </div>
-        <div class="home-level-toggle">
-          <small>${exp ? 'Want setup guides? ' : 'Already know MeshCore? '}
-          <a href="#" id="toggleLevel" style="color:var(--accent)">${exp ? 'Show new user tips' : 'Hide guides'}</a></small>
-        </div>
-      </section>
+      </div>
+
     `;
 
-    document.getElementById('toggleLevel')?.addEventListener('click', (e) => {
-      e.preventDefault();
-      setLevel(exp ? 'new' : 'experienced');
-      renderHome(container);
-    });
-
     setupSearch(container);
-    loadStats();
     if (hasNodes) loadMyNodes();
+    loadFavorites();
 
-    // Checklist accordion
+    // Theme toggle
+    const themeToggle = container.querySelector('#homeThemeToggle');
+    if (themeToggle) {
+      function syncThemeBtns() {
+        const current = document.documentElement.getAttribute('data-theme') || 'dark';
+        themeToggle.querySelectorAll('.theme-opt').forEach(btn => {
+          btn.classList.toggle('active', btn.dataset.theme === current);
+        });
+      }
+      syncThemeBtns();
+      themeToggle.addEventListener('click', e => {
+        const btn = e.target.closest('.theme-opt');
+        if (!btn) return;
+        const darkToggle = document.getElementById('darkModeToggle');
+        if (darkToggle) darkToggle.click();
+        else {
+          const cur = document.documentElement.getAttribute('data-theme') || 'dark';
+          const next = cur === 'dark' ? 'light' : 'dark';
+          document.documentElement.setAttribute('data-theme', next);
+          localStorage.setItem('meshcore-theme', next);
+        }
+        setTimeout(syncThemeBtns, 50);
+      });
+    }
+
+    // Checklist accordion (retained for config-driven checklists)
     container.querySelectorAll('.checklist-q').forEach(q => {
       const toggle = () => {
         const item = q.parentElement;
@@ -243,10 +263,13 @@
       if (onboard) onboard.style.display = 'none';
     }
 
+    const section = document.getElementById('myNodesSection');
     if (!myNodes.length) {
       grid.innerHTML = '';
+      if (section) section.style.display = 'none';
       return;
     }
+    if (section) section.style.display = '';
 
     const cards = await Promise.all(myNodes.map(async (mn) => {
       try {
@@ -256,7 +279,8 @@
         const obs = h.observers || [];
 
         const age = stats.lastHeard ? Date.now() - new Date(stats.lastHeard).getTime() : null;
-        const status = age === null ? 'silent' : age < HEALTH_THRESHOLDS.nodeDegradedMs ? 'healthy' : age < HEALTH_THRESHOLDS.nodeSilentMs ? 'degraded' : 'silent';
+        const _th = getHealthThresholds(node.role);
+        const status = age === null ? 'silent' : age < _th.degradedMs ? 'healthy' : age < _th.silentMs ? 'degraded' : 'silent';
         const statusDot = status === 'healthy' ? '🟢' : status === 'degraded' ? '🟡' : '🔴';
         const statusText = status === 'healthy' ? 'Active' : status === 'degraded' ? 'Degraded' : 'Silent';
         const name = node.name || mn.name || truncate(mn.pubkey, 12);
@@ -350,6 +374,97 @@
     });
   }
 
+  // ==================== FAVORITES ZONE ====================
+  async function loadFavorites() {
+    const grid = document.getElementById('favNodesGrid');
+    const section = document.getElementById('favSection');
+    if (!grid || !section) return;
+
+    const favs = typeof getFavorites === 'function' ? getFavorites() : [];
+    // Exclude nodes already in My Nodes to avoid duplication
+    const myKeys = new Set(getMyNodes().map(n => n.pubkey));
+    const favOnly = favs.filter(pk => !myKeys.has(pk));
+
+    if (!favOnly.length) {
+      section.style.display = 'none';
+      return;
+    }
+    section.style.display = '';
+    grid.innerHTML = '<div class="my-nodes-loading">Loading favorites…</div>';
+
+    const cards = await Promise.all(favOnly.map(async (pubkey) => {
+      try {
+        const h = await api('/nodes/' + encodeURIComponent(pubkey) + '/health', { ttl: CLIENT_TTL.nodeHealth });
+        const node = h.node || {};
+        const stats = h.stats || {};
+        const obs = h.observers || [];
+
+        const age = stats.lastHeard ? Date.now() - new Date(stats.lastHeard).getTime() : null;
+        const _th = getHealthThresholds(node.role);
+        const status = age === null ? 'silent' : age < _th.degradedMs ? 'healthy' : age < _th.silentMs ? 'degraded' : 'silent';
+        const statusDot = status === 'healthy' ? '🟢' : status === 'degraded' ? '🟡' : '🔴';
+        const statusText = status === 'healthy' ? 'Active' : status === 'degraded' ? 'Degraded' : 'Silent';
+        const name = node.name || truncate(pubkey, 12);
+
+        return `<div class="my-node-card fav-node-card ${status}" data-key="${pubkey}" tabindex="0" role="button">
+          <div class="mnc-header">
+            <div class="mnc-status">${statusDot}</div>
+            <div class="mnc-name">${escapeHtml(name)}</div>
+            <div class="mnc-role">${node.role || '?'}</div>
+            <button class="mnc-remove fav-remove" data-key="${pubkey}" title="Remove from Favorites" aria-label="Remove ${escapeAttr(name)} from Favorites">✕</button>
+          </div>
+          <div class="mnc-status-text">${statusText}${stats.lastHeard ? ' · ' + timeAgo(stats.lastHeard) : ''}</div>
+          <div class="mnc-metrics">
+            <div class="mnc-metric"><div class="mnc-val">${stats.packetsToday ?? 0}</div><div class="mnc-lbl">Packets today</div></div>
+            <div class="mnc-metric"><div class="mnc-val">${obs.length}</div><div class="mnc-lbl">Observers</div></div>
+          </div>
+          ${obs.length ? `<div class="mnc-observers"><strong>Heard by:</strong> ${obs.map(o => escapeHtml(o.observer_name || o.observer_id)).join(', ')}</div>` : ''}
+          <div class="mnc-actions">
+            <button class="mnc-btn" data-action="health" data-key="${pubkey}">Full health →</button>
+            <button class="mnc-btn" data-action="packets" data-key="${pubkey}">View packets →</button>
+          </div>
+        </div>`;
+      } catch {
+        return `<div class="my-node-card fav-node-card silent" data-key="${pubkey}" tabindex="0" role="button">
+          <div class="mnc-header">
+            <div class="mnc-status">❓</div>
+            <div class="mnc-name">${escapeHtml(truncate(pubkey, 12))}</div>
+            <button class="mnc-remove fav-remove" data-key="${pubkey}" title="Remove from Favorites">✕</button>
+          </div>
+          <div class="mnc-status-text">Could not load data</div>
+        </div>`;
+      }
+    }));
+
+    grid.innerHTML = cards.join('');
+
+    // Remove buttons
+    grid.querySelectorAll('.fav-remove').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        if (typeof toggleFavorite === 'function') toggleFavorite(btn.dataset.key);
+        loadFavorites();
+      });
+    });
+
+    // Action buttons
+    grid.querySelectorAll('.mnc-btn').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        if (btn.dataset.action === 'health') loadHealth(btn.dataset.key);
+        if (btn.dataset.action === 'packets') window.location.hash = '#/packets/' + btn.dataset.key;
+      });
+    });
+
+    // Card click → health
+    grid.querySelectorAll('.fav-node-card').forEach(card => {
+      card.addEventListener('click', (e) => {
+        if (e.target.closest('.mnc-remove') || e.target.closest('.mnc-btn')) return;
+        loadHealth(card.dataset.key);
+      });
+    });
+  }
+
   function buildSparkline(packets) {
     if (!packets.length) return '';
     // Group into hourly buckets over last 24h
@@ -402,12 +517,13 @@
       const observers = h.observers || [];
       const claimed = isMyNode(pubkey);
 
+      const _th2 = getHealthThresholds(node.role);
       let status = 'silent', color = 'red', statusMsg = 'Not heard in 24+ hours';
       if (stats.lastHeard) {
         const ageMs = Date.now() - new Date(stats.lastHeard).getTime();
         const ago = timeAgo(stats.lastHeard);
-        if (ageMs < HEALTH_THRESHOLDS.nodeDegradedMs) { status = 'healthy'; color = 'green'; statusMsg = `Last heard ${ago}`; }
-        else if (ageMs < HEALTH_THRESHOLDS.nodeSilentMs) { status = 'degraded'; color = 'yellow'; statusMsg = `Last heard ${ago}`; }
+        if (ageMs < _th2.degradedMs) { status = 'healthy'; color = 'green'; statusMsg = `Last heard ${ago}`; }
+        else if (ageMs < _th2.silentMs) { status = 'degraded'; color = 'yellow'; statusMsg = `Last heard ${ago}`; }
         else { statusMsg = `Last heard ${ago}`; }
       }
 
@@ -511,27 +627,35 @@
   function timeSinceMs(d) { return Date.now() - d.getTime(); }
 
   function checklist(homeCfg) {
-    if (homeCfg?.checklist) {
-      return homeCfg.checklist.map(i => `<div class="checklist-item"><div class="checklist-q" role="button" tabindex="0" aria-expanded="false">${escapeHtml(i.question)}</div><div class="checklist-a">${window.miniMarkdown ? miniMarkdown(i.answer) : escapeHtml(i.answer)}</div></div>`).join('');
+    var html = '';
+    // Render steps (getting started guide)
+    if (homeCfg?.steps?.length) {
+      html += homeCfg.steps.map(s => `<div class="checklist-item"><div class="checklist-q" role="button" tabindex="0" aria-expanded="false">${escapeHtml(s.emoji || '')} ${escapeHtml(s.title)}</div><div class="checklist-a">${window.miniMarkdown ? miniMarkdown(s.description) : escapeHtml(s.description)}</div></div>`).join('');
     }
-    if (homeCfg?.steps) {
-      return homeCfg.steps.map(s => `<div class="checklist-item"><div class="checklist-q" role="button" tabindex="0" aria-expanded="false">${escapeHtml(s.emoji || '')} ${escapeHtml(s.title)}</div><div class="checklist-a">${window.miniMarkdown ? miniMarkdown(s.description) : escapeHtml(s.description)}</div></div>`).join('');
+    // Render FAQ/checklist (additional Q&A)
+    if (homeCfg?.checklist?.length) {
+      if (html) html += '<h3 style="margin:24px 0 12px;font-size:16px">❓ FAQ</h3>';
+      html += homeCfg.checklist.map(i => `<div class="checklist-item"><div class="checklist-q" role="button" tabindex="0" aria-expanded="false">${escapeHtml(i.question)}</div><div class="checklist-a">${window.miniMarkdown ? miniMarkdown(i.answer) : escapeHtml(i.answer)}</div></div>`).join('');
     }
-    const items = [
-      { q: '💬 First: Join the Bay Area MeshCore Discord',
-        a: '<p>The community Discord is the best place to get help and find local mesh enthusiasts.</p><p><a href="https://discord.gg/q59JzsYTst" target="_blank" rel="noopener" style="color:var(--accent);font-weight:600">Join the Discord ↗</a></p><p>Start with <strong>#intro-to-meshcore</strong> — it has detailed setup instructions.</p>' },
-      { q: '🔵 Step 1: Connect via Bluetooth',
-        a: '<p>Flash <strong>BLE companion</strong> firmware from <a href="https://flasher.meshcore.co.uk/" target="_blank" rel="noopener" style="color:var(--accent)">MeshCore Flasher</a>.</p><ul><li>Screenless devices: default PIN <code>123456</code></li><li>Screen devices: random PIN shown on display</li><li>If pairing fails: forget device, reboot, re-pair</li></ul>' },
-      { q: '📻 Step 2: Set the right frequency preset',
-        a: '<p><strong>US Recommended:</strong></p><div style="margin:8px 0;padding:8px 12px;background:var(--surface-1);border-radius:6px;font-family:var(--mono);font-size:.85rem">910.525 MHz · BW 62.5 kHz · SF 7 · CR 5</div><p>Select <strong>"US Recommended"</strong> in the app or flasher.</p>' },
-      { q: '📡 Step 3: Advertise yourself',
-        a: '<p>Tap the signal icon → <strong>Flood</strong> to broadcast your node to the mesh. Companions only advert when you trigger it manually.</p>' },
-      { q: '🔁 Step 4: Check "Heard N repeats"',
-        a: '<ul><li><strong>"Sent"</strong> = transmitted, no confirmation</li><li><strong>"Heard 0 repeats"</strong> = no repeater picked it up</li><li><strong>"Heard 1+ repeats"</strong> = you\'re on the mesh!</li></ul>' },
-      { q: '📍 Repeaters near you?',
-        a: '<p><a href="#/map" style="color:var(--accent)">Check the network map</a> to see active repeaters.</p>' }
-    ];
-    return items.map(i => `<div class="checklist-item"><div class="checklist-q" role="button" tabindex="0" aria-expanded="false">${i.q}</div><div class="checklist-a">${i.a}</div></div>`).join('');
+    // Fallback: Bay Area defaults when no config at all
+    if (!html) {
+      const items = [
+        { q: '💬 First: Join the Bay Area MeshCore Discord',
+          a: '<p>The community Discord is the best place to get help and find local mesh enthusiasts.</p><p><a href="https://discord.gg/q59JzsYTst" target="_blank" rel="noopener" style="color:var(--accent);font-weight:600">Join the Discord ↗</a></p><p>Start with <strong>#intro-to-meshcore</strong> — it has detailed setup instructions.</p>' },
+        { q: '🔵 Step 1: Connect via Bluetooth',
+          a: '<p>Flash <strong>BLE companion</strong> firmware from <a href="https://flasher.meshcore.co.uk/" target="_blank" rel="noopener" style="color:var(--accent)">MeshCore Flasher</a>.</p><ul><li>Screenless devices: default PIN <code>123456</code></li><li>Screen devices: random PIN shown on display</li><li>If pairing fails: forget device, reboot, re-pair</li></ul>' },
+        { q: '📻 Step 2: Set the right frequency preset',
+          a: '<p><strong>US Recommended:</strong></p><div style="margin:8px 0;padding:8px 12px;background:var(--surface-1);border-radius:6px;font-family:var(--mono);font-size:.85rem">910.525 MHz · BW 62.5 kHz · SF 7 · CR 5</div><p>Select <strong>"US Recommended"</strong> in the app or flasher.</p>' },
+        { q: '📡 Step 3: Advertise yourself',
+          a: '<p>Tap the signal icon → <strong>Flood</strong> to broadcast your node to the mesh. Companions only advert when you trigger it manually.</p>' },
+        { q: '🔁 Step 4: Check "Heard N repeats"',
+          a: '<ul><li><strong>"Sent"</strong> = transmitted, no confirmation</li><li><strong>"Heard 0 repeats"</strong> = no repeater picked it up</li><li><strong>"Heard 1+ repeats"</strong> = you\'re on the mesh!</li></ul>' },
+        { q: '📍 Repeaters near you?',
+          a: '<p><a href="#/map" style="color:var(--accent)">Check the network map</a> to see active repeaters.</p>' }
+      ];
+      html = items.map(i => `<div class="checklist-item"><div class="checklist-q" role="button" tabindex="0" aria-expanded="false">${i.q}</div><div class="checklist-a">${i.a}</div></div>`).join('');
+    }
+    return html;
   }
 
   registerPage('home', { init, destroy });

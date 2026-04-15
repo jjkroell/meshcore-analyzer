@@ -219,7 +219,7 @@ func TestUpsertObserver(t *testing.T) {
 	}
 	defer s.Close()
 
-	if err := s.UpsertObserver("obs1", "Observer1", "SJC", nil); err != nil {
+	if err := s.UpsertObserver("obs1", "Observer1", " sjc ", nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -243,10 +243,18 @@ func TestUpsertObserverWithMeta(t *testing.T) {
 	battery := 3500
 	uptime := int64(86400)
 	noise := -115.5
+	model := "L1"
+	firmware := "v1.2.3"
+	clientVersion := "2.4.1"
+	radio := "SX1262"
 	meta := &ObserverMeta{
-		BatteryMv:  &battery,
-		UptimeSecs: &uptime,
-		NoiseFloor: &noise,
+		Model:         &model,
+		Firmware:      &firmware,
+		ClientVersion: &clientVersion,
+		Radio:         &radio,
+		BatteryMv:     &battery,
+		UptimeSecs:    &uptime,
+		NoiseFloor:    &noise,
 	}
 
 	if err := s.UpsertObserver("obs1", "Observer1", "SJC", meta); err != nil {
@@ -257,10 +265,23 @@ func TestUpsertObserverWithMeta(t *testing.T) {
 	var batteryMv int
 	var uptimeSecs int64
 	var noiseFloor float64
-	err = s.db.QueryRow("SELECT battery_mv, uptime_secs, noise_floor FROM observers WHERE id = 'obs1'").
-		Scan(&batteryMv, &uptimeSecs, &noiseFloor)
+	var gotModel, gotFirmware, gotClientVersion, gotRadio string
+	err = s.db.QueryRow("SELECT model, firmware, client_version, radio, battery_mv, uptime_secs, noise_floor FROM observers WHERE id = 'obs1'").
+		Scan(&gotModel, &gotFirmware, &gotClientVersion, &gotRadio, &batteryMv, &uptimeSecs, &noiseFloor)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if gotModel != model {
+		t.Errorf("model=%s, want %s", gotModel, model)
+	}
+	if gotFirmware != firmware {
+		t.Errorf("firmware=%s, want %s", gotFirmware, firmware)
+	}
+	if gotClientVersion != clientVersion {
+		t.Errorf("client_version=%s, want %s", gotClientVersion, clientVersion)
+	}
+	if gotRadio != radio {
+		t.Errorf("radio=%s, want %s", gotRadio, radio)
 	}
 	if batteryMv != 3500 {
 		t.Errorf("battery_mv=%d, want 3500", batteryMv)
@@ -297,9 +318,17 @@ func TestUpsertObserverMetaPreservesExisting(t *testing.T) {
 	// First upsert with metadata
 	battery := 3500
 	noise := -115.5
+	model := "L1"
+	firmware := "v1.2.3"
+	clientVersion := "2.4.1"
+	radio := "SX1262"
 	meta := &ObserverMeta{
-		BatteryMv:  &battery,
-		NoiseFloor: &noise,
+		Model:         &model,
+		Firmware:      &firmware,
+		ClientVersion: &clientVersion,
+		Radio:         &radio,
+		BatteryMv:     &battery,
+		NoiseFloor:    &noise,
 	}
 	if err := s.UpsertObserver("obs1", "Observer1", "SJC", meta); err != nil {
 		t.Fatal(err)
@@ -312,8 +341,21 @@ func TestUpsertObserverMetaPreservesExisting(t *testing.T) {
 
 	var batteryMv int
 	var noiseFloor float64
-	s.db.QueryRow("SELECT battery_mv, noise_floor FROM observers WHERE id = 'obs1'").
-		Scan(&batteryMv, &noiseFloor)
+	var gotModel, gotFirmware, gotClientVersion, gotRadio string
+	s.db.QueryRow("SELECT model, firmware, client_version, radio, battery_mv, noise_floor FROM observers WHERE id = 'obs1'").
+		Scan(&gotModel, &gotFirmware, &gotClientVersion, &gotRadio, &batteryMv, &noiseFloor)
+	if gotModel != model {
+		t.Errorf("model=%s after nil-meta upsert, want %s (preserved)", gotModel, model)
+	}
+	if gotFirmware != firmware {
+		t.Errorf("firmware=%s after nil-meta upsert, want %s (preserved)", gotFirmware, firmware)
+	}
+	if gotClientVersion != clientVersion {
+		t.Errorf("client_version=%s after nil-meta upsert, want %s (preserved)", gotClientVersion, clientVersion)
+	}
+	if gotRadio != radio {
+		t.Errorf("radio=%s after nil-meta upsert, want %s (preserved)", gotRadio, radio)
+	}
 	if batteryMv != 3500 {
 		t.Errorf("battery_mv=%d after nil-meta upsert, want 3500 (preserved)", batteryMv)
 	}
@@ -325,13 +367,29 @@ func TestUpsertObserverMetaPreservesExisting(t *testing.T) {
 func TestExtractObserverMeta(t *testing.T) {
 	// Float values from JSON (typical MQTT payload)
 	msg := map[string]interface{}{
-		"battery_mv":  3500.0,
-		"uptime_secs": 86400.0,
-		"noise_floor": -115.5,
+		"model":            "L1",
+		"firmware_version": "v1.2.3",
+		"clientVersion":    "2.4.1",
+		"radio":            "SX1262",
+		"battery_mv":       3500.0,
+		"uptime_secs":      86400.0,
+		"noise_floor":      -115.5,
 	}
 	meta := extractObserverMeta(msg)
 	if meta == nil {
 		t.Fatal("expected non-nil meta")
+	}
+	if meta.Model == nil || *meta.Model != "L1" {
+		t.Errorf("Model=%v, want L1", meta.Model)
+	}
+	if meta.Firmware == nil || *meta.Firmware != "v1.2.3" {
+		t.Errorf("Firmware=%v, want v1.2.3", meta.Firmware)
+	}
+	if meta.ClientVersion == nil || *meta.ClientVersion != "2.4.1" {
+		t.Errorf("ClientVersion=%v, want 2.4.1", meta.ClientVersion)
+	}
+	if meta.Radio == nil || *meta.Radio != "SX1262" {
+		t.Errorf("Radio=%v, want SX1262", meta.Radio)
 	}
 	if meta.BatteryMv == nil || *meta.BatteryMv != 3500 {
 		t.Errorf("BatteryMv=%v, want 3500", meta.BatteryMv)
@@ -356,6 +414,38 @@ func TestExtractObserverMeta(t *testing.T) {
 	meta3 := extractObserverMeta(map[string]interface{}{})
 	if meta3 != nil {
 		t.Errorf("expected nil for empty message, got %v", meta3)
+	}
+
+	// firmware/client snake_case fields should be captured too
+	msg4 := map[string]interface{}{
+		"firmware":       "v9.9.9",
+		"client_version": "3.0.0",
+	}
+	meta4 := extractObserverMeta(msg4)
+	if meta4 == nil || meta4.Firmware == nil || *meta4.Firmware != "v9.9.9" {
+		t.Errorf("Firmware=%v, want v9.9.9", meta4)
+	}
+	if meta4 == nil || meta4.ClientVersion == nil || *meta4.ClientVersion != "3.0.0" {
+		t.Errorf("ClientVersion=%v, want 3.0.0", meta4)
+	}
+
+	// When both keys are present, explicit compatibility fields win due extraction order:
+	// firmware_version overrides firmware and clientVersion overrides client_version.
+	msg5 := map[string]interface{}{
+		"firmware":         "v1-legacy",
+		"firmware_version": "v2-canonical",
+		"client_version":   "1.0.0-legacy",
+		"clientVersion":    "2.0.0-canonical",
+	}
+	meta5 := extractObserverMeta(msg5)
+	if meta5 == nil {
+		t.Fatal("expected non-nil meta for dual-key payload")
+	}
+	if meta5.Firmware == nil || *meta5.Firmware != "v2-canonical" {
+		t.Errorf("Firmware precedence mismatch: got %v, want v2-canonical from firmware_version", meta5.Firmware)
+	}
+	if meta5.ClientVersion == nil || *meta5.ClientVersion != "2.0.0-canonical" {
+		t.Errorf("ClientVersion precedence mismatch: got %v, want 2.0.0-canonical from clientVersion", meta5.ClientVersion)
 	}
 }
 
@@ -423,6 +513,56 @@ func TestInsertTransmissionWithObserver(t *testing.T) {
 	s.db.QueryRow("SELECT observer_idx FROM observations LIMIT 1").Scan(&observerIdx)
 	if observerIdx == nil {
 		t.Error("observer_idx should be set when observer exists")
+	}
+}
+
+// #463: Verify that inserting a packet updates the observer's last_seen,
+// so low-traffic observers don't incorrectly appear offline.
+func TestInsertTransmissionUpdatesObserverLastSeen(t *testing.T) {
+	s, err := OpenStore(tempDBPath(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	// Insert observer with an old last_seen
+	if err := s.UpsertObserver("obs1", "Observer1", "SJC", nil); err != nil {
+		t.Fatal(err)
+	}
+	// Backdate last_seen to 2 hours ago
+	oldTime := "2026-03-24T22:00:00Z"
+	s.db.Exec("UPDATE observers SET last_seen = ? WHERE id = ?", oldTime, "obs1")
+
+	// Verify it was backdated
+	var lastSeenBefore string
+	s.db.QueryRow("SELECT last_seen FROM observers WHERE id = ?", "obs1").Scan(&lastSeenBefore)
+	if lastSeenBefore != oldTime {
+		t.Fatalf("expected last_seen=%s, got %s", oldTime, lastSeenBefore)
+	}
+
+	// Insert a packet from this observer
+	data := &PacketData{
+		RawHex:      "0A00D69F",
+		Timestamp:   "2026-03-25T01:00:00Z",
+		ObserverID:  "obs1",
+		Hash:        "lastseentest123456",
+		RouteType:   2,
+		PayloadType: 2,
+		PathJSON:    "[]",
+		DecodedJSON: `{"type":"TXT_MSG"}`,
+	}
+	if _, err := s.InsertTransmission(data); err != nil {
+		t.Fatal(err)
+	}
+
+	// Verify last_seen was updated
+	var lastSeenAfter string
+	s.db.QueryRow("SELECT last_seen FROM observers WHERE id = ?", "obs1").Scan(&lastSeenAfter)
+	if lastSeenAfter == oldTime {
+		t.Error("observer last_seen was NOT updated after packet insertion — low-traffic observers will appear offline")
+	}
+	if lastSeenAfter != "2026-03-25T01:00:00Z" {
+		t.Errorf("expected last_seen=2026-03-25T01:00:00Z, got %s", lastSeenAfter)
 	}
 }
 
@@ -543,7 +683,7 @@ func TestInsertTransmissionEarlierFirstSeen(t *testing.T) {
 	data2 := &PacketData{
 		RawHex:    "0A00D69F",
 		Timestamp: "2026-03-25T06:00:00Z", // earlier
-		Hash:      "firstseen12345678",     // same hash
+		Hash:      "firstseen12345678",    // same hash
 		RouteType: 2,
 	}
 	if _, err := s.InsertTransmission(data2); err != nil {
@@ -770,7 +910,7 @@ func TestInsertTransmissionDedupObservation(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Insert same hash again with same observer (no observerID) — 
+	// Insert same hash again with same observer (no observerID) —
 	// the UNIQUE constraint on observations dedup should handle it
 	if _, err := s.InsertTransmission(data); err != nil {
 		t.Fatal(err)
@@ -1221,5 +1361,524 @@ func TestTelemetryMigrationAddsColumns(t *testing.T) {
 	s.db.QueryRow("SELECT COUNT(*) FROM _migrations WHERE name = 'node_telemetry_v1'").Scan(&count)
 	if count != 1 {
 		t.Errorf("migration node_telemetry_v1 should be recorded, count=%d", count)
+	}
+}
+
+// --- Bug #320: Observer metadata nested stats ---
+
+func TestExtractObserverMetaNestedStats(t *testing.T) {
+	// Real-world MQTT status payload: stats fields nested under "stats"
+	msg := map[string]interface{}{
+		"status":           "online",
+		"origin":           "ObserverName",
+		"model":            "Heltec V3",
+		"firmware_version": "v1.14.0-9f1a3ea",
+		"stats": map[string]interface{}{
+			"battery_mv":  4174.0,
+			"uptime_secs": 80277.0,
+			"noise_floor": -110.0,
+		},
+	}
+	meta := extractObserverMeta(msg)
+	if meta == nil {
+		t.Fatal("expected non-nil meta")
+	}
+	if meta.Model == nil || *meta.Model != "Heltec V3" {
+		t.Errorf("Model=%v, want Heltec V3", meta.Model)
+	}
+	if meta.Firmware == nil || *meta.Firmware != "v1.14.0-9f1a3ea" {
+		t.Errorf("Firmware=%v, want v1.14.0-9f1a3ea", meta.Firmware)
+	}
+	if meta.BatteryMv == nil || *meta.BatteryMv != 4174 {
+		t.Errorf("BatteryMv=%v, want 4174", meta.BatteryMv)
+	}
+	if meta.UptimeSecs == nil || *meta.UptimeSecs != 80277 {
+		t.Errorf("UptimeSecs=%v, want 80277", meta.UptimeSecs)
+	}
+	if meta.NoiseFloor == nil || *meta.NoiseFloor != -110.0 {
+		t.Errorf("NoiseFloor=%v, want -110", meta.NoiseFloor)
+	}
+}
+
+func TestExtractObserverMetaNestedStatsPrecedence(t *testing.T) {
+	// If stats has a value AND top-level has a value, nested wins
+	msg := map[string]interface{}{
+		"battery_mv":  9999.0, // top-level (stale/wrong)
+		"noise_floor": -120.0, // top-level (stale/wrong)
+		"stats": map[string]interface{}{
+			"battery_mv":  4174.0, // nested (correct)
+			"noise_floor": -110.5, // nested (correct)
+		},
+	}
+	meta := extractObserverMeta(msg)
+	if meta == nil {
+		t.Fatal("expected non-nil meta")
+	}
+	if meta.BatteryMv == nil || *meta.BatteryMv != 4174 {
+		t.Errorf("BatteryMv=%v, want 4174 (nested should win over top-level)", meta.BatteryMv)
+	}
+	if meta.NoiseFloor == nil || *meta.NoiseFloor != -110.5 {
+		t.Errorf("NoiseFloor=%v, want -110.5 (nested should win over top-level)", meta.NoiseFloor)
+	}
+}
+
+func TestExtractObserverMetaFlatFallback(t *testing.T) {
+	// Backward compatibility: flat structure (no stats object) still works
+	msg := map[string]interface{}{
+		"battery_mv":  3500.0,
+		"uptime_secs": 86400.0,
+		"noise_floor": -115.5,
+	}
+	meta := extractObserverMeta(msg)
+	if meta == nil {
+		t.Fatal("expected non-nil meta for flat structure")
+	}
+	if meta.BatteryMv == nil || *meta.BatteryMv != 3500 {
+		t.Errorf("BatteryMv=%v, want 3500", meta.BatteryMv)
+	}
+	if meta.UptimeSecs == nil || *meta.UptimeSecs != 86400 {
+		t.Errorf("UptimeSecs=%v, want 86400", meta.UptimeSecs)
+	}
+	if meta.NoiseFloor == nil || *meta.NoiseFloor != -115.5 {
+		t.Errorf("NoiseFloor=%v, want -115.5", meta.NoiseFloor)
+	}
+}
+
+func TestExtractObserverMetaEmptyStats(t *testing.T) {
+	// Empty stats object should not crash, top-level fallback still applies
+	msg := map[string]interface{}{
+		"model": "T-Beam",
+		"stats": map[string]interface{}{},
+	}
+	meta := extractObserverMeta(msg)
+	if meta == nil {
+		t.Fatal("expected non-nil meta (model is present)")
+	}
+	if meta.Model == nil || *meta.Model != "T-Beam" {
+		t.Errorf("Model=%v, want T-Beam", meta.Model)
+	}
+	if meta.BatteryMv != nil {
+		t.Errorf("BatteryMv should be nil, got %v", *meta.BatteryMv)
+	}
+}
+
+func TestExtractObserverMetaStatsNotAMap(t *testing.T) {
+	// stats field is not a map (e.g., string) — should not crash, fall back to top-level
+	msg := map[string]interface{}{
+		"stats":      "invalid",
+		"battery_mv": 3700.0,
+	}
+	meta := extractObserverMeta(msg)
+	if meta == nil {
+		t.Fatal("expected non-nil meta")
+	}
+	if meta.BatteryMv == nil || *meta.BatteryMv != 3700 {
+		t.Errorf("BatteryMv=%v, want 3700 (top-level fallback when stats is not a map)", meta.BatteryMv)
+	}
+}
+
+func TestExtractObserverMetaNoiseFloorFloat(t *testing.T) {
+	// noise_floor migrated to REAL — verify float precision preserved
+	msg := map[string]interface{}{
+		"stats": map[string]interface{}{
+			"noise_floor": -108.75,
+		},
+	}
+	meta := extractObserverMeta(msg)
+	if meta == nil {
+		t.Fatal("expected non-nil meta")
+	}
+	if meta.NoiseFloor == nil || *meta.NoiseFloor != -108.75 {
+		t.Errorf("NoiseFloor=%v, want -108.75", meta.NoiseFloor)
+	}
+}
+
+func TestExtractObserverMetaNestedNilSkipsTopLevel(t *testing.T) {
+	// JSON {"stats": {"battery_mv": null}} decodes to nil value in the map.
+	// Nested nil should suppress top-level fallback (nested wins semantics).
+	msg := map[string]interface{}{
+		"battery_mv": 3700.0,
+		"stats": map[string]interface{}{
+			"battery_mv": nil,
+		},
+	}
+	meta := extractObserverMeta(msg)
+	if meta != nil && meta.BatteryMv != nil {
+		t.Error("nested nil should suppress top-level fallback")
+	}
+}
+
+func TestObsTimestampIndexMigration(t *testing.T) {
+	// Case 1: new DB — OpenStore should create idx_observations_timestamp as part
+	// of the observations table schema.
+	t.Run("NewDB", func(t *testing.T) {
+		s, err := OpenStore(tempDBPath(t))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer s.Close()
+
+		var count int
+		err = s.db.QueryRow(
+			"SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_observations_timestamp'",
+		).Scan(&count)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if count != 1 {
+			t.Error("idx_observations_timestamp should exist on a new DB")
+		}
+
+		var migCount int
+		err = s.db.QueryRow(
+			"SELECT COUNT(*) FROM _migrations WHERE name='obs_timestamp_index_v1'",
+		).Scan(&migCount)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// On a new DB the index is created inline (not via migration), so the
+		// migration row may or may not be recorded — just verify the index exists.
+		_ = migCount
+	})
+
+	// Case 2: existing DB that has the observations table but lacks the index
+	// and lacks the _migrations entry — simulates an older installation.
+	t.Run("MigrationPath", func(t *testing.T) {
+		path := tempDBPath(t)
+
+		// Build a bare-bones DB that mimics an old installation:
+		// observations table exists but idx_observations_timestamp does NOT.
+		db, err := sql.Open("sqlite", path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = db.Exec(`
+			CREATE TABLE IF NOT EXISTS _migrations (name TEXT PRIMARY KEY);
+			CREATE TABLE IF NOT EXISTS transmissions (
+				id INTEGER PRIMARY KEY AUTOINCREMENT,
+				raw_hex TEXT NOT NULL,
+				hash TEXT NOT NULL UNIQUE,
+				first_seen TEXT NOT NULL,
+				route_type INTEGER,
+				payload_type INTEGER,
+				payload_version INTEGER,
+				decoded_json TEXT,
+				created_at TEXT DEFAULT (datetime('now'))
+			);
+			CREATE TABLE IF NOT EXISTS observations (
+				id INTEGER PRIMARY KEY AUTOINCREMENT,
+				transmission_id INTEGER NOT NULL REFERENCES transmissions(id),
+				observer_idx INTEGER,
+				direction TEXT,
+				snr REAL,
+				rssi REAL,
+				score INTEGER,
+				path_json TEXT,
+				timestamp INTEGER NOT NULL
+			);
+		`)
+		if err != nil {
+			db.Close()
+			t.Fatal(err)
+		}
+		// Confirm the index is absent before OpenStore runs.
+		var preCount int
+		db.QueryRow(
+			"SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_observations_timestamp'",
+		).Scan(&preCount)
+		db.Close()
+		if preCount != 0 {
+			t.Fatalf("pre-condition failed: idx_observations_timestamp should not exist yet, got count=%d", preCount)
+		}
+
+		// Now open via OpenStore — the migration should add the index.
+		s, err := OpenStore(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer s.Close()
+
+		var idxCount int
+		err = s.db.QueryRow(
+			"SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_observations_timestamp'",
+		).Scan(&idxCount)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if idxCount != 1 {
+			t.Error("idx_observations_timestamp should exist after migration on old DB")
+		}
+
+		var migCount int
+		err = s.db.QueryRow(
+			"SELECT COUNT(*) FROM _migrations WHERE name='obs_timestamp_index_v1'",
+		).Scan(&migCount)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if migCount != 1 {
+			t.Errorf("migration obs_timestamp_index_v1 should be recorded, got count=%d", migCount)
+		}
+	})
+}
+
+func TestBuildPacketDataScoreAndDirection(t *testing.T) {
+	rawHex := "0A00D69FD7A5A7475DB07337749AE61FA53A4788E976"
+	decoded, err := DecodePacket(rawHex, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	score := 42.0
+	dir := "incoming"
+	msg := &MQTTPacketMessage{
+		Raw:       rawHex,
+		Score:     &score,
+		Direction: &dir,
+	}
+
+	pkt := BuildPacketData(msg, decoded, "obs1", "SJC")
+	if pkt.Score == nil || *pkt.Score != 42.0 {
+		t.Errorf("Score=%v, want 42.0", pkt.Score)
+	}
+	if pkt.Direction == nil || *pkt.Direction != "incoming" {
+		t.Errorf("Direction=%v, want incoming", pkt.Direction)
+	}
+}
+
+func TestBuildPacketDataNilScoreDirection(t *testing.T) {
+	decoded, _ := DecodePacket("0A00"+strings.Repeat("00", 10), nil)
+	msg := &MQTTPacketMessage{Raw: "0A00" + strings.Repeat("00", 10)}
+	pkt := BuildPacketData(msg, decoded, "", "")
+
+	if pkt.Score != nil {
+		t.Errorf("Score should be nil, got %v", *pkt.Score)
+	}
+	if pkt.Direction != nil {
+		t.Errorf("Direction should be nil, got %v", *pkt.Direction)
+	}
+}
+
+func TestInsertTransmissionWithScoreAndDirection(t *testing.T) {
+	s, err := OpenStore(tempDBPath(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	score := 7.5
+	dir := "outgoing"
+	data := &PacketData{
+		RawHex:    "AABB",
+		Timestamp: "2025-01-01T00:00:00Z",
+		SNR:       ptrFloat(5.0),
+		RSSI:      ptrFloat(-90.0),
+		Score:     &score,
+		Direction: &dir,
+		Hash:      "abc123",
+		PathJSON:  "[]",
+	}
+
+	isNew, err := s.InsertTransmission(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !isNew {
+		t.Error("expected new transmission")
+	}
+
+	// Verify the observation was stored with score and direction
+	var gotDir sql.NullString
+	var gotScore sql.NullFloat64
+	err = s.db.QueryRow("SELECT direction, score FROM observations LIMIT 1").Scan(&gotDir, &gotScore)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !gotDir.Valid || gotDir.String != "outgoing" {
+		t.Errorf("direction=%v, want outgoing", gotDir)
+	}
+	if !gotScore.Valid || gotScore.Float64 != 7.5 {
+		t.Errorf("score=%v, want 7.5", gotScore)
+	}
+}
+
+func ptrFloat(f float64) *float64 { return &f }
+func ptrInt(i int) *int           { return &i }
+
+func TestRoundToInterval(t *testing.T) {
+	tests := []struct {
+		input    time.Time
+		interval int
+		want     time.Time
+	}{
+		{time.Date(2026, 4, 5, 10, 2, 0, 0, time.UTC), 300, time.Date(2026, 4, 5, 10, 0, 0, 0, time.UTC)},
+		{time.Date(2026, 4, 5, 10, 3, 0, 0, time.UTC), 300, time.Date(2026, 4, 5, 10, 5, 0, 0, time.UTC)},
+		{time.Date(2026, 4, 5, 10, 2, 30, 0, time.UTC), 300, time.Date(2026, 4, 5, 10, 5, 0, 0, time.UTC)},
+		{time.Date(2026, 4, 5, 10, 5, 0, 0, time.UTC), 300, time.Date(2026, 4, 5, 10, 5, 0, 0, time.UTC)},
+		{time.Date(2026, 4, 5, 10, 7, 29, 0, time.UTC), 300, time.Date(2026, 4, 5, 10, 5, 0, 0, time.UTC)},
+	}
+	for _, tc := range tests {
+		got := RoundToInterval(tc.input, tc.interval)
+		if !got.Equal(tc.want) {
+			t.Errorf("RoundToInterval(%v, %d) = %v, want %v", tc.input, tc.interval, got, tc.want)
+		}
+	}
+}
+
+func TestInsertMetrics(t *testing.T) {
+	store, err := OpenStore(tempDBPath(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	nf := -112.5
+	txAir := 100
+	rxAir := 500
+	recvErr := 3
+	batt := 3720
+	data := &MetricsData{
+		ObserverID: "obs1",
+		NoiseFloor: &nf,
+		TxAirSecs:  &txAir,
+		RxAirSecs:  &rxAir,
+		RecvErrors: &recvErr,
+		BatteryMv:  &batt,
+	}
+
+	if err := store.InsertMetrics(data); err != nil {
+		t.Fatalf("InsertMetrics: %v", err)
+	}
+
+	// Verify insertion
+	var count int
+	store.db.QueryRow("SELECT COUNT(*) FROM observer_metrics WHERE observer_id = 'obs1'").Scan(&count)
+	if count != 1 {
+		t.Errorf("expected 1 row, got %d", count)
+	}
+
+	// Verify values
+	var gotNF float64
+	var gotTx, gotRx, gotErr, gotBatt int
+	store.db.QueryRow("SELECT noise_floor, tx_air_secs, rx_air_secs, recv_errors, battery_mv FROM observer_metrics WHERE observer_id = 'obs1'").Scan(&gotNF, &gotTx, &gotRx, &gotErr, &gotBatt)
+	if gotNF != -112.5 {
+		t.Errorf("noise_floor = %v, want -112.5", gotNF)
+	}
+	if gotTx != 100 {
+		t.Errorf("tx_air_secs = %d, want 100", gotTx)
+	}
+}
+
+func TestInsertMetricsIdempotent(t *testing.T) {
+	store, err := OpenStoreWithInterval(tempDBPath(t), 300)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	nf := -110.0
+	data := &MetricsData{ObserverID: "obs1", NoiseFloor: &nf}
+
+	// Insert twice — should result in 1 row (INSERT OR REPLACE)
+	store.InsertMetrics(data)
+	nf2 := -108.0
+	data.NoiseFloor = &nf2
+	store.InsertMetrics(data)
+
+	var count int
+	store.db.QueryRow("SELECT COUNT(*) FROM observer_metrics WHERE observer_id = 'obs1'").Scan(&count)
+	if count != 1 {
+		t.Errorf("expected 1 row (idempotent), got %d", count)
+	}
+
+	// Verify the value was replaced
+	var gotNF float64
+	store.db.QueryRow("SELECT noise_floor FROM observer_metrics WHERE observer_id = 'obs1'").Scan(&gotNF)
+	if gotNF != -108.0 {
+		t.Errorf("noise_floor = %v, want -108.0 (replaced)", gotNF)
+	}
+}
+
+func TestInsertMetricsNullFields(t *testing.T) {
+	store, err := OpenStore(tempDBPath(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	nf := -115.0
+	data := &MetricsData{
+		ObserverID: "obs1",
+		NoiseFloor: &nf,
+		// All other fields nil
+	}
+
+	if err := store.InsertMetrics(data); err != nil {
+		t.Fatalf("InsertMetrics with nulls: %v", err)
+	}
+
+	var gotNF sql.NullFloat64
+	var gotTx sql.NullInt64
+	store.db.QueryRow("SELECT noise_floor, tx_air_secs FROM observer_metrics WHERE observer_id = 'obs1'").Scan(&gotNF, &gotTx)
+	if !gotNF.Valid || gotNF.Float64 != -115.0 {
+		t.Errorf("noise_floor = %v, want -115.0", gotNF)
+	}
+	if gotTx.Valid {
+		t.Errorf("tx_air_secs should be NULL, got %v", gotTx.Int64)
+	}
+}
+
+func TestPruneOldMetrics(t *testing.T) {
+	store, err := OpenStore(tempDBPath(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	// Insert old and new metrics directly
+	oldTs := time.Now().UTC().AddDate(0, 0, -40).Format(time.RFC3339)
+	newTs := time.Now().UTC().Format(time.RFC3339)
+	store.db.Exec("INSERT INTO observer_metrics (observer_id, timestamp, noise_floor) VALUES (?, ?, ?)", "obs1", oldTs, -110.0)
+	store.db.Exec("INSERT INTO observer_metrics (observer_id, timestamp, noise_floor) VALUES (?, ?, ?)", "obs1", newTs, -112.0)
+
+	n, err := store.PruneOldMetrics(30)
+	if err != nil {
+		t.Fatalf("PruneOldMetrics: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("pruned %d rows, want 1", n)
+	}
+
+	var count int
+	store.db.QueryRow("SELECT COUNT(*) FROM observer_metrics").Scan(&count)
+	if count != 1 {
+		t.Errorf("expected 1 row remaining, got %d", count)
+	}
+}
+
+func TestExtractObserverMetaNewFields(t *testing.T) {
+	msg := map[string]interface{}{
+		"model": "L1",
+		"stats": map[string]interface{}{
+			"noise_floor":  -112.5,
+			"battery_mv":   3720.0,
+			"uptime_secs":  86400.0,
+			"tx_air_secs":  100.0,
+			"rx_air_secs":  500.0,
+			"recv_errors":  3.0,
+		},
+	}
+	meta := extractObserverMeta(msg)
+	if meta == nil {
+		t.Fatal("expected non-nil meta")
+	}
+	if meta.TxAirSecs == nil || *meta.TxAirSecs != 100 {
+		t.Errorf("TxAirSecs = %v, want 100", meta.TxAirSecs)
+	}
+	if meta.RxAirSecs == nil || *meta.RxAirSecs != 500 {
+		t.Errorf("RxAirSecs = %v, want 500", meta.RxAirSecs)
+	}
+	if meta.RecvErrors == nil || *meta.RecvErrors != 3 {
+		t.Errorf("RecvErrors = %v, want 3", meta.RecvErrors)
 	}
 }

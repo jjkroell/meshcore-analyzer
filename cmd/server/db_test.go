@@ -72,15 +72,31 @@ func setupTestDB(t *testing.T) *DB {
 			rssi REAL,
 			score INTEGER,
 			path_json TEXT,
-			timestamp INTEGER NOT NULL
+			timestamp INTEGER NOT NULL,
+			resolved_path TEXT
 		);
+
+		CREATE TABLE IF NOT EXISTS observer_metrics (
+			observer_id TEXT NOT NULL,
+			timestamp TEXT NOT NULL,
+			noise_floor REAL,
+			tx_air_secs INTEGER,
+			rx_air_secs INTEGER,
+			recv_errors INTEGER,
+			battery_mv INTEGER,
+			packets_sent INTEGER,
+			packets_recv INTEGER,
+			PRIMARY KEY (observer_id, timestamp)
+		);
+
+		CREATE INDEX IF NOT EXISTS idx_observer_metrics_timestamp ON observer_metrics(timestamp);
 
 	`
 	if _, err := conn.Exec(schema); err != nil {
 		t.Fatal(err)
 	}
 
-	return &DB{conn: conn, isV3: true}
+	return &DB{conn: conn, isV3: true, hasResolvedPath: true}
 }
 
 func seedTestData(t *testing.T, db *DB) {
@@ -117,14 +133,15 @@ func seedTestData(t *testing.T, db *DB) {
 		VALUES ('AA1F', 'def456abc1230099', ?, 1, 4, '{"pubKey":"aabbccdd11223344","name":"TestRepeater","type":"ADVERT","timestamp":1700000100,"timestampISO":"2023-11-14T22:14:40.000Z","signature":"fedcba","flags":{"isRepeater":true},"lat":37.5,"lon":-122.0}')`, yesterday)
 
 	// Seed observations (use unix timestamps)
-	db.conn.Exec(`INSERT INTO observations (transmission_id, observer_idx, snr, rssi, path_json, timestamp)
-		VALUES (1, 1, 12.5, -90, '["aa","bb"]', ?)`, recentEpoch)
-	db.conn.Exec(`INSERT INTO observations (transmission_id, observer_idx, snr, rssi, path_json, timestamp)
-		VALUES (1, 2, 8.0, -95, '["aa"]', ?)`, recentEpoch-100)
+	// resolved_path contains full pubkeys parallel to path_json hops
+	db.conn.Exec(`INSERT INTO observations (transmission_id, observer_idx, snr, rssi, path_json, timestamp, resolved_path)
+		VALUES (1, 1, 12.5, -90, '["aa","bb"]', ?, '["aabbccdd11223344","eeff00112233aabb"]')`, recentEpoch)
+	db.conn.Exec(`INSERT INTO observations (transmission_id, observer_idx, snr, rssi, path_json, timestamp, resolved_path)
+		VALUES (1, 2, 8.0, -95, '["aa"]', ?, '["aabbccdd11223344"]')`, recentEpoch-100)
 	db.conn.Exec(`INSERT INTO observations (transmission_id, observer_idx, snr, rssi, path_json, timestamp)
 		VALUES (2, 1, 15.0, -85, '[]', ?)`, yesterdayEpoch)
-	db.conn.Exec(`INSERT INTO observations (transmission_id, observer_idx, snr, rssi, path_json, timestamp)
-		VALUES (3, 1, 10.0, -92, '["cc"]', ?)`, yesterdayEpoch)
+	db.conn.Exec(`INSERT INTO observations (transmission_id, observer_idx, snr, rssi, path_json, timestamp, resolved_path)
+		VALUES (3, 1, 10.0, -92, '["cc"]', ?, '["1122334455667788"]')`, yesterdayEpoch)
 }
 
 func TestGetStats(t *testing.T) {
@@ -631,6 +648,18 @@ func TestGetObserverIdsForRegion(t *testing.T) {
 		}
 	})
 
+	t.Run("case and trim normalization", func(t *testing.T) {
+		db.conn.Exec(`INSERT INTO observers (id, name, iata, last_seen, first_seen, packet_count)
+			VALUES ('obs3', 'Observer Three', ' sjc ', ?, '2026-01-01T00:00:00Z', 1)`, time.Now().UTC().Format(time.RFC3339))
+		ids, err := db.GetObserverIdsForRegion(" sjc ")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(ids) != 2 {
+			t.Errorf("expected 2 observers for normalized sjc, got %d", len(ids))
+		}
+	})
+
 	t.Run("empty param", func(t *testing.T) {
 		ids, err := db.GetObserverIdsForRegion("")
 		if err != nil {
@@ -692,6 +721,49 @@ func TestGetChannelMessages(t *testing.T) {
 			t.Error("expected non-nil result")
 		}
 	})
+}
+
+func TestGetChannelMessagesRegionFiltering(t *testing.T) {
+	db := setupTestDB(t)
+	defer db.Close()
+
+	now := time.Now().UTC()
+	ts1 := now.Add(-2 * time.Minute).Format(time.RFC3339)
+	ts2 := now.Add(-1 * time.Minute).Format(time.RFC3339)
+	epoch1 := now.Add(-2 * time.Minute).Unix()
+	epoch2 := now.Add(-1 * time.Minute).Unix()
+
+	db.conn.Exec(`INSERT INTO observers (id, name, iata) VALUES ('obs1', 'Observer One', 'SJC')`)
+	db.conn.Exec(`INSERT INTO observers (id, name, iata) VALUES ('obs2', 'Observer Two', ' sfo ')`)
+	db.conn.Exec(`INSERT INTO transmissions (raw_hex, hash, first_seen, route_type, payload_type, decoded_json)
+		VALUES ('AA', 'chanregion0001', ?, 1, 5,
+		'{"type":"CHAN","channel":"#region","text":"SjcUser: One","sender":"SjcUser"}')`, ts1)
+	db.conn.Exec(`INSERT INTO transmissions (raw_hex, hash, first_seen, route_type, payload_type, decoded_json)
+		VALUES ('BB', 'chanregion0002', ?, 1, 5,
+		'{"type":"CHAN","channel":"#region","text":"SfoUser: Two","sender":"SfoUser"}')`, ts2)
+	db.conn.Exec(`INSERT INTO observations (transmission_id, observer_idx, snr, rssi, path_json, timestamp)
+		VALUES (1, 1, 10.0, -90, '[]', ?)`, epoch1)
+	db.conn.Exec(`INSERT INTO observations (transmission_id, observer_idx, snr, rssi, path_json, timestamp)
+		VALUES (2, 2, 9.0, -91, '[]', ?)`, epoch2)
+
+	msgsSJC, totalSJC, err := db.GetChannelMessages("#region", 100, 0, " sjc ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if totalSJC != 1 || len(msgsSJC) != 1 {
+		t.Fatalf("expected 1 SJC message, total=%d len=%d", totalSJC, len(msgsSJC))
+	}
+	if msgsSJC[0]["sender"] != "SjcUser" {
+		t.Fatalf("expected SJC sender SjcUser, got %v", msgsSJC[0]["sender"])
+	}
+
+	msgsMulti, totalMulti, err := db.GetChannelMessages("#region", 100, 0, "sjc, SFO")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if totalMulti != 2 || len(msgsMulti) != 2 {
+		t.Fatalf("expected 2 multi-region messages, total=%d len=%d", totalMulti, len(msgsMulti))
+	}
 }
 
 func TestBuildPacketWhereFilters(t *testing.T) {
@@ -955,6 +1027,168 @@ func TestGetNodesFiltering(t *testing.T) {
 		}
 		if len(nodes) != 1 {
 			t.Errorf("expected 1 node with offset, got %d", len(nodes))
+		}
+	})
+
+	t.Run("region filter SJC", func(t *testing.T) {
+		nodes, total, _, err := db.GetNodes(50, 0, "", "", "", "", "", "SJC")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if total != 1 {
+			t.Errorf("expected 1 node for SJC region, got %d", total)
+		}
+		if len(nodes) != 1 {
+			t.Fatalf("expected 1 node, got %d", len(nodes))
+		}
+		if nodes[0]["public_key"] != "aabbccdd11223344" {
+			t.Errorf("expected TestRepeater, got %v", nodes[0]["public_key"])
+		}
+	})
+
+	t.Run("region filter SFO", func(t *testing.T) {
+		_, total, _, err := db.GetNodes(50, 0, "", "", "", "", "", "SFO")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if total != 1 {
+			t.Errorf("expected 1 node for SFO region, got %d", total)
+		}
+	})
+
+	t.Run("region filter multi", func(t *testing.T) {
+		_, total, _, err := db.GetNodes(50, 0, "", "", "", "", "", "SJC,SFO")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if total != 1 {
+			t.Errorf("expected 1 node for SJC,SFO region, got %d", total)
+		}
+	})
+
+	t.Run("region filter unknown", func(t *testing.T) {
+		_, total, _, err := db.GetNodes(50, 0, "", "", "", "", "", "AMS")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if total != 0 {
+			t.Errorf("expected 0 nodes for unknown region, got %d", total)
+		}
+	})
+}
+
+// setupTestDBV2 creates an in-memory SQLite database with the v2 schema
+// where observations use observer_id TEXT instead of observer_idx INTEGER.
+func setupTestDBV2(t *testing.T) *DB {
+	t.Helper()
+	conn, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn.SetMaxOpenConns(1)
+
+	schema := `
+		CREATE TABLE nodes (
+			public_key TEXT PRIMARY KEY,
+			name TEXT,
+			role TEXT,
+			lat REAL,
+			lon REAL,
+			last_seen TEXT,
+			first_seen TEXT,
+			advert_count INTEGER DEFAULT 0,
+			battery_mv INTEGER,
+			temperature_c REAL
+		);
+
+		CREATE TABLE observers (
+			id TEXT PRIMARY KEY,
+			name TEXT,
+			iata TEXT,
+			last_seen TEXT,
+			first_seen TEXT,
+			packet_count INTEGER DEFAULT 0
+		);
+
+		CREATE TABLE transmissions (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			raw_hex TEXT NOT NULL,
+			hash TEXT NOT NULL UNIQUE,
+			first_seen TEXT NOT NULL,
+			route_type INTEGER,
+			payload_type INTEGER,
+			payload_version INTEGER,
+			decoded_json TEXT,
+			created_at TEXT DEFAULT (datetime('now'))
+		);
+
+		CREATE TABLE observations (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			transmission_id INTEGER NOT NULL REFERENCES transmissions(id),
+			observer_id TEXT,
+			observer_name TEXT,
+			direction TEXT,
+			snr REAL,
+			rssi REAL,
+			score INTEGER,
+			path_json TEXT,
+			timestamp INTEGER NOT NULL
+		);
+	`
+	if _, err := conn.Exec(schema); err != nil {
+		t.Fatal(err)
+	}
+
+	return &DB{conn: conn, isV3: false}
+}
+
+func TestGetNodesRegionFilterV2(t *testing.T) {
+	db := setupTestDBV2(t)
+	defer db.Close()
+
+	now := time.Now().UTC()
+	recent := now.Add(-1 * time.Hour).Format(time.RFC3339)
+	recentEpoch := now.Add(-1 * time.Hour).Unix()
+
+	// Seed observer with IATA code
+	db.conn.Exec(`INSERT INTO observers (id, name, iata, last_seen, first_seen, packet_count)
+		VALUES ('obs-v2-1', 'V2 Observer', 'LAX', ?, '2026-01-01T00:00:00Z', 10)`, recent)
+
+	// Seed a node
+	db.conn.Exec(`INSERT INTO nodes (public_key, name, role, lat, lon, last_seen, first_seen, advert_count)
+		VALUES ('v2pubkey11223344', 'V2Node', 'repeater', 34.0, -118.0, ?, '2026-01-01T00:00:00Z', 5)`, recent)
+
+	// Seed an ADVERT transmission for the node
+	db.conn.Exec(`INSERT INTO transmissions (raw_hex, hash, first_seen, route_type, payload_type, decoded_json)
+		VALUES ('AABB', 'v2hash0001', ?, 1, 4, '{"pubKey":"v2pubkey11223344","name":"V2Node","type":"ADVERT"}')`, recent)
+
+	// Seed v2-style observation: observer_id references observers.id directly
+	db.conn.Exec(`INSERT INTO observations (transmission_id, observer_id, observer_name, snr, rssi, path_json, timestamp)
+		VALUES (1, 'obs-v2-1', 'V2 Observer', 10.0, -90, '[]', ?)`, recentEpoch)
+
+	t.Run("v2 region filter match", func(t *testing.T) {
+		nodes, total, _, err := db.GetNodes(50, 0, "", "", "", "", "", "LAX")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if total != 1 {
+			t.Errorf("expected 1 node for LAX region (v2 schema), got %d", total)
+		}
+		if len(nodes) != 1 {
+			t.Fatalf("expected 1 node, got %d", len(nodes))
+		}
+		if nodes[0]["public_key"] != "v2pubkey11223344" {
+			t.Errorf("expected V2Node, got %v", nodes[0]["public_key"])
+		}
+	})
+
+	t.Run("v2 region filter no match", func(t *testing.T) {
+		_, total, _, err := db.GetNodes(50, 0, "", "", "", "", "", "JFK")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if total != 0 {
+			t.Errorf("expected 0 nodes for JFK region (v2 schema), got %d", total)
 		}
 	})
 }
@@ -1319,4 +1553,368 @@ func TestNodeTelemetryFields(t *testing.T) {
 
 func TestMain(m *testing.M) {
 	os.Exit(m.Run())
+}
+
+func TestGetObserverMetrics(t *testing.T) {
+	db := setupTestDB(t)
+	seedTestData(t, db)
+
+	now := time.Now().UTC()
+	t1 := now.Add(-2 * time.Hour).Format(time.RFC3339)
+	t2 := now.Add(-1 * time.Hour).Format(time.RFC3339)
+	t3 := now.Format(time.RFC3339)
+
+	db.conn.Exec("INSERT INTO observer_metrics (observer_id, timestamp, noise_floor, tx_air_secs, rx_air_secs, recv_errors, battery_mv) VALUES (?, ?, ?, ?, ?, ?, ?)",
+		"obs1", t1, -112.5, 100, 500, 3, 3720)
+	db.conn.Exec("INSERT INTO observer_metrics (observer_id, timestamp, noise_floor, tx_air_secs, rx_air_secs, recv_errors) VALUES (?, ?, ?, ?, ?, ?)",
+		"obs1", t2, -110.0, 200, 800, 5)
+	db.conn.Exec("INSERT INTO observer_metrics (observer_id, timestamp, noise_floor, tx_air_secs, rx_air_secs, recv_errors) VALUES (?, ?, ?, ?, ?, ?)",
+		"obs1", t3, -108.0, 300, 1100, 8)
+	db.conn.Exec("INSERT INTO observer_metrics (observer_id, timestamp, noise_floor) VALUES (?, ?, ?)",
+		"obs2", t1, -115.0)
+
+	// Query all for obs1
+	since := now.Add(-3 * time.Hour).Format(time.RFC3339)
+	metrics, reboots, err := db.GetObserverMetrics("obs1", since, "", "5m", 3600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(metrics) != 3 {
+		t.Errorf("expected 3 metrics, got %d", len(metrics))
+	}
+	if len(reboots) != 0 {
+		t.Errorf("expected 0 reboots, got %d", len(reboots))
+	}
+
+	// Verify first row has noise_floor
+	if metrics[0].NoiseFloor == nil || *metrics[0].NoiseFloor != -112.5 {
+		t.Errorf("first noise_floor = %v, want -112.5", metrics[0].NoiseFloor)
+	}
+	// First row: no delta possible (first sample)
+	if metrics[0].TxAirtimePct != nil {
+		t.Errorf("first sample should have nil tx_airtime_pct, got %v", *metrics[0].TxAirtimePct)
+	}
+
+	// Second row should have computed deltas
+	// TX: (200-100) / 3600 * 100 ≈ 2.78%
+	if metrics[1].TxAirtimePct == nil {
+		t.Errorf("second sample tx_airtime_pct should not be nil")
+	} else if *metrics[1].TxAirtimePct < 2.0 || *metrics[1].TxAirtimePct > 3.5 {
+		t.Errorf("second sample tx_airtime_pct = %v, want ~2.78", *metrics[1].TxAirtimePct)
+	}
+
+	// Query with until filter
+	metrics2, _, err := db.GetObserverMetrics("obs1", since, t2, "5m", 3600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(metrics2) != 2 {
+		t.Errorf("expected 2 metrics with until filter, got %d", len(metrics2))
+	}
+}
+
+func TestGetMetricsSummary(t *testing.T) {
+	db := setupTestDB(t)
+	seedTestData(t, db)
+
+	now := time.Now().UTC()
+	t1 := now.Add(-2 * time.Hour).Format(time.RFC3339)
+	t2 := now.Add(-1 * time.Hour).Format(time.RFC3339)
+
+	db.conn.Exec("INSERT INTO observer_metrics (observer_id, timestamp, noise_floor, battery_mv) VALUES (?, ?, ?, ?)",
+		"obs1", t1, -112.0, 3720)
+	db.conn.Exec("INSERT INTO observer_metrics (observer_id, timestamp, noise_floor) VALUES (?, ?, ?)",
+		"obs1", t2, -108.0)
+	db.conn.Exec("INSERT INTO observer_metrics (observer_id, timestamp, noise_floor) VALUES (?, ?, ?)",
+		"obs2", t1, -115.0)
+
+	since := now.Add(-24 * time.Hour).Format(time.RFC3339)
+	summary, err := db.GetMetricsSummary(since)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(summary) != 2 {
+		t.Fatalf("expected 2 observers in summary, got %d", len(summary))
+	}
+
+	// Results sorted by max_nf DESC
+	// obs1 has max -108, obs2 has max -115
+	if summary[0].ObserverID != "obs1" {
+		t.Errorf("first observer should be obs1 (highest max NF), got %s", summary[0].ObserverID)
+	}
+	if summary[0].CurrentNF == nil || *summary[0].CurrentNF != -108.0 {
+		t.Errorf("obs1 current NF = %v, want -108.0", summary[0].CurrentNF)
+	}
+	if summary[0].SampleCount != 2 {
+		t.Errorf("obs1 sample count = %d, want 2", summary[0].SampleCount)
+	}
+	// Verify sparkline data is included
+	if len(summary[0].Sparkline) != 2 {
+		t.Errorf("obs1 sparkline length = %d, want 2", len(summary[0].Sparkline))
+	}
+	if len(summary[1].Sparkline) != 1 {
+		t.Errorf("obs2 sparkline length = %d, want 1", len(summary[1].Sparkline))
+	}
+	// Sparkline should be ordered by timestamp ASC
+	if summary[0].Sparkline[0] != nil && *summary[0].Sparkline[0] != -112.0 {
+		t.Errorf("obs1 sparkline[0] = %v, want -112.0", *summary[0].Sparkline[0])
+	}
+	if summary[0].Sparkline[1] != nil && *summary[0].Sparkline[1] != -108.0 {
+		t.Errorf("obs1 sparkline[1] = %v, want -108.0", *summary[0].Sparkline[1])
+	}
+}
+
+func TestObserverMetricsAPIEndpoints(t *testing.T) {
+	db := setupTestDB(t)
+	seedTestData(t, db)
+
+	now := time.Now().UTC()
+	t1 := now.Add(-1 * time.Hour).Format(time.RFC3339)
+
+	db.conn.Exec("INSERT INTO observer_metrics (observer_id, timestamp, noise_floor) VALUES (?, ?, ?)",
+		"obs1", t1, -112.0)
+
+	// Query directly to verify
+	metrics, _, err := db.GetObserverMetrics("obs1", "", "", "5m", 300)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(metrics) != 1 {
+		t.Errorf("expected 1 metric, got %d", len(metrics))
+	}
+}
+
+func TestComputeDeltas(t *testing.T) {
+	intPtr := func(v int) *int { return &v }
+	floatPtr := func(v float64) *float64 { return &v }
+
+	t.Run("empty input", func(t *testing.T) {
+		result, reboots, err := computeDeltas(nil, 300)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if result != nil {
+			t.Errorf("expected nil, got %v", result)
+		}
+		if reboots != nil {
+			t.Errorf("expected nil reboots, got %v", reboots)
+		}
+	})
+
+	t.Run("normal delta computation", func(t *testing.T) {
+		raw := []rawMetricsSample{
+			{Timestamp: "2026-04-05T00:00:00Z", NoiseFloor: floatPtr(-112), TxAirSecs: intPtr(100), RxAirSecs: intPtr(500), RecvErrors: intPtr(3), PacketsRecv: intPtr(1000)},
+			{Timestamp: "2026-04-05T00:05:00Z", NoiseFloor: floatPtr(-110), TxAirSecs: intPtr(115), RxAirSecs: intPtr(525), RecvErrors: intPtr(5), PacketsRecv: intPtr(1100)},
+		}
+		result, reboots, err := computeDeltas(raw, 300)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(result) != 2 {
+			t.Fatalf("expected 2 results, got %d", len(result))
+		}
+		if len(reboots) != 0 {
+			t.Errorf("expected 0 reboots, got %d", len(reboots))
+		}
+		// First sample: no deltas
+		if result[0].TxAirtimePct != nil {
+			t.Errorf("first sample should have nil tx_airtime_pct")
+		}
+		// Second sample: TX delta = 15 secs / 300 secs * 100 = 5%
+		if result[1].TxAirtimePct == nil {
+			t.Fatal("second sample tx_airtime_pct should not be nil")
+		}
+		if *result[1].TxAirtimePct != 5.0 {
+			t.Errorf("tx_airtime_pct = %v, want 5.0", *result[1].TxAirtimePct)
+		}
+		// RX delta = 25 secs / 300 secs * 100 ≈ 8.33%
+		if result[1].RxAirtimePct == nil {
+			t.Fatal("second sample rx_airtime_pct should not be nil")
+		}
+		if *result[1].RxAirtimePct < 8.3 || *result[1].RxAirtimePct > 8.4 {
+			t.Errorf("rx_airtime_pct = %v, want ~8.33", *result[1].RxAirtimePct)
+		}
+		// Error rate: delta_errors=2, delta_recv=100, rate = 2/(100+2)*100 ≈ 1.96%
+		if result[1].RecvErrorRate == nil {
+			t.Fatal("second sample recv_error_rate should not be nil")
+		}
+		if *result[1].RecvErrorRate < 1.9 || *result[1].RecvErrorRate > 2.0 {
+			t.Errorf("recv_error_rate = %v, want ~1.96", *result[1].RecvErrorRate)
+		}
+	})
+
+	t.Run("reboot detection", func(t *testing.T) {
+		raw := []rawMetricsSample{
+			{Timestamp: "2026-04-05T00:00:00Z", TxAirSecs: intPtr(1000), RxAirSecs: intPtr(5000)},
+			{Timestamp: "2026-04-05T00:05:00Z", TxAirSecs: intPtr(10), RxAirSecs: intPtr(20)}, // reboot!
+			{Timestamp: "2026-04-05T00:10:00Z", TxAirSecs: intPtr(25), RxAirSecs: intPtr(45)},
+		}
+		result, reboots, err := computeDeltas(raw, 300)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(reboots) != 1 {
+			t.Fatalf("expected 1 reboot, got %d", len(reboots))
+		}
+		if reboots[0] != "2026-04-05T00:05:00Z" {
+			t.Errorf("reboot timestamp = %s", reboots[0])
+		}
+		if !result[1].IsReboot {
+			t.Error("second sample should be marked as reboot")
+		}
+		// Reboot sample should have nil deltas
+		if result[1].TxAirtimePct != nil {
+			t.Error("reboot sample should have nil tx_airtime_pct")
+		}
+		// Third sample should have valid deltas from post-reboot baseline
+		if result[2].TxAirtimePct == nil {
+			t.Fatal("third sample tx_airtime_pct should not be nil")
+		}
+		if *result[2].TxAirtimePct != 5.0 { // 15/300*100
+			t.Errorf("third sample tx_airtime_pct = %v, want 5.0", *result[2].TxAirtimePct)
+		}
+	})
+
+	t.Run("gap detection", func(t *testing.T) {
+		raw := []rawMetricsSample{
+			{Timestamp: "2026-04-05T00:00:00Z", TxAirSecs: intPtr(100)},
+			{Timestamp: "2026-04-05T00:15:00Z", TxAirSecs: intPtr(200)}, // 15min gap > 2*300s
+		}
+		result, _, err := computeDeltas(raw, 300)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// Gap sample should have nil deltas
+		if result[1].TxAirtimePct != nil {
+			t.Error("gap sample should have nil tx_airtime_pct")
+		}
+	})
+}
+
+func TestGetObserverMetricsResolution(t *testing.T) {
+	db := setupTestDB(t)
+	seedTestData(t, db)
+
+	db.conn.Exec("INSERT INTO observer_metrics (observer_id, timestamp, noise_floor, tx_air_secs) VALUES (?, ?, ?, ?)",
+		"obs1", "2026-04-05T00:00:00Z", -112.0, 100)
+	db.conn.Exec("INSERT INTO observer_metrics (observer_id, timestamp, noise_floor, tx_air_secs) VALUES (?, ?, ?, ?)",
+		"obs1", "2026-04-05T00:05:00Z", -110.0, 200)
+	db.conn.Exec("INSERT INTO observer_metrics (observer_id, timestamp, noise_floor, tx_air_secs) VALUES (?, ?, ?, ?)",
+		"obs1", "2026-04-05T01:00:00Z", -108.0, 500)
+	db.conn.Exec("INSERT INTO observer_metrics (observer_id, timestamp, noise_floor, tx_air_secs) VALUES (?, ?, ?, ?)",
+		"obs1", "2026-04-05T01:05:00Z", -106.0, 600)
+
+	// 5m resolution: all 4 rows
+	m5, _, err := db.GetObserverMetrics("obs1", "2026-04-04T00:00:00Z", "", "5m", 300)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(m5) != 4 {
+		t.Errorf("5m resolution: expected 4 rows, got %d", len(m5))
+	}
+
+	// 1h resolution: 2 buckets
+	m1h, _, err := db.GetObserverMetrics("obs1", "2026-04-04T00:00:00Z", "", "1h", 300)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(m1h) != 2 {
+		t.Errorf("1h resolution: expected 2 rows, got %d", len(m1h))
+	}
+
+	// 1d resolution: 1 bucket
+	m1d, _, err := db.GetObserverMetrics("obs1", "2026-04-04T00:00:00Z", "", "1d", 300)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(m1d) != 1 {
+		t.Errorf("1d resolution: expected 1 row, got %d", len(m1d))
+	}
+}
+
+func TestHourlyResolutionDeltasNotNull(t *testing.T) {
+	db := setupTestDB(t)
+	seedTestData(t, db)
+
+	// Two hourly buckets, each with one sample. With old MAX+hardcoded gap threshold,
+	// the 3600s gap would exceed sampleInterval*2 (600s) and deltas would be null.
+	db.conn.Exec("INSERT INTO observer_metrics (observer_id, timestamp, noise_floor, tx_air_secs, rx_air_secs, recv_errors, packets_sent, packets_recv) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+		"obs_hr", "2026-04-05T10:00:00Z", -110.0, 100, 200, 5, 50, 100)
+	db.conn.Exec("INSERT INTO observer_metrics (observer_id, timestamp, noise_floor, tx_air_secs, rx_air_secs, recv_errors, packets_sent, packets_recv) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+		"obs_hr", "2026-04-05T11:00:00Z", -108.0, 200, 400, 10, 80, 200)
+
+	m, _, err := db.GetObserverMetrics("obs_hr", "2026-04-04T00:00:00Z", "", "1h", 300)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(m) != 2 {
+		t.Fatalf("expected 2 rows, got %d", len(m))
+	}
+	// Second row should have computed deltas (not null)
+	if m[1].TxAirtimePct == nil {
+		t.Error("1h resolution: tx_airtime_pct should not be nil — gap threshold must scale with resolution")
+	}
+}
+
+func TestLastValuePreservesReboot(t *testing.T) {
+	db := setupTestDB(t)
+	seedTestData(t, db)
+
+	// Hour bucket with two samples: pre-reboot (high) and post-reboot (low).
+	// With MAX(), the pre-reboot value wins and the reboot is hidden.
+	// With LAST (latest timestamp), the post-reboot value wins.
+	db.conn.Exec("INSERT INTO observer_metrics (observer_id, timestamp, noise_floor, tx_air_secs, rx_air_secs, recv_errors, packets_sent, packets_recv) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+		"obs_rb", "2026-04-05T10:00:00Z", -110.0, 1000, 2000, 500, 400, 800) // pre-reboot baseline
+	db.conn.Exec("INSERT INTO observer_metrics (observer_id, timestamp, noise_floor, tx_air_secs, rx_air_secs, recv_errors, packets_sent, packets_recv) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+		"obs_rb", "2026-04-05T10:20:00Z", -110.0, 5000, 6000, 900, 700, 1200) // pre-reboot peak
+	db.conn.Exec("INSERT INTO observer_metrics (observer_id, timestamp, noise_floor, tx_air_secs, rx_air_secs, recv_errors, packets_sent, packets_recv) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+		"obs_rb", "2026-04-05T10:40:00Z", -110.0, 10, 20, 1, 5, 10) // post-reboot (counter reset)
+
+	// Next hour bucket
+	db.conn.Exec("INSERT INTO observer_metrics (observer_id, timestamp, noise_floor, tx_air_secs, rx_air_secs, recv_errors, packets_sent, packets_recv) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+		"obs_rb", "2026-04-05T11:00:00Z", -108.0, 100, 120, 5, 20, 50)
+
+	m, reboots, err := db.GetObserverMetrics("obs_rb", "2026-04-04T00:00:00Z", "", "1h", 300)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(m) != 2 {
+		t.Fatalf("expected 2 rows, got %d", len(m))
+	}
+
+	// First bucket should use the LAST value (post-reboot: tx_air_secs=10).
+	// Second bucket (tx_air_secs=100) is a normal increase from 10→100.
+	// With LAST-value semantics, the second bucket should have valid deltas (not a reboot).
+	// With MAX(), first bucket would have tx_air_secs=5000, and second=100 would
+	// trigger a false reboot detection.
+	if m[1].IsReboot {
+		t.Error("second bucket should NOT be flagged as reboot with LAST-value aggregation")
+	}
+	if m[1].TxAirtimePct == nil {
+		t.Error("second bucket should have non-nil tx_airtime_pct")
+	}
+	_ = reboots // reboots list is informational
+}
+
+func TestParseWindowDuration(t *testing.T) {
+	tests := []struct {
+		input string
+		want  time.Duration
+		err   bool
+	}{
+		{"1h", time.Hour, false},
+		{"24h", 24 * time.Hour, false},
+		{"3d", 3 * 24 * time.Hour, false},
+		{"30d", 30 * 24 * time.Hour, false},
+		{"invalid", 0, true},
+	}
+	for _, tc := range tests {
+		got, err := parseWindowDuration(tc.input)
+		if tc.err && err == nil {
+			t.Errorf("parseWindowDuration(%q) expected error", tc.input)
+		}
+		if !tc.err && got != tc.want {
+			t.Errorf("parseWindowDuration(%q) = %v, want %v", tc.input, got, tc.want)
+		}
+	}
 }

@@ -11,13 +11,27 @@ set -e
 
 IMAGE_NAME="corescope"
 STATE_FILE=".setup-state"
+STAGING_CONTAINER="corescope-staging-go"
 
 # Source .env for port/path overrides (same file docker compose reads)
 # Strip \r (Windows line endings) to avoid "$'\r': command not found"
 if [ -f .env ]; then
   set -a
-  eval "$(sed 's/\r$//' .env)"
+  while IFS='=' read -r key value || [ -n "$key" ]; do
+    key=$(printf '%s' "$key" | sed 's/\r$//' | sed 's/^[[:space:]]*//' | sed 's/[[:space:]]*$//')
+    [[ "$key" =~ ^#.*$ || -z "$key" ]] && continue
+    value=$(printf '%s' "$value" | sed 's/\r$//' | sed 's/^[[:space:]]*//' | sed 's/[[:space:]]*$//')
+    value="${value/#\~/$HOME}"
+    export "$key=$value"
+  done < .env
   set +a
+fi
+
+# Auto-fix CRLF in .env if detected
+if [ -f .env ] && grep -qP '\r' .env 2>/dev/null; then
+  warn ".env has Windows line endings (CRLF) — fixing automatically..."
+  sed -i 's/\r$//' .env
+  log ".env converted to Unix line endings."
 fi
 
 # Resolved paths for prod/staging data (must match docker-compose.yml)
@@ -26,7 +40,7 @@ STAGING_DATA="${STAGING_DATA_DIR:-$HOME/meshcore-staging-data}"
 STAGING_COMPOSE_FILE="docker-compose.staging.yml"
 
 # Build metadata — exported so docker compose build picks them up via args
-export APP_VERSION=$(node -p "require('./package.json').version" 2>/dev/null || echo "unknown")
+export APP_VERSION=$(git describe --tags --match "v*" 2>/dev/null || echo "unknown")
 export GIT_COMMIT=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
 export BUILD_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
@@ -54,10 +68,39 @@ err()  { printf '%b\n' "${RED}✗${NC} $1"; }
 info() { printf '%b\n' "${CYAN}→${NC} $1"; }
 step() { printf '%b\n' "\n${BOLD}[$1/$TOTAL_STEPS] $2${NC}"; }
 
+is_true() {
+  case "${1:-}" in
+    1|true|TRUE|yes|YES|y|Y|on|ON) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+dc_prod() {
+  if is_true "${DISABLE_MOSQUITTO:-false}"; then
+    $DC -f docker-compose.no-mosquitto.yml "$@"
+  else
+    $DC "$@"
+  fi
+}
+
+dc_staging() {
+  if is_true "${DISABLE_MOSQUITTO:-false}"; then
+    $DC -f docker-compose.staging.no-mosquitto.yml -p corescope-staging "$@"
+  else
+    $DC -f "$STAGING_COMPOSE_FILE" -p corescope-staging "$@"
+  fi
+}
+
 confirm() {
   read -p "   $1 [y/N] " -n 1 -r
   echo
   [[ $REPLY =~ ^[Yy]$ ]]
+}
+
+confirm_yes_default() {
+  read -p "   $1 [Y/n] " -n 1 -r
+  echo
+  [[ -z "$REPLY" || $REPLY =~ ^[Yy]$ ]]
 }
 
 # State tracking — marks completed steps so re-runs skip them
@@ -66,12 +109,305 @@ is_done()    { [ -f "$STATE_FILE" ] && grep -qx "$1" "$STATE_FILE" 2>/dev/null; 
 
 # ─── Helpers ──────────────────────────────────────────────────────────────
 
+resolve_domain_ipv4() {
+  local domain="$1"
+  local resolved_ip=""
+
+  if command -v dig >/dev/null 2>&1; then
+    resolved_ip=$(dig +short "$domain" 2>/dev/null | grep -E '^[0-9]+\.' | head -1)
+  fi
+  if [ -z "$resolved_ip" ] && command -v host >/dev/null 2>&1; then
+    resolved_ip=$(host "$domain" 2>/dev/null | awk '/has address/ {print $4; exit}')
+  fi
+  if [ -z "$resolved_ip" ] && command -v nslookup >/dev/null 2>&1; then
+    resolved_ip=$(nslookup "$domain" 2>/dev/null | awk '/^Address: / {print $2}' | grep -E '^[0-9]+\.' | head -1)
+  fi
+  if [ -z "$resolved_ip" ] && command -v getent >/dev/null 2>&1; then
+    resolved_ip=$(getent hosts "$domain" 2>/dev/null | awk '{print $1}' | grep -E '^[0-9]+\.' | head -1)
+  fi
+
+  echo "$resolved_ip"
+}
+
+has_dns_resolution_tool() {
+  command -v dig >/dev/null 2>&1 || \
+  command -v host >/dev/null 2>&1 || \
+  command -v nslookup >/dev/null 2>&1 || \
+  command -v getent >/dev/null 2>&1
+}
+
+PORT_CHECK_METHOD=""
+
+resolve_port_check_method() {
+  if [ -n "$PORT_CHECK_METHOD" ]; then
+    return 0
+  fi
+
+  if command -v ss &>/dev/null; then
+    PORT_CHECK_METHOD="ss"
+  elif command -v lsof &>/dev/null; then
+    PORT_CHECK_METHOD="lsof"
+  elif command -v netstat &>/dev/null; then
+    PORT_CHECK_METHOD="netstat"
+  elif command -v nc &>/dev/null; then
+    PORT_CHECK_METHOD="nc"
+  else
+    PORT_CHECK_METHOD="none"
+  fi
+}
+
+# Returns 0 when in use, 1 when free, 2 when unavailable
+is_port_in_use() {
+  local port="$1"
+  resolve_port_check_method
+
+  case "$PORT_CHECK_METHOD" in
+    ss)
+      ss -tlnp 2>/dev/null | grep -E "[[:space:]]LISTEN[[:space:]].*[:.]${port}([[:space:]]|$)" >/dev/null
+      return $?
+      ;;
+    lsof)
+      lsof -nP -iTCP:"$port" -sTCP:LISTEN >/dev/null 2>&1
+      return $?
+      ;;
+    netstat)
+      netstat -tlnp 2>/dev/null | grep -E "[[:space:]]${port}[[:space:]]" >/dev/null
+      if [ $? -eq 0 ]; then
+        return 0
+      fi
+      netstat -tlnp 2>/dev/null | grep -E "[:.]${port}[[:space:]]" >/dev/null
+      return $?
+      ;;
+    nc)
+      local bind_pid=""
+      ( nc -l 127.0.0.1 "$port" >/dev/null 2>&1 ) &
+      bind_pid=$!
+      sleep 0.2
+      if kill -0 "$bind_pid" 2>/dev/null; then
+        kill "$bind_pid" 2>/dev/null || true
+        wait "$bind_pid" 2>/dev/null || true
+        return 1
+      fi
+      wait "$bind_pid" 2>/dev/null || true
+      return 0
+      ;;
+    *)
+      return 2
+      ;;
+  esac
+}
+
+port_in_use_details() {
+  local port="$1"
+  resolve_port_check_method
+
+  case "$PORT_CHECK_METHOD" in
+    ss)
+      ss -tlnp 2>/dev/null | grep -E "[[:space:]]LISTEN[[:space:]].*[:.]${port}([[:space:]]|$)" | head -1
+      ;;
+    lsof)
+      lsof -nP -iTCP:"$port" -sTCP:LISTEN 2>/dev/null | sed -n '2p'
+      ;;
+    netstat)
+      netstat -tlnp 2>/dev/null | grep -E "[:.]${port}[[:space:]]" | head -1
+      ;;
+    *)
+      echo ""
+      ;;
+  esac
+}
+
+find_next_available_port() {
+  local start="$1"
+  local candidate=$((start + 1))
+  while [ "$candidate" -le 65535 ]; do
+    is_port_in_use "$candidate"
+    local rc=$?
+    if [ "$rc" -eq 0 ]; then
+      candidate=$((candidate + 1))
+      continue
+    fi
+    if [ "$rc" -eq 1 ]; then
+      echo "$candidate"
+      return 0
+    fi
+    break
+  done
+  echo ""
+  return 1
+}
+
+is_valid_port() {
+  local value="$1"
+  [[ "$value" =~ ^[0-9]+$ ]] && [ "$value" -ge 1 ] && [ "$value" -le 65535 ]
+}
+
+show_env_port_summary() {
+  local http_port="$1"
+  local https_port="$2"
+  local mqtt_port="$3"
+  local data_dir="$4"
+  local disable_mosquitto="$5"
+  echo ""
+  echo "   Current .env values:"
+  echo "     PROD_HTTP_PORT=${http_port}"
+  echo "     PROD_HTTPS_PORT=${https_port}"
+  echo "     PROD_MQTT_PORT=${mqtt_port}"
+  echo "     DISABLE_MOSQUITTO=${disable_mosquitto}"
+  echo "     PROD_DATA_DIR=${data_dir}"
+  echo ""
+}
+
+get_env_value() {
+  local key="$1"
+  local env_file="${2:-.env}"
+  if [ ! -f "$env_file" ]; then
+    echo ""
+    return 1
+  fi
+  sed -n "s/^[[:space:]]*${key}[[:space:]]*=[[:space:]]*//p" "$env_file" | head -1
+}
+
+write_env_managed_values() {
+  local http_port="$1"
+  local https_port="$2"
+  local mqtt_port="$3"
+  local data_dir="$4"
+  local disable_mosquitto="$5"
+  local env_file=".env"
+  local tmp_file=".env.tmp.$$"
+
+  if [ ! -f "$env_file" ]; then
+    cp .env.example "$env_file"
+  fi
+
+  local seen_http=0
+  local seen_https=0
+  local seen_mqtt=0
+  local seen_data=0
+  local seen_disable_mosquitto=0
+
+  : > "$tmp_file"
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      PROD_HTTP_PORT=*)
+        echo "PROD_HTTP_PORT=${http_port}" >> "$tmp_file"
+        seen_http=1
+        ;;
+      PROD_HTTPS_PORT=*)
+        echo "PROD_HTTPS_PORT=${https_port}" >> "$tmp_file"
+        seen_https=1
+        ;;
+      PROD_MQTT_PORT=*)
+        echo "PROD_MQTT_PORT=${mqtt_port}" >> "$tmp_file"
+        seen_mqtt=1
+        ;;
+      PROD_DATA_DIR=*)
+        echo "PROD_DATA_DIR=${data_dir}" >> "$tmp_file"
+        seen_data=1
+        ;;
+      DISABLE_MOSQUITTO=*)
+        echo "DISABLE_MOSQUITTO=${disable_mosquitto}" >> "$tmp_file"
+        seen_disable_mosquitto=1
+        ;;
+      *)
+        echo "$line" >> "$tmp_file"
+        ;;
+    esac
+  done < "$env_file"
+
+  [ "$seen_http" -eq 1 ] || echo "PROD_HTTP_PORT=${http_port}" >> "$tmp_file"
+  [ "$seen_https" -eq 1 ] || echo "PROD_HTTPS_PORT=${https_port}" >> "$tmp_file"
+  [ "$seen_mqtt" -eq 1 ] || echo "PROD_MQTT_PORT=${mqtt_port}" >> "$tmp_file"
+  [ "$seen_data" -eq 1 ] || echo "PROD_DATA_DIR=${data_dir}" >> "$tmp_file"
+  [ "$seen_disable_mosquitto" -eq 1 ] || echo "DISABLE_MOSQUITTO=${disable_mosquitto}" >> "$tmp_file"
+
+  mv "$tmp_file" "$env_file"
+}
+
+prompt_for_port() {
+  local label="$1"
+  local current="$2"
+  local prompt_default="$3"
+
+  while true; do
+    if [ -n "$prompt_default" ] && [ "$prompt_default" != "$current" ]; then
+      read -p "   ${label} port [${prompt_default}] (current ${current}): " selected
+      selected=${selected:-$prompt_default}
+    else
+      read -p "   ${label} port [${current}]: " selected
+      selected=${selected:-$current}
+    fi
+
+    if ! is_valid_port "$selected"; then
+      warn "Invalid port '${selected}'. Enter a value between 1 and 65535."
+      continue
+    fi
+
+    is_port_in_use "$selected"
+    local rc=$?
+    if [ "$rc" -eq 0 ]; then
+      warn "Port ${selected} is in use."
+      local details
+      details=$(port_in_use_details "$selected")
+      [ -n "$details" ] && echo "     ${details}"
+      if confirm "Use ${selected} anyway? (start will fail if still occupied)"; then
+        echo "$selected"
+        return 0
+      fi
+      continue
+    fi
+    if [ "$rc" -eq 2 ]; then
+      warn "Port detection unavailable on this host. Proceeding with chosen value."
+    fi
+
+    echo "$selected"
+    return 0
+  done
+}
+
+preflight_validate_prod_ports() {
+  local http_port="${PROD_HTTP_PORT:-80}"
+  local https_port="${PROD_HTTPS_PORT:-443}"
+  local mqtt_port=""
+  if ! is_true "${DISABLE_MOSQUITTO:-false}"; then
+    mqtt_port="${PROD_MQTT_PORT:-1883}"
+  fi
+  local failed=0
+
+  info "Preflight: validating configured ports are free..."
+  local ports_to_check=("$http_port" "$https_port")
+  [ -n "$mqtt_port" ] && ports_to_check+=("$mqtt_port")
+  for port in "${ports_to_check[@]}"; do
+    if is_port_in_use "$port"; then
+      err "Port ${port} is in use."
+      local details
+      details=$(port_in_use_details "$port")
+      [ -n "$details" ] && echo "   ${details}"
+      failed=1
+    fi
+  done
+
+  if [ "$failed" -eq 1 ]; then
+    echo ""
+    echo "   Remediation:"
+    echo "     • Stop the process using the conflicting port(s)"
+    echo "     • Or run ./manage.sh setup and re-negotiate ports"
+    echo "     • Then re-run this command"
+    return 1
+  fi
+
+  log "Preflight port validation passed."
+  return 0
+}
+
 # Check config.json for placeholder values
 check_config_placeholders() {
-  if [ -f config.json ]; then
-    if grep -qE 'your-username|your-password|your-secret|example\.com|changeme' config.json 2>/dev/null; then
+  local cfg="${1:-$PROD_DATA/config.json}"
+  if [ -f "$cfg" ]; then
+    if grep -qE 'your-username|your-password|your-secret|example\.com|changeme' "$cfg" 2>/dev/null; then
       warn "config.json contains placeholder values."
-      warn "Edit config.json and replace placeholder values before deploying."
+      warn "Edit ${cfg} and replace placeholder values before deploying."
     fi
   fi
 }
@@ -173,25 +509,51 @@ cmd_setup() {
 
   log "Docker $(docker --version | grep -oP 'version \K[^ ,]+')"
   log "Compose: $DC"
+
+  # Default to latest release tag (instead of staying on master)
+  if ! is_done "version_pin"; then
+    git fetch origin --tags --force 2>/dev/null || true
+    local latest_tag
+    latest_tag=$(git tag -l 'v*' --sort=-v:refname | head -1)
+    if [ -n "$latest_tag" ]; then
+      local current_ref
+      current_ref=$(git describe --tags --exact-match 2>/dev/null || echo "")
+      if [ "$current_ref" != "$latest_tag" ]; then
+        info "Pinning to latest release: ${latest_tag}"
+        git checkout "$latest_tag" 2>/dev/null
+      else
+        log "Already on latest release: ${latest_tag}"
+      fi
+    fi
+    mark_done "version_pin"
+  fi
   
   mark_done "docker"
 
   # ── Step 2: Config ──
   step 2 "Configuration"
 
-  if [ -f config.json ]; then
-    log "config.json already exists (not overwriting)."
+  if [ -f "$PROD_DATA/config.json" ]; then
+    log "config.json found in data directory."
     # Sanity check the JSON
-    if ! python3 -c "import json; json.load(open('config.json'))" 2>/dev/null && \
-       ! node -e "JSON.parse(require('fs').readFileSync('config.json'))" 2>/dev/null; then
+    if ! python3 -c "import json; json.load(open('$PROD_DATA/config.json'))" 2>/dev/null && \
+       ! node -e "JSON.parse(require('fs').readFileSync('$PROD_DATA/config.json'))" 2>/dev/null; then
       err "config.json has invalid JSON. Fix it and re-run setup."
       exit 1
     fi
     log "config.json is valid JSON."
-    check_config_placeholders
+    check_config_placeholders "$PROD_DATA/config.json"
+  elif [ -f config.json ]; then
+    # Legacy: config in repo root — move it to data dir
+    info "Found config.json in repo root — moving to data directory..."
+    mkdir -p "$PROD_DATA"
+    cp config.json "$PROD_DATA/config.json"
+    log "Config moved to ${PROD_DATA}/config.json"
+    check_config_placeholders "$PROD_DATA/config.json"
   else
-    info "Creating config.json from example..."
-    cp config.example.json config.json
+    info "Creating config.json in data directory from example..."
+    mkdir -p "$PROD_DATA"
+    cp config.example.json "$PROD_DATA/config.json"
 
     # Generate a random API key
     if command -v openssl &> /dev/null; then
@@ -201,24 +563,126 @@ cmd_setup() {
     fi
     # Replace the placeholder API key
     if command -v sed &> /dev/null; then
-      sed -i "s/your-secret-api-key-here/${API_KEY}/" config.json
+      sed -i "s/your-secret-api-key-here/${API_KEY}/" "$PROD_DATA/config.json"
     fi
 
     log "Created config.json with random API key."
-    check_config_placeholders
+    check_config_placeholders "$PROD_DATA/config.json"
     echo ""
-    echo "   You can customize config.json later (map center, branding, etc)."
-    echo "   Edit with: nano config.json"
+    echo "   Config saved to: ${PROD_DATA}/config.json"
+    echo "   Edit with: nano ${PROD_DATA}/config.json"
     echo ""
   fi
   mark_done "config"
 
-  # ── Step 3: Domain & HTTPS ──
-  step 3 "Domain & HTTPS"
+  # ── Step 3: Ports & Networking ──
+  step 3 "Ports & Networking"
+
+  local default_http=80
+  local default_https=443
+  local default_mqtt=1883
+  local selected_http="$default_http"
+  local selected_https="$default_https"
+  local selected_mqtt="$default_mqtt"
+  local selected_disable_mosquitto="${DISABLE_MOSQUITTO:-false}"
+  local selected_data_dir="${PROD_DATA_DIR:-$HOME/meshcore-data}"
+
+  local env_http=""
+  local env_https=""
+  local env_mqtt=""
+  local env_disable_mosquitto=""
+  local env_data_dir=""
+
+  if [ -f .env ]; then
+    env_http=$(get_env_value "PROD_HTTP_PORT" ".env")
+    env_https=$(get_env_value "PROD_HTTPS_PORT" ".env")
+    env_mqtt=$(get_env_value "PROD_MQTT_PORT" ".env")
+    env_disable_mosquitto=$(get_env_value "DISABLE_MOSQUITTO" ".env")
+    env_data_dir=$(get_env_value "PROD_DATA_DIR" ".env")
+    env_data_dir="${env_data_dir/#\~/$HOME}"
+    [ -n "$env_data_dir" ] && selected_data_dir="$env_data_dir"
+    [ -n "$env_disable_mosquitto" ] && selected_disable_mosquitto="$env_disable_mosquitto"
+    show_env_port_summary "${env_http:-<unset>}" "${env_https:-<unset>}" "${env_mqtt:-<unset>}" "${env_data_dir:-<unset>}" "${env_disable_mosquitto:-<unset>}"
+  else
+    info ".env not found. It will be created from .env.example."
+  fi
+
+  local has_current_ports=false
+  if is_true "$selected_disable_mosquitto"; then
+    if is_valid_port "$env_http" && is_valid_port "$env_https"; then
+      has_current_ports=true
+    fi
+  elif is_valid_port "$env_http" && is_valid_port "$env_https" && is_valid_port "$env_mqtt"; then
+    has_current_ports=true
+  fi
+
+  local renegotiate=true
+  if [ -f .env ] && $has_current_ports; then
+    if confirm "Keep current ports from .env?"; then
+      renegotiate=false
+      selected_http="$env_http"
+      selected_https="$env_https"
+      if is_valid_port "$env_mqtt"; then
+        selected_mqtt="$env_mqtt"
+      fi
+      log "Keeping current ports from .env."
+    fi
+  fi
+
+  if $renegotiate; then
+    resolve_port_check_method
+    if [ "$PORT_CHECK_METHOD" = "none" ]; then
+      warn "No supported port detection tool found (ss/lsof/netstat/nc)."
+      warn "You'll still be prompted, but conflicts cannot be detected now."
+    else
+      info "Detecting listeners using ${PORT_CHECK_METHOD}..."
+    fi
+
+    local suggested_http="$default_http"
+    local suggested_https="$default_https"
+    local suggested_mqtt="$default_mqtt"
+
+    if is_port_in_use "$default_http"; then
+      warn "Port ${default_http} is in use."
+      local details_http
+      details_http=$(port_in_use_details "$default_http")
+      [ -n "$details_http" ] && echo "     ${details_http}"
+      suggested_http=$(find_next_available_port "$default_http")
+      [ -n "$suggested_http" ] && info "Suggested HTTP port: ${suggested_http}"
+    fi
+
+    if is_port_in_use "$default_https"; then
+      warn "Port ${default_https} is in use."
+      local details_https
+      details_https=$(port_in_use_details "$default_https")
+      [ -n "$details_https" ] && echo "     ${details_https}"
+      suggested_https=$(find_next_available_port "$default_https")
+      [ -n "$suggested_https" ] && info "Suggested HTTPS port: ${suggested_https}"
+    fi
+
+    selected_http=$(prompt_for_port "HTTP" "$default_http" "$suggested_http")
+    selected_https=$(prompt_for_port "HTTPS" "$default_https" "$suggested_https")
+
+    if confirm_yes_default "Use built-in MQTT broker?"; then
+      selected_disable_mosquitto="false"
+      if is_port_in_use "$default_mqtt"; then
+        warn "Port ${default_mqtt} is in use."
+        local details_mqtt
+        details_mqtt=$(port_in_use_details "$default_mqtt")
+        [ -n "$details_mqtt" ] && echo "     ${details_mqtt}"
+        suggested_mqtt=$(find_next_available_port "$default_mqtt")
+        [ -n "$suggested_mqtt" ] && info "Suggested MQTT port: ${suggested_mqtt}"
+      fi
+      selected_mqtt=$(prompt_for_port "MQTT" "$default_mqtt" "$suggested_mqtt")
+    else
+      selected_disable_mosquitto="true"
+      log "Internal MQTT broker disabled."
+    fi
+  fi
 
   if [ -f caddy-config/Caddyfile ]; then
     EXISTING_DOMAIN=$(grep -v '^#' caddy-config/Caddyfile 2>/dev/null | head -1 | tr -d ' {')
-    if [ "$EXISTING_DOMAIN" = ":80" ]; then
+    if [ "$EXISTING_DOMAIN" = ":80" ] || [ "$EXISTING_DOMAIN" = ":${selected_http}" ]; then
       log "Caddyfile exists (HTTP only, no HTTPS)."
     else
       log "Caddyfile exists for ${EXISTING_DOMAIN}"
@@ -231,7 +695,7 @@ cmd_setup() {
     echo "   1) Direct with built-in HTTPS — Caddy auto-provisions a TLS cert"
     echo "      (requires ports 80 + 443 open, and a domain pointed at this server)"
     echo ""
-    echo "   2) Behind my own reverse proxy — HTTP only, I choose the port"
+    echo "   2) Behind my own reverse proxy — HTTP only"
     echo "      (for Cloudflare Tunnel, nginx, Traefik, etc.)"
     echo ""
     read -p "   Choose [1/2]: " -n 1 -r
@@ -252,13 +716,17 @@ cmd_setup() {
 
         # Validate DNS
         info "Checking DNS..."
-        RESOLVED_IP=$(dig +short "$DOMAIN" 2>/dev/null | grep -E '^[0-9]+\.' | head -1)
+        RESOLVED_IP=$(resolve_domain_ipv4 "$DOMAIN")
         MY_IP=$(curl -s -4 ifconfig.me 2>/dev/null || curl -s -4 icanhazip.com 2>/dev/null || echo "unknown")
 
         if [ -z "$RESOLVED_IP" ]; then
-          warn "${DOMAIN} doesn't resolve yet."
-          warn "Create an A record pointing to ${MY_IP}"
-          warn "HTTPS won't work until DNS propagates (1-60 min)."
+          if has_dns_resolution_tool; then
+            warn "${DOMAIN} doesn't resolve yet."
+            warn "Create an A record pointing to ${MY_IP}"
+            warn "HTTPS won't work until DNS propagates (1-60 min)."
+          else
+            warn "DNS tool not found; skipping domain resolution check."
+          fi
           echo ""
           if ! confirm "Continue anyway?"; then
             echo "   Run ./manage.sh setup again when DNS is ready."
@@ -274,33 +742,47 @@ cmd_setup() {
             exit 0
           fi
         fi
-
-        # Check port 80
-        if command -v curl &> /dev/null; then
-          if curl -s --connect-timeout 3 "http://localhost:80" &>/dev/null || \
-             curl -s --connect-timeout 3 "http://${MY_IP}:80" &>/dev/null 2>&1; then
-            warn "Something is already listening on port 80."
-            warn "Stop it first: sudo systemctl stop nginx apache2"
-          fi
-        fi
         ;;
       2)
-        read -p "   HTTP port [80]: " HTTP_PORT
-        HTTP_PORT=${HTTP_PORT:-80}
-        echo ":${HTTP_PORT} {
+        echo ":${selected_http} {
     reverse_proxy localhost:3000
 }" > caddy-config/Caddyfile
-        log "Caddyfile created (HTTP only on port ${HTTP_PORT})."
-        echo "   Point your reverse proxy or tunnel to this server's port ${HTTP_PORT}."
+        log "Caddyfile created (HTTP only on port ${selected_http})."
+        echo "   Point your reverse proxy or tunnel to this server's port ${selected_http}."
         ;;
       *)
         warn "Invalid choice. Defaulting to HTTP only."
-        echo ':80 {
+        echo ":${selected_http} {
     reverse_proxy localhost:3000
-}' > caddy-config/Caddyfile
+}" > caddy-config/Caddyfile
         ;;
     esac
   fi
+
+  write_env_managed_values "$selected_http" "$selected_https" "$selected_mqtt" "$selected_data_dir" "$selected_disable_mosquitto"
+  log "Saved negotiated ports to .env"
+  show_env_port_summary "$selected_http" "$selected_https" "$selected_mqtt" "$selected_data_dir" "$selected_disable_mosquitto"
+
+  echo "   Resolved port mapping:"
+  echo "     UI HTTP:  ${selected_http}"
+  echo "     UI HTTPS: ${selected_https}"
+  if is_true "$selected_disable_mosquitto"; then
+    echo "     MQTT:     disabled (external broker)"
+  else
+    echo "     MQTT:     ${selected_mqtt}"
+  fi
+  echo ""
+  if ! confirm "Proceed to build/start with these ports?"; then
+    echo "   Setup cancelled. Re-run ./manage.sh setup when ready."
+    exit 0
+  fi
+
+  export PROD_HTTP_PORT="$selected_http"
+  export PROD_HTTPS_PORT="$selected_https"
+  export PROD_MQTT_PORT="$selected_mqtt"
+  export DISABLE_MOSQUITTO="$selected_disable_mosquitto"
+  export PROD_DATA_DIR="$selected_data_dir"
+  PROD_DATA="$PROD_DATA_DIR"
   mark_done "caddyfile"
 
   # ── Step 4: Build ──
@@ -311,18 +793,26 @@ cmd_setup() {
   if [ -n "$IMAGE_EXISTS" ] && is_done "build"; then
     log "Image already built."
     if confirm "Rebuild? (only needed if you updated the code)"; then
-      $DC build prod
+      dc_prod build prod
       log "Image rebuilt."
     fi
   else
     info "This takes 1-2 minutes the first time..."
-    $DC build prod
+    dc_prod build prod
     log "Image built."
   fi
   mark_done "build"
 
   # ── Step 5: Start container ──
   step 5 "Starting container"
+
+  if docker ps --format '{{.Names}}' | grep -q "^corescope-prod$"; then
+    info "Production container already running — skipping preflight port check."
+  else
+    if ! preflight_validate_prod_ports; then
+      exit 1
+    fi
+  fi
 
   # Detect existing data directories
   if [ -d "$PROD_DATA" ] && [ -f "$PROD_DATA/meshcore.db" ]; then
@@ -333,7 +823,7 @@ cmd_setup() {
     log "Container already running."
   else
     mkdir -p "$PROD_DATA"
-    $DC up -d prod
+    dc_prod up -d prod
     log "Container started."
   fi
   mark_done "container"
@@ -402,25 +892,26 @@ prepare_staging_db() {
 
 # Copy config.prod.json → config.staging.json with siteName change
 prepare_staging_config() {
-  local prod_config="./config.json"
+  local prod_config="$PROD_DATA/config.json"
   local staging_config="$STAGING_DATA/config.json"
+  mkdir -p "$STAGING_DATA"
+
+  # Docker may have created config.json as a directory
+  [ -d "$staging_config" ] && rmdir "$staging_config" 2>/dev/null || true
+
   if [ ! -f "$prod_config" ]; then
-    warn "No config.json found at ${prod_config} — staging may not start correctly."
+    warn "No production config at ${prod_config} — staging may use defaults."
     return
   fi
-  if [ ! -f "$staging_config" ] || [ "$prod_config" -nt "$staging_config" ]; then
-    info "Copying production config to staging..."
-    cp "$prod_config" "$staging_config"
-    sed -i 's/"siteName":\s*"[^"]*"/"siteName": "CoreScope — STAGING"/' "$staging_config"
-    log "Staging config created at ${staging_config} with STAGING site name."
-  else
-    log "Staging config is up to date."
-  fi
+  info "Copying production config to staging..."
+  cp "$prod_config" "$staging_config"
+  sed -i 's/"siteName":\s*"[^"]*"/"siteName": "CoreScope — STAGING"/' "$staging_config"
+  log "Staging config created at ${staging_config} with STAGING site name."
   # Copy Caddyfile for staging (HTTP-only on staging port)
   local staging_caddy="$STAGING_DATA/Caddyfile"
   if [ ! -f "$staging_caddy" ]; then
-    info "Creating staging Caddyfile (HTTP-only on port ${STAGING_HTTP_PORT:-81})..."
-    echo ":${STAGING_HTTP_PORT:-81} {" > "$staging_caddy"
+    info "Creating staging Caddyfile (HTTP-only on port ${STAGING_GO_HTTP_PORT:-82})..."
+    echo ":${STAGING_GO_HTTP_PORT:-82} {" > "$staging_caddy"
     echo "    reverse_proxy localhost:3000" >> "$staging_caddy"
     echo "}" >> "$staging_caddy"
     log "Staging Caddyfile created at ${staging_caddy}"
@@ -439,11 +930,121 @@ container_health() {
 
 # ─── Start / Stop / Restart ──────────────────────────────────────────────
 
+# Migrate legacy root config.json to data directory path
+migrate_config() {
+  local mode="${1:-interactive}"
+  local legacy_config="./config.json"
+  local target_config="$PROD_DATA/config.json"
+  local reply=""
+
+  mkdir -p "$PROD_DATA"
+
+  if [ -f "$target_config" ]; then
+    return 0
+  fi
+
+  if [ ! -f "$legacy_config" ]; then
+    return 0
+  fi
+
+  if [ "$mode" = "auto" ]; then
+    echo "→ Migrating config.json from repo root to ${PROD_DATA}/config.json..."
+    cp "$legacy_config" "$target_config"
+    echo "✓ Config migrated."
+    return 0
+  fi
+
+  echo ""
+  echo "Found legacy config location:"
+  echo "  Source: ./config.json (repo root)"
+  echo "  Destination: ${PROD_DATA}/config.json"
+  echo "  Note: CoreScope reads config from the data directory at runtime."
+  read -p "Move to ${PROD_DATA}/config.json? [Y/n] " reply
+
+  if [ -z "$reply" ] || [[ "$reply" =~ ^[Yy]$ ]]; then
+    cp "$legacy_config" "$target_config"
+    log "Copied config.json to ${target_config}"
+    return 0
+  fi
+
+  warn "Migration aborted."
+  echo "Move ./config.json to ${PROD_DATA}/config.json, then run this command again."
+  return 1
+}
+
+# Ensure config.json exists in the data directory before starting
+ensure_config() {
+  local data_dir="$1"
+  local config="$data_dir/config.json"
+  mkdir -p "$data_dir"
+
+  # Docker may have created config.json as a directory from a prior failed mount
+  [ -d "$config" ] && rmdir "$config" 2>/dev/null || true
+
+  if [ -f "$config" ]; then
+    return 0
+  fi
+
+  # Try to copy from repo root (legacy location)
+  if [ -f ./config.json ]; then
+    info "No config in data directory — copying from ./config.json"
+    cp ./config.json "$config"
+    return 0
+  fi
+
+  # Prompt admin
+  echo ""
+  warn "No config.json found in ${data_dir}/"
+  echo ""
+  echo "   CoreScope needs a config.json to connect to MQTT brokers."
+  echo ""
+  echo "   Options:"
+  echo "     1) Create from example (you'll edit MQTT settings after)"
+  echo "     2) I'll put one there myself (abort for now)"
+  echo ""
+  read -p "   Choose [1/2]: " -n 1 -r
+  echo ""
+
+  case $REPLY in
+    1)
+      cp config.example.json "$config"
+      # Generate a random API key
+      if command -v openssl &>/dev/null; then
+        API_KEY=$(openssl rand -hex 16)
+      else
+        API_KEY=$(head -c 32 /dev/urandom | xxd -p | head -c 32)
+      fi
+      sed -i "s/your-secret-api-key-here/${API_KEY}/" "$config" 2>/dev/null || true
+      log "Created ${config} from example with random API key."
+      warn "Edit MQTT settings before connecting observers:"
+      echo "     nano ${config}"
+      echo ""
+      ;;
+    *)
+      echo "   Place your config.json at: ${config}"
+      echo "   Then run this command again."
+      exit 0
+      ;;
+  esac
+}
+
 cmd_start() {
   local WITH_STAGING=false
   if [ "$1" = "--with-staging" ]; then
     WITH_STAGING=true
   fi
+
+  if docker ps --format '{{.Names}}' | grep -q "^corescope-prod$"; then
+    info "Production container already running — skipping preflight port check."
+  else
+    if ! preflight_validate_prod_ports; then
+      exit 1
+    fi
+  fi
+
+  migrate_config || exit 1
+  # Always check prod config
+  ensure_config "$PROD_DATA"
 
   if $WITH_STAGING; then
     # Prepare staging data and config
@@ -451,14 +1052,19 @@ cmd_start() {
     prepare_staging_config
 
     info "Starting production container (corescope-prod) on ports ${PROD_HTTP_PORT:-80}/${PROD_HTTPS_PORT:-443}..."
-    info "Starting staging container (corescope-staging-go) on port ${STAGING_GO_HTTP_PORT:-82}..."
-    $DC up -d prod
-    $DC -f "$STAGING_COMPOSE_FILE" -p corescope-staging up -d staging-go
-    log "Production started on ports ${PROD_HTTP_PORT:-80}/${PROD_HTTPS_PORT:-443}/${PROD_MQTT_PORT:-1883}"
-    log "Staging started on port ${STAGING_GO_HTTP_PORT:-82} (MQTT: ${STAGING_GO_MQTT_PORT:-1885})"
+    info "Starting staging container (${STAGING_CONTAINER}) on port ${STAGING_GO_HTTP_PORT:-82}..."
+    dc_prod up -d prod
+    dc_staging up -d staging-go
+    if is_true "${DISABLE_MOSQUITTO:-false}"; then
+      log "Production started on ports ${PROD_HTTP_PORT:-80}/${PROD_HTTPS_PORT:-443} (MQTT disabled)"
+      log "Staging started on port ${STAGING_GO_HTTP_PORT:-82} (MQTT disabled)"
+    else
+      log "Production started on ports ${PROD_HTTP_PORT:-80}/${PROD_HTTPS_PORT:-443}/${PROD_MQTT_PORT:-1883}"
+      log "Staging started on port ${STAGING_GO_HTTP_PORT:-82} (MQTT: ${STAGING_GO_MQTT_PORT:-1885})"
+    fi
   else
     info "Starting production container (corescope-prod) on ports ${PROD_HTTP_PORT:-80}/${PROD_HTTPS_PORT:-443}..."
-    $DC up -d prod
+    dc_prod up -d prod
     log "Production started. Staging NOT running (use --with-staging to start both)."
   fi
 }
@@ -469,20 +1075,20 @@ cmd_stop() {
   case "$TARGET" in
     prod)
       info "Stopping production container (corescope-prod)..."
-      $DC stop prod
+      dc_prod stop prod
       log "Production stopped."
       ;;
     staging)
-      info "Stopping staging container (corescope-staging-go)..."
-      $DC -f "$STAGING_COMPOSE_FILE" -p corescope-staging rm -sf staging-go 2>/dev/null || true
-      docker rm -f corescope-staging-go meshcore-staging-go corescope-staging meshcore-staging 2>/dev/null || true
+      info "Stopping staging container (${STAGING_CONTAINER})..."
+      dc_staging rm -sf staging-go 2>/dev/null || true
+      docker rm -f "$STAGING_CONTAINER" meshcore-staging-go corescope-staging meshcore-staging 2>/dev/null || true
       log "Staging stopped and cleaned up."
       ;;
     all)
       info "Stopping all containers..."
-      $DC stop prod
-      $DC -f "$STAGING_COMPOSE_FILE" -p corescope-staging rm -sf staging-go 2>/dev/null || true
-      docker rm -f corescope-staging-go meshcore-staging-go corescope-staging meshcore-staging 2>/dev/null || true
+      dc_prod stop prod
+      dc_staging rm -sf staging-go 2>/dev/null || true
+      docker rm -f "$STAGING_CONTAINER" meshcore-staging-go corescope-staging meshcore-staging 2>/dev/null || true
       log "All containers stopped."
       ;;
     *)
@@ -497,18 +1103,18 @@ cmd_restart() {
   case "$TARGET" in
     prod)
       info "Restarting production container (corescope-prod)..."
-      $DC up -d --force-recreate prod
+      dc_prod up -d --force-recreate prod
       log "Production restarted."
       ;;
     staging)
-      info "Restarting staging container (corescope-staging-go)..."
+      info "Restarting staging container (${STAGING_CONTAINER})..."
       # Stop and remove old container
-      $DC -f "$STAGING_COMPOSE_FILE" -p corescope-staging rm -sf staging-go 2>/dev/null || true
-      docker rm -f corescope-staging-go 2>/dev/null || true
+      dc_staging rm -sf staging-go 2>/dev/null || true
+      docker rm -f "$STAGING_CONTAINER" 2>/dev/null || true
       # Wait for container to be fully gone and memory to be reclaimed
       # This prevents OOM when old + new containers overlap on small VMs
       for i in $(seq 1 15); do
-        if ! docker ps -a --format '{{.Names}}' | grep -q 'corescope-staging-go'; then
+        if ! docker ps -a --format '{{.Names}}' | grep -q "$STAGING_CONTAINER"; then
           break
         fi
         sleep 1
@@ -520,15 +1126,15 @@ cmd_restart() {
         warn "Staging config not found at $staging_config — creating from prod config..."
         prepare_staging_config
       fi
-      $DC -f "$STAGING_COMPOSE_FILE" -p corescope-staging up -d staging-go
+      dc_staging up -d staging-go
       log "Staging restarted."
       ;;
     all)
       info "Restarting all containers..."
-      $DC up -d --force-recreate prod
-      $DC -f "$STAGING_COMPOSE_FILE" -p corescope-staging rm -sf staging-go 2>/dev/null || true
-      docker rm -f corescope-staging-go 2>/dev/null || true
-      $DC -f "$STAGING_COMPOSE_FILE" -p corescope-staging up -d staging-go
+      dc_prod up -d --force-recreate prod
+      dc_staging rm -sf staging-go 2>/dev/null || true
+      docker rm -f "$STAGING_CONTAINER" 2>/dev/null || true
+      dc_staging up -d staging-go
       log "All containers restarted."
       ;;
     *)
@@ -575,15 +1181,21 @@ cmd_status() {
   echo "═══════════════════════════════════════"
   echo ""
 
+  # Version
+  local current_version
+  current_version=$(git describe --tags --exact-match 2>/dev/null || git rev-parse --short HEAD 2>/dev/null || echo "unknown")
+  info "Version: ${current_version}"
+  echo ""
+
   # Production
   show_container_status "corescope-prod" "Production"
   echo ""
 
   # Staging
-  if container_running "corescope-staging-go"; then
-    show_container_status "corescope-staging-go" "Staging"
+  if container_running "$STAGING_CONTAINER"; then
+    show_container_status "$STAGING_CONTAINER" "Staging"
   else
-    info "Staging (corescope-staging-go): Not running (use --with-staging to start both)"
+    info "Staging (${STAGING_CONTAINER}): Not running (use --with-staging to start both)"
   fi
   echo ""
 
@@ -610,12 +1222,12 @@ cmd_logs() {
   case "$TARGET" in
     prod)
       info "Tailing production logs..."
-      $DC logs -f --tail="$LINES" prod
+      dc_prod logs -f --tail="$LINES" prod
       ;;
     staging)
-      if container_running "corescope-staging"; then
+      if container_running "$STAGING_CONTAINER"; then
         info "Tailing staging logs..."
-        $DC -f "$STAGING_COMPOSE_FILE" -p corescope-staging logs -f --tail="$LINES" staging-go
+        dc_staging logs -f --tail="$LINES" staging-go
       else
         err "Staging container is not running."
         info "Start with: ./manage.sh start --with-staging"
@@ -643,8 +1255,8 @@ cmd_promote() {
 
   # Show what's currently running
   local staging_image staging_created prod_image prod_created
-  staging_image=$(docker inspect corescope-staging-go --format '{{.Config.Image}}' 2>/dev/null || echo "not running")
-  staging_created=$(docker inspect corescope-staging --format '{{.Created}}' 2>/dev/null || echo "N/A")
+  staging_image=$(docker inspect "$STAGING_CONTAINER" --format '{{.Config.Image}}' 2>/dev/null || echo "not running")
+  staging_created=$(docker inspect "$STAGING_CONTAINER" --format '{{.Created}}' 2>/dev/null || echo "N/A")
   prod_image=$(docker inspect corescope-prod --format '{{.Config.Image}}' 2>/dev/null || echo "not running")
   prod_created=$(docker inspect corescope-prod --format '{{.Created}}' 2>/dev/null || echo "N/A")
 
@@ -672,7 +1284,7 @@ cmd_promote() {
 
   # Restart prod with latest image
   info "Restarting production with latest image..."
-  $DC up -d --force-recreate prod
+  dc_prod up -d --force-recreate prod
 
   # Wait for health
   info "Waiting for production health check..."
@@ -702,16 +1314,53 @@ cmd_promote() {
 # ─── Update ───────────────────────────────────────────────────────────────
 
 cmd_update() {
-  info "Pulling latest code..."
-  git pull --ff-only
+  local version="${1:-}"
+
+  info "Fetching latest changes and tags..."
+  git fetch origin --tags --force
+
+  if [ -z "$version" ]; then
+    # No arg: checkout latest release tag
+    local latest_tag
+    latest_tag=$(git tag -l 'v*' --sort=-v:refname | head -1)
+    if [ -z "$latest_tag" ]; then
+      err "No release tags found. Use './manage.sh update latest' for tip of master."
+      exit 1
+    fi
+    info "Checking out latest release: ${latest_tag}"
+    git checkout "$latest_tag" || { err "Failed to checkout tag '${latest_tag}'."; exit 1; }
+  elif [ "$version" = "latest" ]; then
+    # Explicit opt-in to bleeding edge (tip of master)
+    # Note: this creates a detached HEAD at origin/master, which is intentional —
+    # we want a read-only snapshot of upstream, not a local tracking branch.
+    info "Checking out tip of master (detached HEAD at origin/master)..."
+    git checkout origin/master || { err "Failed to checkout origin/master."; exit 1; }
+  else
+    # Specific tag requested
+    if ! git tag -l "$version" | grep -q .; then
+      err "Tag '${version}' not found."
+      echo ""
+      echo "   Available releases:"
+      git tag -l 'v*' --sort=-v:refname | head -10 | sed 's/^/     /'
+      exit 1
+    fi
+    info "Checking out version: ${version}"
+    git checkout "$version" || { err "Failed to checkout '${version}'."; exit 1; }
+  fi
+
+  migrate_config auto
 
   info "Rebuilding image..."
-  $DC build prod
+  dc_prod build prod
 
   info "Restarting with new image..."
-  $DC up -d --force-recreate prod
+  dc_prod up -d --force-recreate prod
 
   log "Updated and restarted. Data preserved."
+  # Show current version
+  local current
+  current=$(git describe --tags --exact-match 2>/dev/null || git rev-parse --short HEAD)
+  log "Running version: ${current}"
 }
 
 # ─── Backup ───────────────────────────────────────────────────────────────
@@ -736,10 +1385,13 @@ cmd_backup() {
     warn "Database not found (container not running?)"
   fi
 
-  # Config
-  if [ -f config.json ]; then
-    cp config.json "$BACKUP_DIR/config.json"
+  # Config (now lives in data dir)
+  if [ -f "$PROD_DATA/config.json" ]; then
+    cp "$PROD_DATA/config.json" "$BACKUP_DIR/config.json"
     log "config.json"
+  elif [ -f config.json ]; then
+    cp config.json "$BACKUP_DIR/config.json"
+    log "config.json (legacy repo root)"
   fi
 
   # Caddyfile
@@ -823,7 +1475,7 @@ cmd_restore() {
   info "Backing up current state..."
   cmd_backup "./backups/corescope-pre-restore-$(date +%Y%m%d-%H%M%S)"
 
-  $DC stop prod 2>/dev/null || true
+  dc_prod stop prod 2>/dev/null || true
 
   # Restore database
   mkdir -p "$PROD_DATA"
@@ -833,8 +1485,8 @@ cmd_restore() {
 
   # Restore config if present
   if [ -n "$CONFIG_FILE" ] && [ -f "$CONFIG_FILE" ]; then
-    cp "$CONFIG_FILE" ./config.json
-    log "config.json restored"
+    cp "$CONFIG_FILE" "$PROD_DATA/config.json"
+    log "config.json restored to ${PROD_DATA}/"
   fi
 
   # Restore Caddyfile if present
@@ -851,7 +1503,7 @@ cmd_restore() {
     log "theme.json restored"
   fi
 
-  $DC up -d prod
+  dc_prod up -d prod
   log "Restored and restarted."
 }
 
@@ -889,8 +1541,8 @@ cmd_reset() {
     exit 0
   fi
 
-  $DC down --rmi local 2>/dev/null || true
-  $DC -f "$STAGING_COMPOSE_FILE" -p corescope-staging down --rmi local 2>/dev/null || true
+  dc_prod down --rmi local 2>/dev/null || true
+  dc_staging down --rmi local 2>/dev/null || true
   rm -f "$STATE_FILE"
 
   log "Reset complete. Run './manage.sh setup' to start over."
@@ -918,7 +1570,7 @@ cmd_help() {
   echo "    logs [prod|staging] [N]  Follow logs (default: prod, last 100 lines)"
   echo ""
   printf '%b\n' "  ${BOLD}Maintain${NC}"
-  echo "    update             Pull latest code, rebuild, restart (keeps data)"
+  echo "    update [version]   Update to version (no arg=latest tag, 'latest'=master tip, or e.g. v3.1.0)"
   echo "    promote            Promote staging → production (backup + restart)"
   echo "    backup [dir]       Full backup: database + config + theme"
   echo "    restore <d>        Restore from backup dir or .db file"
@@ -937,7 +1589,7 @@ case "${1:-help}" in
   restart)   cmd_restart "$2" ;;
   status)    cmd_status ;;
   logs)      cmd_logs "$2" "$3" ;;
-  update)    cmd_update ;;
+  update)    cmd_update "$2" ;;
   promote)   cmd_promote ;;
   backup)    cmd_backup "$2" ;;
   restore)   cmd_restore "$2" ;;

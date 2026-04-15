@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -15,12 +16,12 @@ import (
 
 // DBStats tracks operational metrics for the ingestor database.
 type DBStats struct {
-	TransmissionsInserted atomic.Int64
-	ObservationsInserted  atomic.Int64
+	TransmissionsInserted  atomic.Int64
+	ObservationsInserted   atomic.Int64
 	DuplicateTransmissions atomic.Int64
-	NodeUpserts           atomic.Int64
-	ObserverUpserts       atomic.Int64
-	WriteErrors           atomic.Int64
+	NodeUpserts            atomic.Int64
+	ObserverUpserts        atomic.Int64
+	WriteErrors            atomic.Int64
 }
 
 // Store wraps the SQLite database for packet ingestion.
@@ -35,13 +36,22 @@ type Store struct {
 	stmtUpsertNode           *sql.Stmt
 	stmtIncrementAdvertCount *sql.Stmt
 	stmtUpsertObserver       *sql.Stmt
-	stmtGetObserverRowid        *sql.Stmt
-	stmtUpdateNodeTelemetry *sql.Stmt
+	stmtGetObserverRowid       *sql.Stmt
+	stmtUpdateObserverLastSeen *sql.Stmt
+	stmtUpdateNodeTelemetry    *sql.Stmt
+	stmtUpsertMetrics          *sql.Stmt
+
+	sampleIntervalSec int
 }
 
 // OpenStore opens or creates a SQLite DB at the given path, applying the
 // v3 schema that is compatible with the Node.js server.
 func OpenStore(dbPath string) (*Store, error) {
+	return OpenStoreWithInterval(dbPath, 300)
+}
+
+// OpenStoreWithInterval opens or creates a SQLite DB with a configurable sample interval.
+func OpenStoreWithInterval(dbPath string, sampleIntervalSec int) (*Store, error) {
 	dir := filepath.Dir(dbPath)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, fmt.Errorf("creating data dir: %w", err)
@@ -64,7 +74,7 @@ func OpenStore(dbPath string) (*Store, error) {
 		return nil, fmt.Errorf("applying schema: %w", err)
 	}
 
-	s := &Store{db: db}
+	s := &Store{db: db, sampleIntervalSec: sampleIntervalSec}
 	if err := s.prepareStatements(); err != nil {
 		return nil, fmt.Errorf("preparing statements: %w", err)
 	}
@@ -279,6 +289,62 @@ func applySchema(db *sql.DB) error {
 		log.Println("[migration] node telemetry columns added")
 	}
 
+	// One-time migration: add timestamp index on observations for fast stats queries.
+	// Older databases created before this index was added suffer from full table scans
+	// on COUNT(*) WHERE timestamp > ?, causing /api/stats to take 30s+.
+	row = db.QueryRow("SELECT 1 FROM _migrations WHERE name = 'obs_timestamp_index_v1'")
+	if row.Scan(&migDone) != nil {
+		log.Println("[migration] Adding timestamp index on observations...")
+		db.Exec(`CREATE INDEX IF NOT EXISTS idx_observations_timestamp ON observations(timestamp)`)
+		db.Exec(`INSERT INTO _migrations (name) VALUES ('obs_timestamp_index_v1')`)
+		log.Println("[migration] observations timestamp index created")
+	}
+
+	// observer_metrics table for RF health dashboard
+	row = db.QueryRow("SELECT 1 FROM _migrations WHERE name = 'observer_metrics_v1'")
+	if row.Scan(&migDone) != nil {
+		log.Println("[migration] Creating observer_metrics table...")
+		_, err := db.Exec(`
+			CREATE TABLE IF NOT EXISTS observer_metrics (
+				observer_id TEXT NOT NULL,
+				timestamp TEXT NOT NULL,
+				noise_floor REAL,
+				tx_air_secs INTEGER,
+				rx_air_secs INTEGER,
+				recv_errors INTEGER,
+				battery_mv INTEGER,
+				PRIMARY KEY (observer_id, timestamp)
+			)
+		`)
+		if err != nil {
+			return fmt.Errorf("observer_metrics schema: %w", err)
+		}
+		db.Exec(`INSERT INTO _migrations (name) VALUES ('observer_metrics_v1')`)
+		log.Println("[migration] observer_metrics table created")
+	}
+
+	// Migration: add timestamp index for cross-observer time-range queries
+	row = db.QueryRow("SELECT 1 FROM _migrations WHERE name = 'observer_metrics_ts_idx'")
+	if row.Scan(&migDone) != nil {
+		log.Println("[migration] Creating observer_metrics timestamp index...")
+		_, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_observer_metrics_timestamp ON observer_metrics(timestamp)`)
+		if err != nil {
+			return fmt.Errorf("observer_metrics timestamp index: %w", err)
+		}
+		db.Exec(`INSERT INTO _migrations (name) VALUES ('observer_metrics_ts_idx')`)
+		log.Println("[migration] observer_metrics timestamp index created")
+	}
+
+	// Migration: add packets_sent and packets_recv columns to observer_metrics
+	row = db.QueryRow("SELECT 1 FROM _migrations WHERE name = 'observer_metrics_packets_v1'")
+	if row.Scan(&migDone) != nil {
+		log.Println("[migration] Adding packets_sent/packets_recv columns to observer_metrics...")
+		db.Exec(`ALTER TABLE observer_metrics ADD COLUMN packets_sent INTEGER`)
+		db.Exec(`ALTER TABLE observer_metrics ADD COLUMN packets_recv INTEGER`)
+		db.Exec(`INSERT INTO _migrations (name) VALUES ('observer_metrics_packets_v1')`)
+		log.Println("[migration] packets_sent/packets_recv columns added")
+	}
+
 	return nil
 }
 
@@ -333,13 +399,17 @@ func (s *Store) prepareStatements() error {
 	}
 
 	s.stmtUpsertObserver, err = s.db.Prepare(`
-		INSERT INTO observers (id, name, iata, last_seen, first_seen, packet_count, battery_mv, uptime_secs, noise_floor)
-		VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?)
+		INSERT INTO observers (id, name, iata, last_seen, first_seen, packet_count, model, firmware, client_version, radio, battery_mv, uptime_secs, noise_floor)
+		VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
 			name = COALESCE(?, name),
 			iata = COALESCE(?, iata),
 			last_seen = ?,
 			packet_count = packet_count + 1,
+			model = COALESCE(?, model),
+			firmware = COALESCE(?, firmware),
+			client_version = COALESCE(?, client_version),
+			radio = COALESCE(?, radio),
 			battery_mv = COALESCE(?, battery_mv),
 			uptime_secs = COALESCE(?, uptime_secs),
 			noise_floor = COALESCE(?, noise_floor)
@@ -353,11 +423,24 @@ func (s *Store) prepareStatements() error {
 		return err
 	}
 
+	s.stmtUpdateObserverLastSeen, err = s.db.Prepare("UPDATE observers SET last_seen = ? WHERE rowid = ?")
+	if err != nil {
+		return err
+	}
+
 	s.stmtUpdateNodeTelemetry, err = s.db.Prepare(`
 		UPDATE nodes SET
 			battery_mv = COALESCE(?, battery_mv),
 			temperature_c = COALESCE(?, temperature_c)
 		WHERE public_key = ?
+	`)
+	if err != nil {
+		return err
+	}
+
+	s.stmtUpsertMetrics, err = s.db.Prepare(`
+		INSERT OR REPLACE INTO observer_metrics (observer_id, timestamp, noise_floor, tx_air_secs, rx_air_secs, recv_errors, battery_mv, packets_sent, packets_recv)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`)
 	if err != nil {
 		return err
@@ -412,13 +495,16 @@ func (s *Store) InsertTransmission(data *PacketData) (bool, error) {
 		s.Stats.DuplicateTransmissions.Add(1)
 	}
 
-	// Resolve observer_idx
+	// Resolve observer_idx and update last_seen
 	var observerIdx *int64
 	if data.ObserverID != "" {
 		var rowid int64
 		err := s.stmtGetObserverRowid.QueryRow(data.ObserverID).Scan(&rowid)
 		if err == nil {
 			observerIdx = &rowid
+			// Update observer last_seen on every packet to prevent
+			// low-traffic observers from appearing offline (#463)
+			_, _ = s.stmtUpdateObserverLastSeen.Exec(now, rowid)
 		}
 	}
 
@@ -429,8 +515,8 @@ func (s *Store) InsertTransmission(data *PacketData) (bool, error) {
 	}
 
 	_, err = s.stmtInsertObservation.Exec(
-		txID, observerIdx, nil, // direction
-		data.SNR, data.RSSI, nil, // score
+		txID, observerIdx, data.Direction,
+		data.SNR, data.RSSI, data.Score,
 		data.PathJSON, epochTs,
 	)
 	if err != nil {
@@ -485,17 +571,40 @@ func (s *Store) UpdateNodeTelemetry(pubKey string, batteryMv *int, temperatureC 
 
 // ObserverMeta holds optional observer hardware metadata.
 type ObserverMeta struct {
-	BatteryMv  *int     // millivolts, always integer
-	UptimeSecs *int64   // seconds, always integer
-	NoiseFloor *float64 // dBm, may have decimals
+	Model         *string  // e.g., L1
+	Firmware      *string  // firmware version string
+	ClientVersion *string  // client app version string
+	Radio         *string  // radio chipset/platform string
+	BatteryMv     *int     // millivolts, always integer
+	UptimeSecs    *int64   // seconds, always integer
+	NoiseFloor    *float64 // dBm, may have decimals
+	TxAirSecs     *int     // cumulative TX seconds since boot
+	RxAirSecs     *int     // cumulative RX seconds since boot
+	RecvErrors    *int     // cumulative CRC/decode failures since boot
+	PacketsSent   *int     // cumulative packets sent since boot
+	PacketsRecv   *int     // cumulative packets received since boot
 }
 
 // UpsertObserver inserts or updates an observer with optional hardware metadata.
 func (s *Store) UpsertObserver(id, name, iata string, meta *ObserverMeta) error {
 	now := time.Now().UTC().Format(time.RFC3339)
+	normalizedIATA := strings.TrimSpace(strings.ToUpper(iata))
 
+	var model, firmware, clientVersion, radio interface{}
 	var batteryMv, uptimeSecs, noiseFloor interface{}
 	if meta != nil {
+		if meta.Model != nil {
+			model = *meta.Model
+		}
+		if meta.Firmware != nil {
+			firmware = *meta.Firmware
+		}
+		if meta.ClientVersion != nil {
+			clientVersion = *meta.ClientVersion
+		}
+		if meta.Radio != nil {
+			radio = *meta.Radio
+		}
 		if meta.BatteryMv != nil {
 			batteryMv = *meta.BatteryMv
 		}
@@ -508,8 +617,8 @@ func (s *Store) UpsertObserver(id, name, iata string, meta *ObserverMeta) error 
 	}
 
 	_, err := s.stmtUpsertObserver.Exec(
-		id, name, iata, now, now, batteryMv, uptimeSecs, noiseFloor,
-		name, iata, now, batteryMv, uptimeSecs, noiseFloor,
+		id, name, normalizedIATA, now, now, model, firmware, clientVersion, radio, batteryMv, uptimeSecs, noiseFloor,
+		name, normalizedIATA, now, model, firmware, clientVersion, radio, batteryMv, uptimeSecs, noiseFloor,
 	)
 	if err != nil {
 		s.Stats.WriteErrors.Add(1)
@@ -519,9 +628,93 @@ func (s *Store) UpsertObserver(id, name, iata string, meta *ObserverMeta) error 
 	return err
 }
 
-// Close closes the database.
+// Close checkpoints the WAL and closes the database.
 func (s *Store) Close() error {
+	s.Checkpoint()
 	return s.db.Close()
+}
+
+// RoundToInterval rounds a time to the nearest sample interval boundary.
+func RoundToInterval(t time.Time, intervalSec int) time.Time {
+	if intervalSec <= 0 {
+		intervalSec = 300
+	}
+	epoch := t.Unix()
+	half := int64(intervalSec) / 2
+	rounded := ((epoch + half) / int64(intervalSec)) * int64(intervalSec)
+	return time.Unix(rounded, 0).UTC()
+}
+
+// MetricsData holds the fields to insert into observer_metrics.
+type MetricsData struct {
+	ObserverID  string
+	NoiseFloor  *float64
+	TxAirSecs   *int
+	RxAirSecs   *int
+	RecvErrors  *int
+	BatteryMv   *int
+	PacketsSent *int
+	PacketsRecv *int
+}
+
+// InsertMetrics inserts a metrics sample for an observer using ingestor wall clock.
+func (s *Store) InsertMetrics(data *MetricsData) error {
+	ts := RoundToInterval(time.Now().UTC(), s.sampleIntervalSec)
+	tsStr := ts.Format(time.RFC3339)
+
+	var nf, txAir, rxAir, recvErr, batt, pktSent, pktRecv interface{}
+	if data.NoiseFloor != nil {
+		nf = *data.NoiseFloor
+	}
+	if data.TxAirSecs != nil {
+		txAir = *data.TxAirSecs
+	}
+	if data.RxAirSecs != nil {
+		rxAir = *data.RxAirSecs
+	}
+	if data.RecvErrors != nil {
+		recvErr = *data.RecvErrors
+	}
+	if data.BatteryMv != nil {
+		batt = *data.BatteryMv
+	}
+	if data.PacketsSent != nil {
+		pktSent = *data.PacketsSent
+	}
+	if data.PacketsRecv != nil {
+		pktRecv = *data.PacketsRecv
+	}
+
+	_, err := s.stmtUpsertMetrics.Exec(data.ObserverID, tsStr, nf, txAir, rxAir, recvErr, batt, pktSent, pktRecv)
+	if err != nil {
+		s.Stats.WriteErrors.Add(1)
+		return fmt.Errorf("insert metrics: %w", err)
+	}
+	return nil
+}
+
+// PruneOldMetrics deletes observer_metrics rows older than retentionDays.
+func (s *Store) PruneOldMetrics(retentionDays int) (int64, error) {
+	cutoff := time.Now().UTC().AddDate(0, 0, -retentionDays).Format(time.RFC3339)
+	result, err := s.db.Exec(`DELETE FROM observer_metrics WHERE timestamp < ?`, cutoff)
+	if err != nil {
+		return 0, fmt.Errorf("prune metrics: %w", err)
+	}
+	n, _ := result.RowsAffected()
+	if n > 0 {
+		log.Printf("[metrics] Pruned %d rows older than %d days", n, retentionDays)
+	}
+	return n, nil
+}
+
+// Checkpoint forces a WAL checkpoint to release the WAL lock file,
+// preventing lock contention with a new process starting up.
+func (s *Store) Checkpoint() {
+	if _, err := s.db.Exec("PRAGMA wal_checkpoint(TRUNCATE)"); err != nil {
+		log.Printf("[db] WAL checkpoint error: %v", err)
+	} else {
+		log.Println("[db] WAL checkpoint complete")
+	}
 }
 
 // LogStats logs current operational metrics.
@@ -572,6 +765,8 @@ type PacketData struct {
 	ObserverName   string
 	SNR            *float64
 	RSSI           *float64
+	Score          *float64
+	Direction      *string
 	Hash           string
 	RouteType      int
 	PayloadType    int
@@ -582,10 +777,12 @@ type PacketData struct {
 
 // MQTTPacketMessage is the JSON payload from an MQTT raw packet message.
 type MQTTPacketMessage struct {
-	Raw    string   `json:"raw"`
-	SNR    *float64 `json:"SNR"`
-	RSSI   *float64 `json:"RSSI"`
-	Origin string   `json:"origin"`
+	Raw       string   `json:"raw"`
+	SNR       *float64 `json:"SNR"`
+	RSSI      *float64 `json:"RSSI"`
+	Score     *float64 `json:"score"`
+	Direction *string  `json:"direction"`
+	Origin    string   `json:"origin"`
 }
 
 // BuildPacketData constructs a PacketData from a decoded packet and MQTT message.
@@ -604,6 +801,8 @@ func BuildPacketData(msg *MQTTPacketMessage, decoded *DecodedPacket, observerID,
 		ObserverName:   msg.Origin,
 		SNR:            msg.SNR,
 		RSSI:           msg.RSSI,
+		Score:          msg.Score,
+		Direction:      msg.Direction,
 		Hash:           ComputeContentHash(msg.Raw),
 		RouteType:      decoded.Header.RouteType,
 		PayloadType:    decoded.Header.PayloadType,

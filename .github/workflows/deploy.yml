@@ -3,8 +3,14 @@ name: CI/CD Pipeline
 on:
   push:
     branches: [master]
+    tags: ['v*']
   pull_request:
     branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
 
 concurrency:
   group: ci-${{ github.event.pull_request.number || github.ref }}
@@ -17,8 +23,8 @@ env:
   STAGING_CONTAINER: corescope-staging-go
 
 # Pipeline (sequential, fail-fast):
-#   go-test → e2e-test → build → deploy → publish
-#   PRs stop after build. Master continues to deploy + publish.
+#   go-test → e2e-test → build-and-publish → deploy → publish-badges
+#   PRs stop after build-and-publish (no GHCR push). Master continues to deploy + badges.
 
 jobs:
   # ───────────────────────────────────────────────────────────────
@@ -128,6 +134,13 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Free disk space
+        run: |
+          # Prune old runner diagnostic logs (can accumulate 50MB+)
+          find ~/actions-runner/_diag/ -name '*.log' -mtime +3 -delete 2>/dev/null || true
+          # Show available disk space
+          df -h / | tail -1
+
       - name: Set up Node.js 22
         uses: actions/setup-node@v5
         with:
@@ -223,32 +236,85 @@ jobs:
           include-hidden-files: true
 
   # ───────────────────────────────────────────────────────────────
-  # 3. Build Docker Image
+  # 3. Build & Publish Docker Image
   # ───────────────────────────────────────────────────────────────
-  build:
-    name: "🏗️ Build Docker Image"
+  build-and-publish:
+    name: "🏗️ Build & Publish Docker Image"
     needs: [e2e-test]
-    runs-on: [self-hosted, Linux]
+    runs-on: [self-hosted, meshcore-runner-2]
     steps:
       - name: Checkout code
         uses: actions/checkout@v5
 
-      - name: Set up Node.js 22
-        uses: actions/setup-node@v5
-        with:
-          node-version: '22'
-
-      - name: Build Go Docker image
+      - name: Free disk space
         run: |
-          echo "${GITHUB_SHA::7}" > .git-commit
-          APP_VERSION=$(node -p "require('./package.json').version") \
-          GIT_COMMIT="${GITHUB_SHA::7}" \
-          APP_VERSION=$(grep -oP 'APP_VERSION:-\K[^}]+' docker-compose.yml | head -1 || echo "3.0.0")
-          GIT_COMMIT=$(git rev-parse --short HEAD)
+          docker system prune -af 2>/dev/null || true
+          docker builder prune -af 2>/dev/null || true
+          df -h /
+
+      - name: Compute build metadata
+        id: meta
+        run: |
           BUILD_TIME=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
-          export APP_VERSION GIT_COMMIT BUILD_TIME
+          GIT_COMMIT="${GITHUB_SHA::7}"
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            APP_VERSION="${GITHUB_REF#refs/tags/}"
+          else
+            APP_VERSION="edge"
+          fi
+          echo "build_time=$BUILD_TIME" >> "$GITHUB_OUTPUT"
+          echo "git_commit=$GIT_COMMIT" >> "$GITHUB_OUTPUT"
+          echo "app_version=$APP_VERSION" >> "$GITHUB_OUTPUT"
+          echo "Build: version=$APP_VERSION commit=$GIT_COMMIT time=$BUILD_TIME"
+
+      - name: Build Go Docker image (local staging)
+        run: |
+          GIT_COMMIT="${{ steps.meta.outputs.git_commit }}" \
+          APP_VERSION="${{ steps.meta.outputs.app_version }}" \
+          BUILD_TIME="${{ steps.meta.outputs.build_time }}" \
           docker compose -f "$STAGING_COMPOSE_FILE" -p corescope-staging build "$STAGING_SERVICE"
           echo "Built Go staging image ✅"
+
+      - name: Set up Docker Buildx
+        if: github.event_name == 'push'
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        if: github.event_name == 'push'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract Docker metadata
+        if: github.event_name == 'push'
+        id: docker-meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/kpa-clawbot/corescope
+          tags: |
+            type=semver,pattern=v{{version}}
+            type=semver,pattern=v{{major}}.{{minor}}
+            type=semver,pattern=v{{major}}
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+            type=edge,branch=master
+
+      - name: Build and push to GHCR
+        if: github.event_name == 'push'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          platforms: linux/amd64
+          tags: ${{ steps.docker-meta.outputs.tags }}
+          labels: ${{ steps.docker-meta.outputs.labels }}
+          build-args: |
+            APP_VERSION=${{ steps.meta.outputs.app_version }}
+            GIT_COMMIT=${{ steps.meta.outputs.git_commit }}
+            BUILD_TIME=${{ steps.meta.outputs.build_time }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
   # ───────────────────────────────────────────────────────────────
   # 4. Deploy Staging (master only)
@@ -256,16 +322,25 @@ jobs:
   deploy:
     name: "🚀 Deploy Staging"
     if: github.event_name == 'push'
-    needs: [build]
-    runs-on: [self-hosted, Linux]
+    needs: [build-and-publish]
+    runs-on: [self-hosted, meshcore-runner-2]
     steps:
       - name: Checkout code
         uses: actions/checkout@v5
 
+      - name: Pull latest image from GHCR
+        run: |
+          # Try to pull the edge image from GHCR and tag for docker-compose compatibility
+          if docker pull ghcr.io/kpa-clawbot/corescope:edge; then
+            docker tag ghcr.io/kpa-clawbot/corescope:edge corescope-go:latest
+            echo "Pulled and tagged GHCR edge image ✅"
+          else
+            echo "⚠️ GHCR pull failed — falling back to locally built image"
+          fi
+
       - name: Deploy staging
         run: |
-          # Use docker compose down (not just stop/rm) to properly clean up
-          # the old container, network, and release memory before starting new one
+          # Stop old container and release memory
           docker compose -f "$STAGING_COMPOSE_FILE" -p corescope-staging down --timeout 30 2>/dev/null || true
 
           # Wait for container to be fully gone and OS to reclaim memory (3GB limit)
@@ -277,14 +352,14 @@ jobs:
           done
           sleep 5  # extra pause for OS memory reclaim
 
-          # Ensure staging config exists (docker creates a directory if bind mount source missing)
+          # Ensure staging data dir exists (config.json lives here, no separate file mount)
           STAGING_DATA="${STAGING_DATA_DIR:-$HOME/meshcore-staging-data}"
           mkdir -p "$STAGING_DATA"
-          # Remove directory-masquerading-as-file left by failed docker mount
-          [ -d "$STAGING_DATA/config.json" ] && rm -rf "$STAGING_DATA/config.json"
+
+          # If no config exists, copy the example (CI doesn't have a real prod config)
           if [ ! -f "$STAGING_DATA/config.json" ]; then
-            echo "Staging config missing — copying from repo config.json"
-            cp config.json "$STAGING_DATA/config.json" 2>/dev/null || cp config.example.json "$STAGING_DATA/config.json"
+            echo "Staging config missing — copying config.example.json"
+            cp config.example.json "$STAGING_DATA/config.json" 2>/dev/null || true
           fi
 
           docker compose -f "$STAGING_COMPOSE_FILE" -p corescope-staging up -d staging-go
@@ -307,12 +382,23 @@ jobs:
 
       - name: Smoke test staging API
         run: |
-          if curl -sf http://localhost:82/api/stats | grep -q engine; then
+          if docker exec "$STAGING_CONTAINER" wget -qO- http://localhost:3000/api/stats | grep -q engine; then
             echo "Staging verified — engine field present ✅"
           else
             echo "Staging /api/stats did not return engine field"
             exit 1
           fi
+
+      - name: Clean up old Docker images
+        if: always()
+        run: |
+          # Remove dangling images and images older than 24h (keeps current build)
+          echo "--- Docker disk usage before cleanup ---"
+          docker system df
+          docker image prune -af --filter "until=24h" 2>/dev/null || true
+          docker builder prune -f --keep-storage=1GB 2>/dev/null || true
+          echo "--- Docker disk usage after cleanup ---"
+          docker system df
 
   # ───────────────────────────────────────────────────────────────
   # 5. Publish Badges & Summary (master only)

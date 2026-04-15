@@ -458,8 +458,8 @@ func TestDecodeGrpTxtValid(t *testing.T) {
 	if p.Error != "" {
 		t.Errorf("unexpected error: %s", p.Error)
 	}
-	if p.ChannelHash != 0xAA {
-		t.Errorf("channelHash=%d, want 0xAA", p.ChannelHash)
+	if p.ChannelHash == nil || *p.ChannelHash != 0xAA {
+		t.Errorf("channelHash=%v, want 0xAA", p.ChannelHash)
 	}
 	if p.MAC != "bbcc" {
 		t.Errorf("mac=%s, want bbcc", p.MAC)
@@ -1221,8 +1221,8 @@ func TestDecodeGrpTxtWithDecryption(t *testing.T) {
 	if p.Text != "Bob: Testing 123" {
 		t.Errorf("text=%q, want 'Bob: Testing 123'", p.Text)
 	}
-	if p.ChannelHash != 0xAA {
-		t.Errorf("channelHash=%d, want 0xAA", p.ChannelHash)
+	if p.ChannelHash == nil || *p.ChannelHash != 0xAA {
+		t.Errorf("channelHash=%v, want 0xAA", p.ChannelHash)
 	}
 	if p.ChannelHashHex != "AA" {
 		t.Errorf("channelHashHex=%s, want AA", p.ChannelHashHex)
@@ -1540,5 +1540,91 @@ func TestDecodeAdvertTelemetryZeroTemp(t *testing.T) {
 	}
 	if *pkt.Payload.TemperatureC != 0.0 {
 		t.Errorf("temperature_c=%f, want 0.0", *pkt.Payload.TemperatureC)
+	}
+}
+
+func repeatHex(byteHex string, n int) string {
+	s := ""
+	for i := 0; i < n; i++ {
+		s += byteHex
+	}
+	return s
+}
+
+func TestZeroHopDirectHashSize(t *testing.T) {
+	// DIRECT (RouteType=2) + REQ (PayloadType=0) → header byte = 0x02
+	// pathByte=0x00 → hash_count=0, hash_size bits=0 → should get HashSize=0
+	hex := "02" + "00" + repeatHex("AA", 20)
+	pkt, err := DecodePacket(hex, nil)
+	if err != nil {
+		t.Fatalf("DecodePacket failed: %v", err)
+	}
+	if pkt.Path.HashSize != 0 {
+		t.Errorf("DIRECT zero-hop: want HashSize=0, got %d", pkt.Path.HashSize)
+	}
+}
+
+func TestZeroHopDirectHashSizeWithNonZeroUpperBits(t *testing.T) {
+	// DIRECT (RouteType=2) + REQ (PayloadType=0) → header byte = 0x02
+	// pathByte=0x40 → hash_count=0, hash_size bits=01 → should still get HashSize=0
+	hex := "02" + "40" + repeatHex("AA", 20)
+	pkt, err := DecodePacket(hex, nil)
+	if err != nil {
+		t.Fatalf("DecodePacket failed: %v", err)
+	}
+	if pkt.Path.HashSize != 0 {
+		t.Errorf("DIRECT zero-hop with hash_size bits set: want HashSize=0, got %d", pkt.Path.HashSize)
+	}
+}
+
+func TestNonDirectZeroPathByteKeepsHashSize(t *testing.T) {
+	// FLOOD (RouteType=1) + REQ (PayloadType=0) → header byte = 0x01
+	// pathByte=0x00 → non-DIRECT should keep HashSize=1
+	hex := "01" + "00" + repeatHex("AA", 20)
+	pkt, err := DecodePacket(hex, nil)
+	if err != nil {
+		t.Fatalf("DecodePacket failed: %v", err)
+	}
+	if pkt.Path.HashSize != 1 {
+		t.Errorf("FLOOD zero pathByte: want HashSize=1, got %d", pkt.Path.HashSize)
+	}
+}
+
+func TestDirectNonZeroHopKeepsHashSize(t *testing.T) {
+	// DIRECT (RouteType=2) + REQ (PayloadType=0) → header byte = 0x02
+	// pathByte=0x01 → hash_count=1, hash_size=1 → should keep HashSize=1
+	hex := "02" + "01" + repeatHex("BB", 21)
+	pkt, err := DecodePacket(hex, nil)
+	if err != nil {
+		t.Fatalf("DecodePacket failed: %v", err)
+	}
+	if pkt.Path.HashSize != 1 {
+		t.Errorf("DIRECT with 1 hop: want HashSize=1, got %d", pkt.Path.HashSize)
+	}
+}
+
+func TestZeroHopTransportDirectHashSize(t *testing.T) {
+	// TRANSPORT_DIRECT (RouteType=3) + REQ (PayloadType=0) → header byte = 0x03
+	// 4 bytes transport codes + pathByte=0x00 → hash_count=0 → should get HashSize=0
+	hex := "03" + "11223344" + "00" + repeatHex("AA", 20)
+	pkt, err := DecodePacket(hex, nil)
+	if err != nil {
+		t.Fatalf("DecodePacket failed: %v", err)
+	}
+	if pkt.Path.HashSize != 0 {
+		t.Errorf("TRANSPORT_DIRECT zero-hop: want HashSize=0, got %d", pkt.Path.HashSize)
+	}
+}
+
+func TestZeroHopTransportDirectHashSizeWithNonZeroUpperBits(t *testing.T) {
+	// TRANSPORT_DIRECT (RouteType=3) + REQ (PayloadType=0) → header byte = 0x03
+	// 4 bytes transport codes + pathByte=0xC0 → hash_count=0, hash_size bits=11 → should still get HashSize=0
+	hex := "03" + "11223344" + "C0" + repeatHex("AA", 20)
+	pkt, err := DecodePacket(hex, nil)
+	if err != nil {
+		t.Fatalf("DecodePacket failed: %v", err)
+	}
+	if pkt.Path.HashSize != 0 {
+		t.Errorf("TRANSPORT_DIRECT zero-hop with hash_size bits set: want HashSize=0, got %d", pkt.Path.HashSize)
 	}
 }

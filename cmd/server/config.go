@@ -2,8 +2,12 @@ package main
 
 import (
 	"encoding/json"
+	"log"
 	"os"
 	"path/filepath"
+	"strings"
+
+	"github.com/meshcore-analyzer/geofilter"
 )
 
 // Config mirrors the Node.js config.json structure (read-only fields).
@@ -47,6 +51,53 @@ type Config struct {
 	Retention *RetentionConfig `json:"retention,omitempty"`
 
 	PacketStore *PacketStoreConfig `json:"packetStore,omitempty"`
+
+	GeoFilter *GeoFilterConfig `json:"geo_filter,omitempty"`
+
+	Timestamps *TimestampConfig `json:"timestamps,omitempty"`
+
+	DebugAffinity bool `json:"debugAffinity,omitempty"`
+
+	ResolvedPath  *ResolvedPathConfig  `json:"resolvedPath,omitempty"`
+	NeighborGraph *NeighborGraphConfig `json:"neighborGraph,omitempty"`
+}
+
+// weakAPIKeys is the blocklist of known default/example API keys that must be rejected.
+var weakAPIKeys = map[string]bool{
+	"your-secret-api-key-here": true,
+	"change-me":                true,
+	"example":                  true,
+	"test":                     true,
+	"password":                 true,
+	"admin":                    true,
+	"apikey":                   true,
+	"api-key":                  true,
+	"secret":                   true,
+	"default":                  true,
+}
+
+// IsWeakAPIKey returns true if the key is in the blocklist or shorter than 16 characters.
+func IsWeakAPIKey(key string) bool {
+	if key == "" {
+		return false // empty is handled separately (endpoints disabled)
+	}
+	if weakAPIKeys[strings.ToLower(key)] {
+		return true
+	}
+	if len(key) < 16 {
+		return true
+	}
+	return false
+}
+
+// ResolvedPathConfig controls async backfill behavior.
+type ResolvedPathConfig struct {
+	BackfillHours int `json:"backfillHours"` // how far back (hours) to scan for NULL resolved_path (default 24)
+}
+
+// NeighborGraphConfig controls neighbor edge pruning.
+type NeighborGraphConfig struct {
+	MaxAgeDays int `json:"maxAgeDays"` // edges older than this are pruned (default 5)
 }
 
 // PacketStoreConfig controls in-memory packet store limits.
@@ -55,8 +106,55 @@ type PacketStoreConfig struct {
 	MaxMemoryMB    int     `json:"maxMemoryMB"`     // hard memory ceiling in MB (0 = unlimited)
 }
 
+// GeoFilterConfig is an alias for the shared geofilter.Config type.
+type GeoFilterConfig = geofilter.Config
+
 type RetentionConfig struct {
-	NodeDays int `json:"nodeDays"`
+	NodeDays    int `json:"nodeDays"`
+	PacketDays  int `json:"packetDays"`
+	MetricsDays int `json:"metricsDays"`
+}
+
+// MetricsRetentionDays returns configured metrics retention or 30 days default.
+func (c *Config) MetricsRetentionDays() int {
+	if c.Retention != nil && c.Retention.MetricsDays > 0 {
+		return c.Retention.MetricsDays
+	}
+	return 30
+}
+
+// BackfillHours returns configured backfill window or 24h default.
+func (c *Config) BackfillHours() int {
+	if c.ResolvedPath != nil && c.ResolvedPath.BackfillHours > 0 {
+		return c.ResolvedPath.BackfillHours
+	}
+	return 24
+}
+
+// NeighborMaxAgeDays returns configured max edge age or 30 days default.
+func (c *Config) NeighborMaxAgeDays() int {
+	if c.NeighborGraph != nil && c.NeighborGraph.MaxAgeDays > 0 {
+		return c.NeighborGraph.MaxAgeDays
+	}
+	return 5
+}
+
+type TimestampConfig struct {
+	DefaultMode       string `json:"defaultMode"`       // "ago" | "absolute"
+	Timezone          string `json:"timezone"`          // "local" | "utc"
+	FormatPreset      string `json:"formatPreset"`      // "iso" | "iso-seconds" | "locale"
+	CustomFormat      string `json:"customFormat"`      // freeform, only used when AllowCustomFormat=true
+	AllowCustomFormat bool   `json:"allowCustomFormat"` // admin gate
+}
+
+func defaultTimestampConfig() TimestampConfig {
+	return TimestampConfig{
+		DefaultMode:       "ago",
+		Timezone:          "local",
+		FormatPreset:      "iso",
+		CustomFormat:      "",
+		AllowCustomFormat: false,
+	}
 }
 
 // NodeDaysOrDefault returns the configured retention.nodeDays or 7 if not set.
@@ -103,8 +201,10 @@ func LoadConfig(baseDirs ...string) (*Config, error) {
 		if err := json.Unmarshal(data, cfg); err != nil {
 			continue
 		}
+		cfg.NormalizeTimestampConfig()
 		return cfg, nil
 	}
+	cfg.NormalizeTimestampConfig()
 	return cfg, nil // defaults
 }
 
@@ -134,10 +234,10 @@ func LoadTheme(baseDirs ...string) *ThemeFile {
 
 func (c *Config) GetHealthThresholds() HealthThresholds {
 	h := HealthThresholds{
-		InfraDegradedHours: 24,
-		InfraSilentHours:   72,
-		NodeDegradedHours:  1,
-		NodeSilentHours:    24,
+		InfraDegradedHours: 48,
+		InfraSilentHours:   96,
+		NodeDegradedHours:  24,
+		NodeSilentHours:    72,
 	}
 	if c.HealthThresholds != nil {
 		if c.HealthThresholds.InfraDegradedHours > 0 {
@@ -186,6 +286,52 @@ func (c *Config) ResolveDBPath(baseDir string) string {
 	return filepath.Join(baseDir, "data", "meshcore.db")
 }
 
+
+func (c *Config) NormalizeTimestampConfig() {
+	defaults := defaultTimestampConfig()
+	if c.Timestamps == nil {
+		log.Printf("[config] timestamps not configured - using defaults (ago/local/iso)")
+		c.Timestamps = &defaults
+		return
+	}
+
+	origMode := c.Timestamps.DefaultMode
+	mode := strings.ToLower(strings.TrimSpace(origMode))
+	switch mode {
+	case "ago", "absolute":
+		c.Timestamps.DefaultMode = mode
+	default:
+		log.Printf("[config] warning: timestamps.defaultMode=%q is invalid, using %q", origMode, defaults.DefaultMode)
+		c.Timestamps.DefaultMode = defaults.DefaultMode
+	}
+
+	origTimezone := c.Timestamps.Timezone
+	timezone := strings.ToLower(strings.TrimSpace(origTimezone))
+	switch timezone {
+	case "local", "utc":
+		c.Timestamps.Timezone = timezone
+	default:
+		log.Printf("[config] warning: timestamps.timezone=%q is invalid, using %q", origTimezone, defaults.Timezone)
+		c.Timestamps.Timezone = defaults.Timezone
+	}
+
+	origPreset := c.Timestamps.FormatPreset
+	formatPreset := strings.ToLower(strings.TrimSpace(origPreset))
+	switch formatPreset {
+	case "iso", "iso-seconds", "locale":
+		c.Timestamps.FormatPreset = formatPreset
+	default:
+		log.Printf("[config] warning: timestamps.formatPreset=%q is invalid, using %q", origPreset, defaults.FormatPreset)
+		c.Timestamps.FormatPreset = defaults.FormatPreset
+	}
+}
+
+func (c *Config) GetTimestampConfig() TimestampConfig {
+	if c == nil || c.Timestamps == nil {
+		return defaultTimestampConfig()
+	}
+	return *c.Timestamps
+}
 func (c *Config) PropagationBufferMs() int {
 	if c.LiveMap.PropagationBufferMs > 0 {
 		return c.LiveMap.PropagationBufferMs

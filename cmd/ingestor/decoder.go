@@ -117,8 +117,8 @@ type Payload struct {
 	Feat2         *int         `json:"feat2,omitempty"`
 	BatteryMv     *int         `json:"battery_mv,omitempty"`
 	TemperatureC  *float64     `json:"temperature_c,omitempty"`
-	ChannelHash   int          `json:"channelHash,omitempty"`
-	ChannelHashHex   string    `json:"channelHashHex,omitempty"`
+	ChannelHash    *int   `json:"channelHash"`
+	ChannelHashHex string `json:"channelHashHex,omitempty"`
 	DecryptionStatus string    `json:"decryptionStatus,omitempty"`
 	Channel          string    `json:"channel,omitempty"`
 	Text             string    `json:"text,omitempty"`
@@ -433,7 +433,7 @@ func decodeGrpTxt(buf []byte, channelKeys map[string]string) Payload {
 			return Payload{
 				Type:             "CHAN",
 				Channel:          name,
-				ChannelHash:      channelHash,
+				ChannelHash:      &channelHash,
 				ChannelHashHex:   channelHashHex,
 				DecryptionStatus: "decrypted",
 				Sender:           result.Sender,
@@ -443,7 +443,7 @@ func decodeGrpTxt(buf []byte, channelKeys map[string]string) Payload {
 		}
 		return Payload{
 			Type:             "GRP_TXT",
-			ChannelHash:      channelHash,
+			ChannelHash:      &channelHash,
 			ChannelHashHex:   channelHashHex,
 			DecryptionStatus: "decryption_failed",
 			MAC:              mac,
@@ -453,7 +453,7 @@ func decodeGrpTxt(buf []byte, channelKeys map[string]string) Payload {
 
 	return Payload{
 		Type:             "GRP_TXT",
-		ChannelHash:      channelHash,
+		ChannelHash:      &channelHash,
 		ChannelHashHex:   channelHashHex,
 		DecryptionStatus: "no_key",
 		MAC:              mac,
@@ -585,6 +585,16 @@ func DecodePacket(hexString string, channelKeys map[string]string) (*DecodedPack
 			path.Hops = hops
 			path.HashCount = len(hops)
 		}
+	}
+
+	// Zero-hop direct packets have hash_count=0 (lower 6 bits of pathByte),
+	// which makes the generic formula yield a bogus hashSize. Reset to 0
+	// (unknown) so API consumers get correct data. We mask with 0x3F to check
+	// only hash_count, matching the JS frontend approach — the upper hash_size
+	// bits are meaningless when there are no hops. Skip TRACE packets — they
+	// use hashSize to parse hops from the payload above.
+	if (header.RouteType == RouteDirect || header.RouteType == RouteTransportDirect) && pathByte&0x3F == 0 && header.PayloadType != PayloadTRACE {
+		path.HashSize = 0
 	}
 
 	return &DecodedPacket{

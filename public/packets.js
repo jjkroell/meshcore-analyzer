@@ -8,9 +8,15 @@
   // Resolve observer_id to friendly name from loaded observers list
   function obsName(id) {
     if (!id) return '—';
-    const o = observers.find(ob => ob.id === id);
+    const o = observerMap.get(id);
     if (!o) return id;
     return o.iata ? `${o.name} (${o.iata})` : o.name;
+  }
+  function obsNameOnly(id) {
+    if (!id) return '—';
+    const o = observerMap.get(id);
+    if (!o) return id;
+    return o.name || id;
   }
   let selectedId = null;
   let groupByHash = true;
@@ -21,27 +27,122 @@
   let packetsPaused = false;
   let pauseBuffer = [];
   let observers = [];
+  let observerMap = new Map(); // id → observer for O(1) lookups (#383)
   let regionMap = {};
   const TYPE_NAMES = { 0:'Request', 1:'Response', 2:'Direct Msg', 3:'ACK', 4:'Advert', 5:'Channel Msg', 7:'Anon Req', 8:'Path', 9:'Trace', 11:'Control' };
   function typeName(t) { return TYPE_NAMES[t] ?? `Type ${t}`; }
+  const isMobile = window.innerWidth <= 1024;
+  const PACKET_LIMIT = isMobile ? 1000 : 50000;
+  let savedTimeWindowMin = Number(localStorage.getItem('meshcore-time-window'));
+  if (!Number.isFinite(savedTimeWindowMin) || savedTimeWindowMin <= 0) savedTimeWindowMin = 15;
+  if (isMobile && savedTimeWindowMin > 180) savedTimeWindowMin = 15;
   let totalCount = 0;
   let expandedHashes = new Set();
   let hopNameCache = {};
-  let showHexHashes = localStorage.getItem('meshcore-hex-hashes') === 'true';
+  let _tableSortInstance = null;
+  let _packetSortColumn = null;
+  let _packetSortDirection = 'desc';
+  const showHexHashes = true;
+  var _pendingUrlRegion = null;
+
+  var DEFAULT_TIME_WINDOW = 15;
+
+  function buildPacketsQuery(timeWindowMin, regionParam) {
+    var parts = [];
+    if (timeWindowMin && timeWindowMin !== DEFAULT_TIME_WINDOW) parts.push('timeWindow=' + timeWindowMin);
+    if (regionParam) parts.push('region=' + encodeURIComponent(regionParam));
+    return parts.length ? '?' + parts.join('&') : '';
+  }
+  window.buildPacketsQuery = buildPacketsQuery;
+
+  function updatePacketsUrl() {
+    history.replaceState(null, '', '#/packets' + buildPacketsQuery(savedTimeWindowMin, RegionFilter.getRegionParam()));
+  }
+
   let filtersBuilt = false;
+  let _renderTimer = null;
+  function scheduleRender() {
+    clearTimeout(_renderTimer);
+    _renderTimer = setTimeout(() => renderTableRows(), 200);
+  }
+
+  // Coalesce WS-triggered renders into one per animation frame (#396).
+  // Multiple WS batches arriving within the same frame only trigger a single
+  // renderTableRows() call on the next rAF, preventing rapid full rebuilds.
+  function scheduleWSRender() {
+    _wsRenderDirty = true;
+    if (_wsRafId) return;  // already scheduled
+    _wsRafId = requestAnimationFrame(function () {
+      _wsRafId = null;
+      if (_wsRenderDirty) {
+        _wsRenderDirty = false;
+        renderTableRows();
+      }
+    });
+  }
   const PANEL_WIDTH_KEY = 'meshcore-panel-width';
   const PANEL_CLOSE_HTML = '<button class="panel-close-btn" title="Close detail pane (Esc)">✕</button>';
 
-  function closeDetailPanel() {
-    var panel = document.getElementById('pktRight');
-    if (panel) {
-      panel.classList.add('empty');
-      panel.innerHTML = '<div class="panel-resize-handle" id="pktResizeHandle"></div>' + PANEL_CLOSE_HTML + '<span>Select a packet to view details</span>';
-      var layout = panel.closest('.split-layout');
-      if (layout) layout.classList.add('detail-collapsed');
-      selectedId = null;
-      renderTableRows();
+  // getParsedPath / getParsedDecoded are in shared packet-helpers.js (loaded before this file)
+  const getParsedPath = window.getParsedPath;
+  const getParsedDecoded = window.getParsedDecoded;
+
+  // --- Virtual scroll state ---
+  let VSCROLL_ROW_HEIGHT = 36;    // measured dynamically on first render; fallback 36px
+  let _vscrollRowHeightMeasured = false;
+  let _vscrollTheadHeight = 40;   // measured dynamically on first render; fallback 40px
+  const VSCROLL_BUFFER = 30;      // extra rows above/below viewport
+  let _displayPackets = [];       // filtered packets for current view
+  let _displayGrouped = false;    // whether _displayPackets is in grouped mode
+  let _rowCounts = [];            // per-entry DOM row counts (1 for flat, 1+children for expanded groups)
+  let _rowCountsDirty = false;    // set when _rowCounts may be stale (e.g. WS added children) (#410)
+  let _cumulativeOffsetsCache = null; // cached cumulative offsets, invalidated on _rowCounts change
+  let _lastVisibleStart = -1;     // last rendered start index (for dirty checking)
+  let _lastVisibleEnd = -1;       // last rendered end index (for dirty checking)
+  let _vsScrollHandler = null;    // scroll listener reference
+  let _wsRenderTimer = null;      // debounce timer for WS-triggered renders
+  let _wsRafId = null;            // rAF id for coalescing WS-triggered renders (#396)
+  let _wsRenderDirty = false;     // dirty flag for rAF render coalescing (#396)
+  let _observerFilterSet = null;  // cached Set from filters.observer, hoisted above loops (#427)
+
+  // Pure function: calculate visible entry range from scroll state.
+  // Extracted for testability (#405, #409).
+  function _calcVisibleRange(offsets, entryCount, scrollTop, viewportHeight, rowHeight, theadHeight, buffer) {
+    const adjustedScrollTop = Math.max(0, scrollTop - theadHeight);
+    const firstDomRow = Math.floor(adjustedScrollTop / rowHeight);
+    const visibleDomCount = Math.ceil(viewportHeight / rowHeight);
+
+    // Binary search for first entry whose cumulative offset covers firstDomRow
+    let lo = 0, hi = entryCount;
+    while (lo < hi) {
+      const mid = (lo + hi) >>> 1;
+      if (offsets[mid + 1] <= firstDomRow) lo = mid + 1;
+      else hi = mid;
     }
+    const firstEntry = lo;
+
+    // Binary search for last visible entry
+    const lastDomRow = firstDomRow + visibleDomCount;
+    lo = firstEntry; hi = entryCount;
+    while (lo < hi) {
+      const mid = (lo + hi) >>> 1;
+      if (offsets[mid + 1] <= lastDomRow) lo = mid + 1;
+      else hi = mid;
+    }
+    const lastEntry = Math.min(lo + 1, entryCount);
+
+    const startIdx = Math.max(0, firstEntry - buffer);
+    const endIdx = Math.min(entryCount, lastEntry + buffer);
+    return { startIdx, endIdx, firstEntry, lastEntry };
+  }
+
+  function closeDetailPanel() {
+    const overlay = document.getElementById('pktDetailOverlay');
+    if (overlay) {
+      overlay.style.display = 'none';
+    }
+    selectedId = null;
+    location.hash = '/packets';
   }
 
   function initPanelResize() {
@@ -142,6 +243,29 @@
     }
   }
 
+  /**
+   * Pre-populate hopNameCache from server-side resolved_path on packets.
+   * Packets with resolved_path skip client-side HopResolver entirely.
+   * Must call ensureHopResolver() first so nodesList is available for name lookup.
+   */
+  async function cacheResolvedPaths(packets) {
+    if (!packets || !packets.length) return;
+    let needsInit = false;
+    for (const p of packets) {
+      const rp = getResolvedPath(p);
+      if (rp) { needsInit = true; break; }
+    }
+    if (!needsInit) return;
+    await ensureHopResolver();
+    for (const p of packets) {
+      const rp = getResolvedPath(p);
+      if (!rp) continue;
+      const hops = getParsedPath(p);
+      const resolved = HopResolver.resolveFromServer(hops, rp);
+      Object.assign(hopNameCache, resolved);
+    }
+  }
+
   function renderHop(h, observerId) {
     // Use per-packet cache key if observer context available (ambiguous hops differ by region)
     const cacheKey = observerId ? h + ':' + observerId : h;
@@ -157,8 +281,42 @@
   let directPacketId = null;
   let directPacketHash = null;
   let initGeneration = 0;
+  let _docActionHandler = null;
+  let _docMenuCloseHandler = null;
+  let _docColMenuCloseHandler = null;
 
   let directObsId = null;
+
+  function removeAllByopOverlays() {
+    document.querySelectorAll('.byop-overlay').forEach(function (el) { el.remove(); });
+  }
+
+  function bindDocumentHandler(kind, eventName, handler) {
+    const prev = kind === 'action'
+      ? _docActionHandler
+      : kind === 'menu'
+        ? _docMenuCloseHandler
+        : _docColMenuCloseHandler;
+    if (prev) document.removeEventListener(eventName, prev);
+    document.addEventListener(eventName, handler);
+    if (kind === 'action') _docActionHandler = handler;
+    else if (kind === 'menu') _docMenuCloseHandler = handler;
+    else _docColMenuCloseHandler = handler;
+  }
+
+  function renderTimestampCell(isoString) {
+    if (typeof formatTimestampWithTooltip !== 'function' || typeof getTimestampMode !== 'function') {
+      const full = typeof timeAgo === 'function' ? timeAgo(isoString) : '—';
+      const short = full.replace(/ ago$/, '');
+      return `<span class="ts-full">${escapeHtml(full)}</span><span class="ts-short">${escapeHtml(short)}</span>`;
+    }
+    const f = formatTimestampWithTooltip(isoString, getTimestampMode());
+    const short = f.text.replace(/ ago$/, '');
+    const warn = f.isFuture
+      ? ' <span class="timestamp-future-icon" title="Timestamp is in the future — node clock may be skewed">⚠️</span>'
+      : '';
+    return `<span class="timestamp-text" title="${escapeHtml(f.tooltip)}"><span class="ts-full">${escapeHtml(f.text)}</span><span class="ts-short">${escapeHtml(short)}</span></span>${warn}`;
+  }
 
   async function init(app, routeParam) {
     const gen = ++initGeneration;
@@ -180,23 +338,75 @@
         filters.node = routeParam;
       }
     }
-    app.innerHTML = `<div class="split-layout detail-collapsed">
-      <div class="panel-left" id="pktLeft"></div>
-      <div class="panel-right empty" id="pktRight" aria-live="polite">
-        <div class="panel-resize-handle" id="pktResizeHandle"></div>
-        ${PANEL_CLOSE_HTML}
-        <span>Select a packet to view details</span>
+
+    // Read URL params (router strips query from routeParam; read from location.hash)
+    var _initUrlParams = getHashParams();
+    var _urlTimeWindow = Number(_initUrlParams.get('timeWindow'));
+    if (Number.isFinite(_urlTimeWindow) && _urlTimeWindow > 0) {
+      savedTimeWindowMin = _urlTimeWindow;
+      localStorage.setItem('meshcore-time-window', String(_urlTimeWindow));
+    }
+    var _urlRegion = _initUrlParams.get('region');
+    if (_urlRegion) _pendingUrlRegion = _urlRegion;
+
+    app.innerHTML = `<div class="pkt-full-layout">
+      <div class="panel-left" id="pktLeft" aria-live="polite" aria-relevant="additions removals"></div>
+    </div>
+    <div class="modal-overlay pkt-detail-overlay" id="pktDetailOverlay" style="display:none">
+      <div class="modal pkt-detail-modal" role="dialog" aria-label="Packet Detail" aria-modal="true">
+        <div class="pkt-detail-modal-header">
+          <span class="pkt-detail-modal-title" id="pktDetailTitle">Packet Detail</span>
+          <button class="btn-icon pkt-detail-close" id="pktDetailClose" title="Close">✕</button>
+        </div>
+        <div class="pkt-detail-modal-body" id="pktDetailBody"></div>
       </div>
     </div>`;
-    initPanelResize();
-    document.getElementById('pktRight').addEventListener('click', function(e) {
-      if (e.target.closest('.panel-close-btn')) closeDetailPanel();
+    // Detail modal open/close
+    document.getElementById('pktDetailClose').addEventListener('click', closeDetailPanel);
+    document.getElementById('pktDetailOverlay').addEventListener('click', function(e) {
+      if (e.target === this) closeDetailPanel();
     });
+    document.addEventListener('keydown', function _detailEsc(e) {
+      if (e.key === 'Escape' && document.getElementById('pktDetailOverlay').style.display !== 'none') closeDetailPanel();
+    });
+
+    // Horizontal swipe (left or right) to close on touch devices
+    (function() {
+      const modal = document.querySelector('.pkt-detail-modal');
+      if (!modal) return;
+      let startX = 0, startY = 0, dragging = false, pending = false;
+      modal.addEventListener('touchstart', function(e) {
+        startX = e.touches[0].clientX;
+        startY = e.touches[0].clientY;
+        pending = true;
+        dragging = false;
+        modal.style.transition = 'none';
+      }, { passive: true });
+      modal.addEventListener('touchmove', function(e) {
+        if (!pending) return;
+        const dx = e.touches[0].clientX - startX;
+        const dy = e.touches[0].clientY - startY;
+        if (!dragging) {
+          if (Math.abs(dy) > Math.abs(dx)) { pending = false; return; } // vertical — let scroll happen
+          if (Math.abs(dx) < 5) return; // wait for clear direction
+          dragging = true;
+        }
+        e.preventDefault();
+        modal.style.transform = `translateX(${dx}px)`;
+      }, { passive: false });
+      modal.addEventListener('touchend', function(e) {
+        modal.style.transition = '';
+        modal.style.transform = '';
+        const wasDragging = dragging;
+        pending = false;
+        dragging = false;
+        if (!wasDragging) return;
+        const dx = e.changedTouches[0].clientX - startX;
+        if (Math.abs(dx) > 80) closeDetailPanel();
+      }, { passive: true });
+    })();
+
     await loadObservers();
-    // Restore saved time window before first load
-    const fTW = document.getElementById('fTimeWindow');
-    const savedTW = localStorage.getItem('meshcore-time-window');
-    if (savedTW !== null && fTW) fTW.value = savedTW;
     loadPackets();
 
     // Auto-select packet detail when arriving via hash URL
@@ -213,7 +423,8 @@
             const obs = data.observations.find(o => String(o.id) === String(obsTarget));
             if (obs) {
               expandedHashes.add(h);
-              const obsPacket = {...data.packet, observer_id: obs.observer_id, observer_name: obs.observer_name, snr: obs.snr, rssi: obs.rssi, path_json: obs.path_json, timestamp: obs.timestamp, first_seen: obs.timestamp};
+              const obsPacket = {...data.packet, observer_id: obs.observer_id, observer_name: obs.observer_name, snr: obs.snr, rssi: obs.rssi, path_json: obs.path_json, resolved_path: obs.resolved_path, timestamp: obs.timestamp, first_seen: obs.timestamp};
+              clearParsedCache(obsPacket);
               selectPacket(obs.id, h, {packet: obsPacket, breakdown: data.breakdown, observations: data.observations}, obs.id);
             } else {
               selectPacket(data.packet.id, h, data);
@@ -226,7 +437,7 @@
     }
 
     // Event delegation for data-action buttons
-    document.addEventListener('click', function (e) {
+    bindDocumentHandler('action', 'click', function (e) {
       var btn = e.target.closest('[data-action]');
       if (!btn) return;
       if (btn.dataset.action === 'pkt-refresh') loadPackets();
@@ -235,9 +446,12 @@
         packetsPaused = !packetsPaused;
         const pauseBtn = document.getElementById('pktPauseBtn');
         if (pauseBtn) {
-          pauseBtn.textContent = packetsPaused ? '▶' : '⏸';
+          pauseBtn.setAttribute('aria-pressed', packetsPaused);
           pauseBtn.title = packetsPaused ? 'Resume live updates' : 'Pause live updates';
-          pauseBtn.classList.toggle('active', packetsPaused);
+          pauseBtn.classList.toggle('paused', packetsPaused);
+          pauseBtn.innerHTML = packetsPaused
+            ? `<span class="pkt-pause-play">▶</span><span class="pkt-pill-text"> Resume</span>`
+            : `⏸<span class="pkt-pill-text"> Pause</span>`;
         }
         if (!packetsPaused && pauseBuffer.length) {
           const handler = wsHandler;
@@ -260,29 +474,16 @@
           if (hashInput) hashInput.value = filters.hash;
           await loadPackets();
         }
-        // Show detail in sidebar
-        const panel = document.getElementById('pktRight');
-        if (panel) {
-          panel.classList.remove('empty');
-          panel.innerHTML = '<div class="panel-resize-handle" id="pktResizeHandle"></div>' + PANEL_CLOSE_HTML;
-          const content = document.createElement('div');
-          panel.appendChild(content);
-          const pkt = data.packet;
-          try {
-            const hops = JSON.parse(pkt.path_json || '[]');
-            const newHops = hops.filter(h => !(h in hopNameCache));
-            if (newHops.length) await resolveHops(newHops);
-          } catch {}
-          await renderDetail(content, data);
-          initPanelResize();
-        }
+        // Show detail in modal
+        await selectPacket(pktId, data.packet?.hash, data);
       } catch {}
     }
     wsHandler = debouncedOnWS(function (msgs) {
       if (packetsPaused) {
         pauseBuffer.push(...msgs);
+        if (pauseBuffer.length > 2000) pauseBuffer = pauseBuffer.slice(-2000);
         const btn = document.getElementById('pktPauseBtn');
-        if (btn) btn.textContent = '▶ ' + pauseBuffer.length;
+        if (btn) btn.innerHTML = `<span class="pkt-pause-play">▶</span><span class="pkt-pill-text"> +${pauseBuffer.length}</span>`;
         return;
       }
       const newPkts = msgs
@@ -292,12 +493,19 @@
 
       // Check if new packets pass current filters
       const filtered = newPkts.filter(p => {
+        // Respect time window filter — drop packets outside the selected window
+        const windowMin = savedTimeWindowMin;
+        if (windowMin > 0) {
+          const cutoff = new Date(Date.now() - windowMin * 60000).toISOString();
+          const pktTime = p.latest || p.timestamp || p.first_seen;
+          if (pktTime && pktTime < cutoff) return false;
+        }
         if (filters.type) { const types = filters.type.split(',').map(Number); if (!types.includes(p.payload_type)) return false; }
-        if (filters.observer) { const obsSet = new Set(filters.observer.split(',')); if (!obsSet.has(p.observer_id)) return false; }
+        if (filters.observer) { const obsSet = new Set(filters.observer.split(',')); if (!obsSet.has(p.observer_id) && !(p._children && p._children.some(c => obsSet.has(String(c.observer_id))))) return false; }
         if (filters.hash && p.hash !== filters.hash) return false;
         if (RegionFilter.getRegionParam()) {
           const selectedRegions = RegionFilter.getRegionParam().split(',');
-          const obs = observers.find(o => o.id === p.observer_id);
+          const obs = observerMap.get(p.observer_id);
           if (!obs || !selectedRegions.includes(obs.iata)) return false;
         }
         if (filters.node && !(p.decoded_json || '').includes(filters.node)) return false;
@@ -306,9 +514,16 @@
       if (!filtered.length) return;
 
       // Resolve any new hops, then update and re-render
+      // Pre-populate from server-side resolved_path, then fall back for remaining
       const newHops = new Set();
       for (const p of filtered) {
-        try { JSON.parse(p.path_json || '[]').forEach(h => { if (!(h in hopNameCache)) newHops.add(h); }); } catch {}
+        const rp = getResolvedPath(p);
+        const hops = getParsedPath(p);
+        if (rp && rp.length === hops.length && window.HopResolver && HopResolver.ready()) {
+          const resolved = HopResolver.resolveFromServer(hops, rp);
+          Object.assign(hopNameCache, resolved);
+        }
+        try { hops.forEach(h => { if (!(h in hopNameCache)) newHops.add(h); }); } catch {}
       }
       (newHops.size ? resolveHops([...newHops]) : Promise.resolve()).then(() => {
         if (groupByHash) {
@@ -330,7 +545,11 @@
               // Update expanded children if this group is expanded
               if (expandedHashes.has(h) && existing._children) {
                 existing._children.unshift(p);
+                if (existing._children.length > 200) existing._children.length = 200;
                 sortGroupChildren(existing);
+                // Invalidate row counts — child count changed, so virtual scroll
+                // heights are stale until next renderTableRows() (#410)
+                _invalidateRowCounts();
               }
             } else {
               // New group
@@ -350,21 +569,48 @@
               if (h) hashIndex.set(h, newGroup);
             }
           }
-          // Re-sort by latest DESC
-          packets.sort((a, b) => (b.latest || '').localeCompare(a.latest || ''));
+          // Re-sort by active sort column (or latest DESC as default), then evict oldest beyond the limit
+          if (_packetSortColumn) {
+            sortPacketsArray();
+          } else {
+            packets.sort((a, b) => (b.latest || '').localeCompare(a.latest || ''));
+          }
+          if (packets.length > PACKET_LIMIT) {
+            const evicted = packets.splice(PACKET_LIMIT);
+            for (const p of evicted) { if (p.hash) hashIndex.delete(p.hash); }
+          }
         } else {
-          // Flat mode: prepend
+          // Flat mode: prepend, then evict oldest beyond the limit
           packets = filtered.concat(packets);
+          if (packets.length > PACKET_LIMIT) packets.length = PACKET_LIMIT;
         }
         totalCount += filtered.length;
-        renderTableRows();
+        // Coalesce WS-triggered renders via rAF (#396)
+        scheduleWSRender();
       });
     });
   }
 
   function destroy() {
+    clearTimeout(_renderTimer);
     if (wsHandler) offWS(wsHandler);
     wsHandler = null;
+    if (_tableSortInstance) { _tableSortInstance.destroy(); _tableSortInstance = null; }
+    detachVScrollListener();
+    clearTimeout(_wsRenderTimer);
+    if (_wsRafId) { cancelAnimationFrame(_wsRafId); _wsRafId = null; }
+    _wsRenderDirty = false;
+    _displayPackets = [];
+    _rowCounts = [];
+    _rowCountsDirty = false;
+    _cumulativeOffsetsCache = null;
+    _observerFilterSet = null;
+    _lastVisibleStart = -1;
+    _lastVisibleEnd = -1;
+    if (_docActionHandler) { document.removeEventListener('click', _docActionHandler); _docActionHandler = null; }
+    if (_docMenuCloseHandler) { document.removeEventListener('click', _docMenuCloseHandler); _docMenuCloseHandler = null; }
+    if (_docColMenuCloseHandler) { document.removeEventListener('click', _docColMenuCloseHandler); _docColMenuCloseHandler = null; }
+    removeAllByopOverlays();
     packets = [];
     hashIndex = new Map();    selectedId = null;
     filtersBuilt = false;
@@ -373,6 +619,7 @@
     hopNameCache = {};
     totalCount = 0;
     observers = [];
+    observerMap = new Map();
     directPacketId = null;
     directPacketHash = null;
     groupByHash = true;
@@ -384,23 +631,30 @@
     try {
       const data = await api('/observers', { ttl: CLIENT_TTL.observers });
       observers = data.observers || [];
+      observerMap = new Map(observers.map(o => [o.id, o]));
     } catch {}
   }
 
   async function loadPackets() {
     try {
       const params = new URLSearchParams();
-      const windowMin = Number(document.getElementById('fTimeWindow')?.value || 15);
+      const selectedWindow = Number(document.getElementById('fTimeWindow')?.value);
+      const windowMin = Number.isFinite(selectedWindow) ? selectedWindow : savedTimeWindowMin;
       if (windowMin > 0 && !filters.hash) {
         const since = new Date(Date.now() - windowMin * 60000).toISOString();
         params.set('since', since);
       }
-      params.set('limit', '50000');
+      params.set('limit', String(PACKET_LIMIT));
       const regionParam = RegionFilter.getRegionParam();
       if (regionParam) params.set('region', regionParam);
       if (filters.hash) params.set('hash', filters.hash);
       if (filters.node) params.set('node', filters.node);
-      params.set('groupByHash', 'true'); // always fetch grouped
+      if (filters.observer) params.set('observer', filters.observer);
+      if (groupByHash) {
+        params.set('groupByHash', 'true');
+      } else {
+        params.set('expand', 'observations');
+      }
 
       const data = await api('/packets?' + params.toString());
       packets = data.packets || [];
@@ -408,20 +662,14 @@
       for (const p of packets) { if (p.hash) hashIndex.set(p.hash, p); }
       totalCount = data.total || packets.length;
 
-      // When ungrouped, fetch observations for all multi-obs packets and flatten
+      // When ungrouped, flatten observations inline (single API call, no N+1)
       if (!groupByHash) {
-        const multiObs = packets.filter(p => (p.observation_count || p.count || 1) > 1);
-        await Promise.all(multiObs.map(async (p) => {
-          try {
-            const d = await api(`/packets/${p.hash}`);
-            if (d?.observations) p._children = d.observations.map(o => ({...d.packet, ...o, _isObservation: true}));
-          } catch {}
-        }));
-        // Flatten: replace grouped packets with individual observations
         const flat = [];
         for (const p of packets) {
-          if (p._children && p._children.length > 1) {
-            for (const c of p._children) flat.push(c);
+          if (p.observations && p.observations.length > 1) {
+            for (const o of p.observations) {
+              flat.push(clearParsedCache({...p, ...o, _isObservation: true, observations: undefined}));
+            }
           } else {
             flat.push(p);
           }
@@ -430,10 +678,13 @@
         totalCount = flat.length;
       }
 
-      // Pre-resolve all path hops to node names
+      // Pre-resolve from server-side resolved_path (preferred, no client-side disambiguation needed)
+      await cacheResolvedPaths(packets);
+
+      // Pre-resolve all path hops to node names (fallback for packets without resolved_path)
       const allHops = new Set();
       for (const p of packets) {
-        try { const path = JSON.parse(p.path_json || '[]'); path.forEach(h => allHops.add(h)); } catch {}
+        try { getParsedPath(p).forEach(h => allHops.add(h)); } catch {}
       }
       if (allHops.size) await resolveHops([...allHops]);
 
@@ -442,7 +693,7 @@
       for (const p of packets) {
         if (!p.observer_id) continue;
         try {
-          const path = JSON.parse(p.path_json || '[]');
+          const path = getParsedPath(p);
           const ambiguous = path.filter(h => hopNameCache[h]?.ambiguous);
           if (ambiguous.length) {
             if (!hopsByObserver[p.observer_id]) hopsByObserver[p.observer_id] = new Set();
@@ -453,28 +704,32 @@
       // Ambiguous hops are already resolved by HopResolver client-side
       // No need for per-observer server API calls
 
-      // Restore expanded group children
+      // Restore expanded group children (parallel fetch, Map lookup)
       if (groupByHash && expandedHashes.size > 0) {
-        for (const hash of expandedHashes) {
-          const group = packets.find(p => p.hash === hash);
-          if (group) {
-            try {
-              const childData = await api(`/packets?hash=${hash}&limit=20`);
-              group._children = childData.packets || [];
-              sortGroupChildren(group);
-            } catch {}
-          } else {
-            // Group no longer in results — remove from expanded
+        const expandedArr = [...expandedHashes];
+        const results = await Promise.all(expandedArr.map(hash => {
+          const group = hashIndex.get(hash);
+          if (!group) return { hash, group: null, data: null };
+          return api(`/packets?hash=${hash}&limit=20`)
+            .then(data => ({ hash, group, data }))
+            .catch(() => ({ hash, group, data: null }));
+        }));
+        for (const { hash, group, data } of results) {
+          if (!group) {
             expandedHashes.delete(hash);
+          } else if (data) {
+            group._children = data.packets || [];
+            sortGroupChildren(group);
           }
         }
       }
 
+      sortPacketsArray();
       renderLeft();
     } catch (e) {
       console.error('Failed to load packets:', e);
       const tbody = document.getElementById('pktBody');
-      if (tbody) tbody.innerHTML = '<tr><td colspan="10" class="text-center" style="padding:24px;color:var(--error,#ef4444)"><div role="alert" aria-live="polite">Failed to load packets. Please try again.</div></td></tr>';
+      if (tbody) tbody.innerHTML = '<tr><td colspan="' + _getColCount() + '" class="text-center" style="padding:24px;color:var(--error,#ef4444)"><div role="alert" aria-live="polite">Failed to load packets. Please try again.</div></td></tr>';
     }
   }
 
@@ -490,123 +745,376 @@
     filtersBuilt = true;
 
     el.innerHTML = `
-      <div class="page-header">
-        <h2>Latest Packets <span class="count">(${totalCount})</span></h2>
-        <div>
-          <button class="btn-icon" data-action="pkt-refresh" title="Refresh">🔄</button>
-          <button class="btn-icon" id="pktPauseBtn" data-action="pkt-pause" title="Pause live updates">⏸</button>
-          <button class="btn-icon" data-action="pkt-byop" title="Bring Your Own Packet" aria-label="Bring Your Own Packet - paste raw packet hex for analysis" aria-haspopup="dialog">📦 BYOP</button>
+      <div class="pkt-sticky-top" id="pktStickyTop">
+        <div class="page-header pkt-page-header">
+          <h2>Latest Packets <span class="count">(${totalCount})</span></h2>
+        </div>
+        <div class="pkt-search-bar">
+          <button class="pkt-search-trigger" id="pktSearchTrigger" aria-label="Search packets" aria-haspopup="dialog">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+            <span class="pkt-trigger-text">Search packets…</span>
+            <kbd class="pkt-search-trigger-kbd">/</kbd>
+          </button>
+          <button class="pkt-byop-pill pkt-filters-btn" id="pktFiltersBtn" aria-haspopup="dialog" title="Filters">
+            ⚙<span class="pkt-pill-text"> Filters</span><span class="pkt-filter-badge" id="pktFilterBadge" style="display:none">0</span>
+          </button>
+          <button class="pkt-byop-pill pkt-decode-btn" data-action="pkt-byop" title="Paste raw packet hex for analysis" aria-label="Bring Your Own Packet - paste raw packet hex for analysis" aria-haspopup="dialog">
+            📦<span class="pkt-pill-text"> Decode Packet</span>
+          </button>
+          <button class="pkt-byop-pill pkt-pause-btn" id="pktPauseBtn" data-action="pkt-pause" title="Pause live updates" aria-pressed="false">
+            ⏸<span class="pkt-pill-text"> Pause</span>
+          </button>
         </div>
       </div>
-      <div class="filter-group" style="flex:1;margin-bottom:8px">
-        <input type="text" id="packetFilterInput" class="packet-filter-input"
-          placeholder='Filter: type == Advert && snr > 5 · payload.name contains "Gilroy"'
-          aria-label="Packet filter expression"
-          style="width:100%;padding:6px 10px;border:1px solid var(--border);border-radius:6px;font-family:var(--mono);font-size:13px;background:var(--input-bg);color:var(--text)">
-        <div id="packetFilterError" style="color:var(--status-red);font-size:11px;margin-top:2px;display:none"></div>
-        <div id="packetFilterCount" style="color:var(--text-muted);font-size:11px;margin-top:2px;display:none"></div>
+      <div class="modal-overlay pkt-filters-overlay" id="pktFiltersOverlay" style="display:none" aria-hidden="true">
+        <div class="modal pkt-filters-modal" role="dialog" aria-label="Packet Filters" aria-modal="true">
+          <div class="pkt-fm-header">
+            <span class="pkt-fm-title">Filters</span>
+            <button class="btn-icon pkt-fm-close" id="pktFMClose" title="Close filters">✕</button>
+          </div>
+          <div class="pkt-fm-body">
+            <div class="pkt-fm-row">
+              <div class="pkt-fm-field">
+                <label class="pkt-fm-label">Time Window</label>
+                <select id="fTimeWindow" class="filter-select pkt-fm-select" aria-label="Time window filter">
+                  <option value="15">Last 15 min</option>
+                  <option value="30">Last 30 min</option>
+                  <option value="60">Last 1 hour</option>
+                  <option value="180">Last 3 hours</option>
+                  <option value="360"${isMobile ? ' disabled title="Disabled on mobile to prevent browser crashes"' : ''}>Last 6 hours</option>
+                  <option value="720"${isMobile ? ' disabled title="Disabled on mobile to prevent browser crashes"' : ''}>Last 12 hours</option>
+                  <option value="1440"${isMobile ? ' disabled title="Disabled on mobile to prevent browser crashes"' : ''}>Last 24 hours</option>
+                  ${isMobile ? '' : '<option value="0">All time</option>'}
+                </select>
+              </div>
+              <div class="pkt-fm-field">
+                <label class="pkt-fm-label" for="fHash">Packet Hash</label>
+                <input type="text" placeholder="Hash prefix…" id="fHash" aria-label="Filter by packet hash">
+              </div>
+              <div class="pkt-fm-field">
+                <label class="pkt-fm-label" for="fNode">Node Name</label>
+                <div class="node-filter-wrap" style="position:relative">
+                  <input type="text" placeholder="Node name…" id="fNode" autocomplete="off" role="combobox" aria-expanded="false" aria-owns="fNodeDropdown" aria-activedescendant="" aria-autocomplete="list">
+                  <div class="node-filter-dropdown hidden" id="fNodeDropdown" role="listbox"></div>
+                </div>
+              </div>
+            </div>
+            <div class="pkt-fm-row">
+              <div class="pkt-fm-field">
+                <label class="pkt-fm-label">Observer</label>
+                <div class="multi-select-wrap" id="observerFilterWrap">
+                  <button class="multi-select-trigger" id="observerTrigger" title="Show only packets seen by selected observer stations">All Observers ▾</button>
+                  <div class="multi-select-menu" id="observerMenu"></div>
+                </div>
+              </div>
+              <div class="pkt-fm-field">
+                <label class="pkt-fm-label">Type</label>
+                <div class="multi-select-wrap" id="typeFilterWrap">
+                  <button class="multi-select-trigger" id="typeTrigger" title="Filter by packet type">All Types ▾</button>
+                  <div class="multi-select-menu" id="typeMenu"></div>
+                </div>
+              </div>
+              <div class="pkt-fm-field">
+                <label class="pkt-fm-label">Region</label>
+                <div id="packetsRegionFilter" class="region-filter-container"></div>
+              </div>
+            </div>
+            <div class="pkt-fm-row pkt-fm-toggles">
+              <button class="btn ${groupByHash ? 'active' : ''}" id="fGroup" title="Collapse duplicate observations of the same packet into expandable groups">Group by Hash</button>
+              <button class="btn" id="fMyNodes" title="Show only packets from your favorited/claimed nodes">★ My Nodes</button>
+            </div>
+            <div class="pkt-fm-divider"></div>
+            <div class="pkt-fm-row">
+              <div class="pkt-fm-field" style="flex:2">
+                <label class="pkt-fm-label" for="fObsSort">Observation Sort</label>
+                <select id="fObsSort" class="pkt-fm-select" aria-label="Observation sort order">
+                  <option value="observer">Observer — groups by station</option>
+                  <option value="path-asc">Path ↑ — shortest hops first</option>
+                  <option value="path-desc">Path ↓ — longest hops first</option>
+                  <option value="chrono-asc">Time ↑ — earliest first</option>
+                  <option value="chrono-desc">Time ↓ — latest first</option>
+                </select>
+              </div>
+            </div>
+            <div class="pkt-fm-divider"></div>
+            <div class="pkt-fm-field">
+              <label class="pkt-fm-label">Columns</label>
+              <div class="col-toggle-menu pkt-fm-col-inline" id="colToggleMenu"></div>
+            </div>
+            <div class="pkt-fm-reset-row">
+              <button class="pkt-fm-reset-btn" id="pktFMReset">Reset to defaults</button>
+            </div>
+          </div>
+        </div>
       </div>
-      <div class="filter-bar" id="pktFilters">
-        <button class="btn filter-toggle-btn" id="filterToggleBtn">Filters ▾</button>
-        <div class="filter-group">
-          <input type="text" placeholder="Packet hash…" id="fHash" aria-label="Filter by packet hash" title="Filter packets by hex hash prefix">
-          <div class="node-filter-wrap" style="position:relative">
-            <input type="text" placeholder="Node name…" id="fNode" autocomplete="off" role="combobox" aria-expanded="false" aria-owns="fNodeDropdown" aria-activedescendant="" aria-autocomplete="list" title="Filter packets involving this node (sender or path)">
-            <div class="node-filter-dropdown hidden" id="fNodeDropdown" role="listbox"></div>
+      <div class="modal-overlay pkt-search-overlay" id="pktSearchOverlay" style="display:none" aria-hidden="true">
+        <div class="pkt-search-modal" role="dialog" aria-label="Search Packets" aria-modal="true">
+          <div class="pkt-search-input-row">
+            <svg class="pkt-search-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+            <input type="text" id="pktSearchInput" class="pkt-search-input" placeholder="Search by hash, type, node or observer…" autocomplete="off" spellcheck="false" aria-label="Search packets">
+            <button class="pkt-search-clear" id="pktSearchClear" style="display:none" aria-label="Clear search">✕</button>
           </div>
-          <div class="multi-select-wrap" id="observerFilterWrap">
-            <button class="multi-select-trigger" id="observerTrigger" title="Show only packets seen by selected observer stations">All Observers ▾</button>
-            <div class="multi-select-menu" id="observerMenu"></div>
+          <div class="pkt-search-meta" id="pktSearchMeta"></div>
+          <div class="pkt-search-results" id="pktSearchResults">
+            <div class="pkt-sr-empty">Type to search across loaded packets</div>
           </div>
-          <div id="packetsRegionFilter" class="region-filter-container" style="display:inline-block;vertical-align:middle"></div>
-          <div class="multi-select-wrap" id="typeFilterWrap">
-            <button class="multi-select-trigger" id="typeTrigger" title="Filter by packet type">All Types ▾</button>
-            <div class="multi-select-menu" id="typeMenu"></div>
+          <div class="pkt-search-footer">
+            <span><kbd>↑</kbd><kbd>↓</kbd> navigate</span>
+            <span><kbd>↵</kbd> open</span>
+            <span><kbd>Esc</kbd> close</span>
           </div>
-        </div>
-        <div class="filter-group">
-          <button class="btn ${groupByHash ? 'active' : ''}" id="fGroup" title="Collapse duplicate observations of the same packet into expandable groups">Group by Hash</button>
-          <button class="btn" id="fMyNodes" title="Show only packets from your favorited/claimed nodes">★ My Nodes</button>
-        </div>
-        <div class="filter-group">
-          <select id="fTimeWindow" class="filter-select" aria-label="Time window filter">
-            <option value="15">Last 15 min</option>
-            <option value="30">Last 30 min</option>
-            <option value="60">Last 1 hour</option>
-            <option value="180">Last 3 hours</option>
-            <option value="360">Last 6 hours</option>
-            <option value="720">Last 12 hours</option>
-            <option value="1440">Last 24 hours</option>
-            <option value="0">All time</option>
-          </select>
-        </div>
-        <div class="filter-group">
-          <select id="fObsSort" aria-label="Observation sort order" title="Controls how observations are ordered within packet groups and which observation appears in the header row. Observer: Groups by observer station, earliest first. Path: Orders by hop count. Time: Orders by observation timestamp.">
-            <option value="observer">Sort: Observer</option>
-            <option value="path-asc">Sort: Path ↑ (shortest)</option>
-            <option value="path-desc">Sort: Path ↓ (longest)</option>
-            <option value="chrono-asc">Sort: Time ↑ (earliest)</option>
-            <option value="chrono-desc">Sort: Time ↓ (latest)</option>
-          </select>
-          <span class="sort-help" id="sortHelpIcon">ⓘ</span>
-        </div>
-        <div class="filter-group">
-          <div class="col-toggle-wrap">
-            <button class="col-toggle-btn" id="colToggleBtn" title="Show/hide table columns">Columns ▾</button>
-            <div class="col-toggle-menu" id="colToggleMenu"></div>
-          </div>
-          <button class="btn btn-icon${showHexHashes ? ' active' : ''}" id="hexHashToggle" title="Show raw hex hash prefixes instead of resolved node names in the path column">Hex Paths</button>
         </div>
       </div>
       <table class="data-table" id="pktTable">
+        <colgroup>
+          <col style="width:24px">
+          <col class="col-region" style="width:48px">
+          <col class="col-time" style="width:52px">
+          <col class="col-hash" style="width:102px">
+          <col class="col-size" style="width:48px">
+          <col class="col-type" style="width:108px">
+          <col class="col-observer" style="width:190px">
+          <col class="col-rpt" style="width:64px">
+          <col class="col-path">
+          <col class="col-details" style="width:260px">
+        </colgroup>
         <thead><tr>
-          <th scope="col"></th><th scope="col" class="col-region">Region</th><th scope="col" class="col-time">Time</th><th scope="col" class="col-hash">Hash</th><th scope="col" class="col-size">Size</th>
-          <th scope="col" class="col-type">Type</th><th scope="col" class="col-observer">Observer</th><th scope="col" class="col-path">Path</th><th scope="col" class="col-rpt">Rpt</th><th scope="col" class="col-details">Details</th>
+          <th scope="col"></th><th scope="col" class="col-region" data-sort-key="region" title="Region">Rgn</th><th scope="col" class="col-time" data-sort-key="time" data-type="date">Time</th><th scope="col" class="col-hash" data-sort-key="hash">Hash</th><th scope="col" class="col-size" data-sort-key="size" data-type="numeric">Size</th>
+          <th scope="col" class="col-type" data-sort-key="type">Type</th><th scope="col" class="col-observer" data-sort-key="observer">First Observer</th><th scope="col" class="col-rpt" data-sort-key="rpt" data-type="numeric">Repeats</th><th scope="col" class="col-path" data-sort-key="path">Path</th><th scope="col" class="col-details">Details</th>
         </tr></thead>
         <tbody id="pktBody"></tbody>
       </table>
     `;
 
+    // Set thead top offset to match sticky header height
+    requestAnimationFrame(() => {
+      const stickyTop = document.getElementById('pktStickyTop');
+      if (stickyTop) {
+        const h = stickyTop.offsetHeight;
+        document.getElementById('pktLeft')?.style.setProperty('--pkt-sticky-h', h + 'px');
+      }
+    });
+
     // Init shared RegionFilter component
     RegionFilter.init(document.getElementById('packetsRegionFilter'), { dropdown: true });
-    RegionFilter.onChange(function() { loadPackets(); });
+    if (_pendingUrlRegion) {
+      RegionFilter.setSelected(_pendingUrlRegion.split(',').filter(Boolean));
+      _pendingUrlRegion = null;
+    }
+    RegionFilter.onChange(function() { updatePacketsUrl(); updateFilterBadge(); loadPackets(); });
 
-    // --- Packet Filter Language ---
+    // --- Packet Search Modal ---
     (function() {
-      var pfInput = document.getElementById('packetFilterInput');
-      var pfError = document.getElementById('packetFilterError');
-      var pfCount = document.getElementById('packetFilterCount');
-      if (!pfInput || !window.PacketFilter) return;
-      var pfTimer = null;
-      pfInput.addEventListener('input', function() {
-        clearTimeout(pfTimer);
-        pfTimer = setTimeout(function() {
-          var expr = pfInput.value.trim();
-          if (!expr) {
-            pfInput.classList.remove('filter-error', 'filter-active');
-            pfError.style.display = 'none';
-            pfCount.style.display = 'none';
-            filters._packetFilter = null;
-            renderTableRows();
-            return;
-          }
-          var compiled = PacketFilter.compile(expr);
-          if (compiled.error) {
-            pfInput.classList.add('filter-error');
-            pfInput.classList.remove('filter-active');
-            pfError.textContent = compiled.error;
-            pfError.style.display = 'block';
-            pfCount.style.display = 'none';
-            filters._packetFilter = null;
-            renderTableRows();
-          } else {
-            pfInput.classList.remove('filter-error');
-            pfInput.classList.add('filter-active');
-            pfError.style.display = 'none';
-            filters._packetFilter = compiled.filter;
-            renderTableRows();
-          }
-        }, 300);
+      var trigger = document.getElementById('pktSearchTrigger');
+      var overlay = document.getElementById('pktSearchOverlay');
+      var input = document.getElementById('pktSearchInput');
+      var clearBtn = document.getElementById('pktSearchClear');
+      var meta = document.getElementById('pktSearchMeta');
+      var results = document.getElementById('pktSearchResults');
+      if (!trigger || !overlay || !input) return;
+
+      // Type-name → payload_type_number lookup
+      var typeMap = {};
+      Object.entries(PAYLOAD_TYPES).forEach(function([num, name]) {
+        typeMap[name.toLowerCase()] = Number(num);
+      });
+
+      var activeIdx = -1;
+      var currentMatches = [];
+
+      function openSearch() {
+        // Position modal just below the sticky header (accounts for nav + sticky bar at any screen size)
+        var stickyTop = document.getElementById('pktStickyTop');
+        if (stickyTop) {
+          var bottom = stickyTop.getBoundingClientRect().bottom;
+          overlay.style.paddingTop = Math.max(bottom + 8, 12) + 'px';
+        }
+        overlay.style.display = 'flex';
+        overlay.removeAttribute('aria-hidden');
+        input.value = '';
+        clearBtn.style.display = 'none';
+        meta.textContent = '';
+        results.innerHTML = '<div class="pkt-sr-empty">Type to search across loaded packets</div>';
+        currentMatches = [];
+        activeIdx = -1;
+        requestAnimationFrame(function() { input.focus(); });
+      }
+
+      function closeSearch() {
+        overlay.style.display = 'none';
+        overlay.setAttribute('aria-hidden', 'true');
+        trigger.focus();
+      }
+
+      function matchPackets(raw) {
+        if (!raw) return [];
+        var q = raw.toLowerCase().replace(/\s/g, '');
+        var lq = raw.toLowerCase();
+        var src = packets; // in-memory packet array (all loaded)
+        // 1. Hex prefix → hash match
+        if (q.length >= 4 && /^[0-9a-f]+$/.test(q)) {
+          return src.filter(function(p) { return p.hash && p.hash.toLowerCase().includes(q); });
+        }
+        // 2. Type keyword
+        var matchedTypes = [];
+        Object.entries(typeMap).forEach(function([name, num]) {
+          if (name.includes(lq)) matchedTypes.push(num);
+        });
+        if (matchedTypes.length) {
+          return src.filter(function(p) { return matchedTypes.includes(p.payload_type); });
+        }
+        // 3. Observer name or decoded payload (node name / message text)
+        return src.filter(function(p) {
+          if (obsNameOnly(p.observer_id).toLowerCase().includes(lq)) return true;
+          if ((p.decoded_json || '').toLowerCase().includes(lq)) return true;
+          return false;
+        });
+      }
+
+      function renderResults(raw) {
+        activeIdx = -1;
+        if (!raw) {
+          currentMatches = [];
+          results.innerHTML = '<div class="pkt-sr-empty">Type to search across loaded packets</div>';
+          meta.textContent = '';
+          return;
+        }
+        currentMatches = matchPackets(raw);
+        var shown = currentMatches.slice(0, 100);
+        meta.textContent = currentMatches.length === 0
+          ? 'No results'
+          : currentMatches.length > 100
+            ? 'Showing 100 of ' + currentMatches.length.toLocaleString() + ' matches'
+            : currentMatches.length.toLocaleString() + ' match' + (currentMatches.length === 1 ? '' : 'es');
+        if (!shown.length) {
+          results.innerHTML = '<div class="pkt-sr-empty">No packets found</div>';
+          return;
+        }
+        results.innerHTML = shown.map(function(p, i) {
+          var typeName = payloadTypeName(p.payload_type);
+          var typeClass = payloadTypeColor(p.payload_type);
+          var hash = p.hash ? midTruncate(p.hash, 4) : '—';
+          var obs = obsNameOnly(p.observer_id);
+          var region = p.observer_id ? (observerMap.get(p.observer_id)?.iata || '') : '';
+          var time = timeAgo(p.latest || p.timestamp || p.first_seen) || '';
+          var decoded = getParsedDecoded(p) || {};
+          var detail = getDetailPreviewPlain(decoded);
+          return '<div class="pkt-sr-item" data-idx="' + i + '" tabindex="-1" role="option">' +
+            '<div class="pkt-sr-top">' +
+              '<span class="badge badge-' + typeClass + '">' + escapeHtml(typeName) + '</span>' +
+              '<span class="pkt-sr-hash mono">' + escapeHtml(hash) + '</span>' +
+              (region ? '<span class="pkt-sr-region">' + escapeHtml(region) + '</span>' : '') +
+              '<span class="pkt-sr-time">' + escapeHtml(time) + '</span>' +
+            '</div>' +
+            (detail ? '<div class="pkt-sr-detail">' + escapeHtml(detail) + '</div>' : '') +
+            '<div class="pkt-sr-obs">' + escapeHtml(obs) + '</div>' +
+          '</div>';
+        }).join('');
+      }
+
+      // Plain-text version of detail preview (no HTML tags) for result rows
+      function getDetailPreviewPlain(decoded) {
+        if (!decoded) return '';
+        if (decoded.type === 'CHAN' && decoded.text) {
+          return (decoded.channel ? decoded.channel + ' ' : '') + decoded.text.slice(0, 80);
+        }
+        if (decoded.type === 'ADVERT' && decoded.name) return decoded.name;
+        if (decoded.type === 'GRP_TXT' && decoded.channelHash != null) {
+          var h = decoded.channelHashHex || decoded.channelHash.toString(16).padStart(2, '0').toUpperCase();
+          return 'Ch 0x' + h + ' (encrypted)';
+        }
+        if (decoded.type === 'TXT_MSG') return (decoded.srcHash || '?').slice(0, 8) + ' → ' + (decoded.destHash || '?').slice(0, 8);
+        if (decoded.type === 'PATH') return (decoded.srcHash || '?').slice(0, 8) + ' → ' + (decoded.destHash || '?').slice(0, 8);
+        if (decoded.type === 'REQ' || decoded.type === 'RESPONSE') return (decoded.srcHash || '?').slice(0, 8) + ' → ' + (decoded.destHash || '?').slice(0, 8);
+        if (decoded.text) return decoded.text.slice(0, 80);
+        return '';
+      }
+
+      function setActive(idx) {
+        var items = results.querySelectorAll('.pkt-sr-item');
+        items.forEach(function(el) { el.classList.remove('active'); });
+        if (idx >= 0 && idx < items.length) {
+          activeIdx = idx;
+          items[idx].classList.add('active');
+          items[idx].scrollIntoView({ block: 'nearest' });
+        } else {
+          activeIdx = -1;
+        }
+      }
+
+      function openResult(idx) {
+        var p = currentMatches[idx];
+        if (!p) return;
+        closeSearch();
+        selectPacket(p.id, p.hash, null, null);
+      }
+
+      // Event: open via trigger button
+      trigger.addEventListener('click', openSearch);
+
+      // Event: close via overlay backdrop click
+      overlay.addEventListener('click', function(e) {
+        if (e.target === overlay) closeSearch();
+      });
+
+      // Event: keyboard on input
+      input.addEventListener('keydown', function(e) {
+        var items = results.querySelectorAll('.pkt-sr-item');
+        if (e.key === 'Escape') { closeSearch(); return; }
+        if (e.key === 'ArrowDown') {
+          e.preventDefault();
+          setActive(Math.min(activeIdx + 1, items.length - 1));
+          return;
+        }
+        if (e.key === 'ArrowUp') {
+          e.preventDefault();
+          setActive(Math.max(activeIdx - 1, 0));
+          return;
+        }
+        if (e.key === 'Enter') {
+          if (activeIdx >= 0) openResult(activeIdx);
+          else if (currentMatches.length === 1) openResult(0);
+          return;
+        }
+      });
+
+      var srTimer = null;
+      input.addEventListener('input', function() {
+        var raw = input.value.trim();
+        clearBtn.style.display = raw ? 'flex' : 'none';
+        clearTimeout(srTimer);
+        srTimer = setTimeout(function() { renderResults(raw); }, 150);
+      });
+
+      clearBtn.addEventListener('click', function() {
+        input.value = '';
+        clearBtn.style.display = 'none';
+        renderResults('');
+        input.focus();
+      });
+
+      // Event: click on result item
+      results.addEventListener('click', function(e) {
+        var item = e.target.closest('.pkt-sr-item');
+        if (!item) return;
+        openResult(Number(item.dataset.idx));
+      });
+
+      // Event: hover activates item
+      results.addEventListener('mousemove', function(e) {
+        var item = e.target.closest('.pkt-sr-item');
+        if (!item) return;
+        setActive(Number(item.dataset.idx));
+      });
+
+      // Global keyboard shortcut: '/' opens search when not in an input
+      document.addEventListener('keydown', function(e) {
+        if (overlay.style.display !== 'none') return;
+        if (e.key !== '/') return;
+        var tag = (document.activeElement || {}).tagName;
+        if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+        e.preventDefault();
+        openSearch();
       });
     })();
 
@@ -628,7 +1136,7 @@
         obsTrigger.textContent = 'All Observers ▾';
       } else if (selectedObservers.size === 1) {
         const id = [...selectedObservers][0];
-        const o = observers.find(x => String(x.id) === id);
+        const o = observerMap.get(id) || observerMap.get(Number(id));
         obsTrigger.textContent = (o ? (o.name || o.id) : id) + ' ▾';
       } else {
         obsTrigger.textContent = selectedObservers.size + ' Observers ▾';
@@ -648,6 +1156,7 @@
       if (filters.observer) localStorage.setItem('meshcore-observer-filter', filters.observer); else localStorage.removeItem('meshcore-observer-filter');
       buildObserverMenu();
       updateObsTrigger();
+      updateFilterBadge();
       renderTableRows();
     });
 
@@ -690,34 +1199,115 @@
       if (filters.type) localStorage.setItem('meshcore-type-filter', filters.type); else localStorage.removeItem('meshcore-type-filter');
       buildTypeMenu();
       updateTypeTrigger();
+      updateFilterBadge();
       renderTableRows();
     });
 
     // Close multi-select menus on outside click
-    document.addEventListener('click', (e) => {
+    bindDocumentHandler('menu', 'click', (e) => {
       const obsWrap = document.getElementById('observerFilterWrap');
       const typeWrap = document.getElementById('typeFilterWrap');
       if (obsWrap && !obsWrap.contains(e.target)) { const m = obsWrap.querySelector('.multi-select-menu'); if (m) m.classList.remove('open'); }
       if (typeWrap && !typeWrap.contains(e.target)) { const m = typeWrap.querySelector('.multi-select-menu'); if (m) m.classList.remove('open'); }
     });
 
-    // Filter toggle button for mobile
-    document.getElementById('filterToggleBtn').addEventListener('click', function() {
-      const bar = document.getElementById('pktFilters');
-      bar.classList.toggle('filters-expanded');
-      this.textContent = bar.classList.contains('filters-expanded') ? 'Filters ▴' : 'Filters ▾';
-    });
+    // Filters modal open/close
+    const _pktFiltersBtn = document.getElementById('pktFiltersBtn');
+    const _pktFiltersOverlay = document.getElementById('pktFiltersOverlay');
+    const _pktFMClose = document.getElementById('pktFMClose');
+    function _openFiltersModal() {
+      _pktFiltersOverlay.style.display = 'flex';
+      _pktFiltersOverlay.removeAttribute('aria-hidden');
+      _pktFMClose.focus();
+    }
+    function _closeFiltersModal() {
+      _pktFiltersOverlay.style.display = 'none';
+      _pktFiltersOverlay.setAttribute('aria-hidden', 'true');
+      _pktFiltersBtn.focus();
+    }
+    _pktFiltersBtn.addEventListener('click', _openFiltersModal);
+    _pktFMClose.addEventListener('click', _closeFiltersModal);
+    _pktFiltersOverlay.addEventListener('click', (e) => { if (e.target === _pktFiltersOverlay) _closeFiltersModal(); });
+    document.addEventListener('keydown', function _fmEsc(e) { if (e.key === 'Escape' && _pktFiltersOverlay.style.display !== 'none') _closeFiltersModal(); });
+
+    function updateFilterBadge() {
+      let n = 0;
+      if (filters.hash) n++;
+      if (filters.node) n++;
+      if (filters.observer) n++;
+      if (filters.type) n++;
+      if (RegionFilter.getRegionParam()) n++;
+      if (filters.myNodes) n++;
+      const badge = document.getElementById('pktFilterBadge');
+      if (badge) { badge.textContent = n; badge.style.display = n > 0 ? 'inline-flex' : 'none'; }
+    }
+    updateFilterBadge();
+
+    function resetFilters() {
+      // Time window: 24h
+      savedTimeWindowMin = 1440;
+      localStorage.setItem('meshcore-time-window', '1440');
+      const fTW = document.getElementById('fTimeWindow');
+      if (fTW) fTW.value = '1440';
+      // Hash
+      filters.hash = undefined;
+      const fH = document.getElementById('fHash');
+      if (fH) fH.value = '';
+      // Node
+      filters.node = undefined; filters.nodeName = undefined;
+      const fN = document.getElementById('fNode');
+      if (fN) fN.value = '';
+      const fNDrop = document.getElementById('fNodeDropdown');
+      if (fNDrop) fNDrop.classList.add('hidden');
+      // Observers: all
+      selectedObservers.clear();
+      filters.observer = undefined;
+      localStorage.removeItem('meshcore-observer-filter');
+      buildObserverMenu(); updateObsTrigger();
+      // Types: all
+      selectedTypes.clear();
+      filters.type = undefined;
+      localStorage.removeItem('meshcore-type-filter');
+      buildTypeMenu(); updateTypeTrigger();
+      // Region: all
+      RegionFilter.setSelected([]);
+      // Group by hash: on
+      groupByHash = true;
+      const fGroup = document.getElementById('fGroup');
+      if (fGroup) fGroup.classList.add('active');
+      // My nodes: off
+      filters.myNodes = false;
+      const fMyNodes = document.getElementById('fMyNodes');
+      if (fMyNodes) fMyNodes.classList.remove('active');
+      // Obs sort: observer
+      obsSortMode = SORT_OBSERVER;
+      localStorage.setItem('meshcore-obs-sort', SORT_OBSERVER);
+      const fObsSort = document.getElementById('fObsSort');
+      if (fObsSort) fObsSort.value = SORT_OBSERVER;
+      // Reset columns to platform default
+      visibleCols = COL_DEFS.map(c => c.key).filter(k => !defaultHidden.includes(k));
+      applyColVisibility();
+      colMenu.querySelectorAll('input[type="checkbox"]').forEach(cb => {
+        cb.checked = visibleCols.includes(cb.dataset.col);
+      });
+      updateFilterBadge();
+      updatePacketsUrl();
+      loadPackets();
+    }
+    document.getElementById('pktFMReset').addEventListener('click', resetFilters);
 
     // Filter event listeners
     document.getElementById('fHash').value = filters.hash || '';
-    document.getElementById('fHash').addEventListener('input', debounce((e) => { filters.hash = e.target.value || undefined; loadPackets(); }, 300));
+    document.getElementById('fHash').addEventListener('input', debounce((e) => { filters.hash = e.target.value || undefined; updateFilterBadge(); loadPackets(); }, 300));
 
     // Time window dropdown — restore from localStorage and bind change
     const fTimeWindow = document.getElementById('fTimeWindow');
-    const savedWindow = localStorage.getItem('meshcore-time-window');
-    if (savedWindow !== null) fTimeWindow.value = savedWindow;
+    fTimeWindow.value = String(savedTimeWindowMin);
     fTimeWindow.addEventListener('change', () => {
+      savedTimeWindowMin = Number(fTimeWindow.value);
+      if (!Number.isFinite(savedTimeWindowMin) || savedTimeWindowMin <= 0) savedTimeWindowMin = 15;
       localStorage.setItem('meshcore-time-window', fTimeWindow.value);
+      updatePacketsUrl();
       loadPackets();
     });
 
@@ -725,6 +1315,7 @@
     document.getElementById('fMyNodes').addEventListener('click', function () {
       filters.myNodes = !filters.myNodes;
       this.classList.toggle('active', filters.myNodes);
+      updateFilterBadge();
       loadPackets();
     });
 
@@ -741,18 +1332,30 @@
     obsSortSel.addEventListener('change', async function () {
       obsSortMode = this.value;
       localStorage.setItem('meshcore-obs-sort', obsSortMode);
-      // For non-observer sorts, fetch children for visible groups that don't have them yet
+      // For non-observer sorts, batch-fetch children for visible groups that don't have them yet
       if (obsSortMode !== SORT_OBSERVER && groupByHash) {
         const toFetch = packets.filter(p => p.hash && !p._children && (p.observation_count || 0) > 1);
-        await Promise.all(toFetch.map(async (p) => {
+        if (toFetch.length > 0) {
+          const hashes = toFetch.map(p => p.hash);
           try {
-            const data = await api(`/packets/${p.hash}`);
-            if (data?.packet && data.observations) {
-              p._children = data.observations.map(o => ({...data.packet, ...o, _isObservation: true}));
-              p._fetchedData = data;
+            const resp = await fetch('/api/packets/observations', {
+              method: 'POST',
+              headers: {'Content-Type': 'application/json'},
+              body: JSON.stringify({hashes})
+            });
+            if (resp.ok) {
+              const data = await resp.json();
+              const results = data.results || {};
+              for (const p of toFetch) {
+                const obs = results[p.hash];
+                if (obs && obs.length) {
+                  p._children = obs.map(o => clearParsedCache({...p, ...o, _isObservation: true}));
+                  p._fetchedData = {packet: p, observations: obs};
+                }
+              }
             }
           } catch {}
-        }));
+        }
       }
       // Re-sort all groups with children
       for (const p of packets) {
@@ -761,7 +1364,7 @@
       // Resolve any new hops from updated header paths
       const newHops = new Set();
       for (const p of packets) {
-        try { JSON.parse(p.path_json || '[]').forEach(h => { if (!(h in hopNameCache)) newHops.add(h); }); } catch {}
+        try { getParsedPath(p).forEach(h => { if (!(h in hopNameCache)) newHops.add(h); }); } catch {}
       }
       if (newHops.size) await resolveHops([...newHops]);
       renderTableRows();
@@ -774,17 +1377,25 @@
       { key: 'hash', label: 'Hash' },
       { key: 'size', label: 'Size' },
       { key: 'type', label: 'Type' },
-      { key: 'observer', label: 'Observer' },
+      { key: 'observer', label: 'First Observer' },
+      { key: 'rpt', label: 'Repeats' },
       { key: 'path', label: 'Path' },
-      { key: 'rpt', label: 'Rpt' },
       { key: 'details', label: 'Details' },
     ];
-    const isMobile = window.innerWidth <= 640;
-    const defaultHidden = isMobile ? ['region', 'hash', 'observer', 'path', 'rpt', 'size'] : ['region'];
+    const isNarrow = window.innerWidth <= 640;
+    const defaultHidden = isNarrow ? ['region', 'hash', 'size', 'observer', 'rpt', 'path'] : [];
+    const COLS_VERSION = isNarrow ? 'mob4' : 'desk1';
     let visibleCols;
     try {
-      visibleCols = JSON.parse(localStorage.getItem('packets-visible-cols'));
+      if (localStorage.getItem('packets-cols-version') === COLS_VERSION) {
+        visibleCols = JSON.parse(localStorage.getItem('packets-visible-cols'));
+      }
     } catch {}
+    if (visibleCols) {
+      const validKeys = new Set(COL_DEFS.map(c => c.key));
+      visibleCols = visibleCols.filter(k => validKeys.has(k));
+      if (!visibleCols.length) visibleCols = null;
+    }
     if (!visibleCols) visibleCols = COL_DEFS.map(c => c.key).filter(k => !defaultHidden.includes(k));
     const colMenu = document.getElementById('colToggleMenu');
     const pktTable = document.getElementById('pktTable');
@@ -793,6 +1404,7 @@
         pktTable.classList.toggle('hide-col-' + c.key, !visibleCols.includes(c.key));
       });
       localStorage.setItem('packets-visible-cols', JSON.stringify(visibleCols));
+      localStorage.setItem('packets-cols-version', COLS_VERSION);
     }
     colMenu.innerHTML = COL_DEFS.map(c =>
       `<label><input type="checkbox" data-col="${c.key}" ${visibleCols.includes(c.key) ? 'checked' : ''}> ${c.label}</label>`
@@ -805,19 +1417,9 @@
       else { visibleCols = visibleCols.filter(k => k !== col); }
       applyColVisibility();
     });
-    document.getElementById('colToggleBtn').addEventListener('click', (e) => {
-      e.stopPropagation();
-      colMenu.classList.toggle('open');
-    });
-    document.addEventListener('click', () => colMenu.classList.remove('open'));
+    // colToggleBtn removed from modal — columns are now inline checkboxes
+    bindDocumentHandler('colmenu', 'click', () => colMenu.classList.remove('open'));
     applyColVisibility();
-
-    document.getElementById('hexHashToggle').addEventListener('click', function () {
-      showHexHashes = !showHexHashes;
-      localStorage.setItem('meshcore-hex-hashes', showHexHashes);
-      this.classList.toggle('active', showHexHashes);
-      renderTableRows();
-    });
 
     // Node name filter with autocomplete
     const fNode = document.getElementById('fNode');
@@ -831,7 +1433,7 @@
       if (!q) {
         fNodeDrop.classList.add('hidden');
         fNode.setAttribute('aria-expanded', 'false');
-        if (filters.node) { filters.node = undefined; filters.nodeName = undefined; loadPackets(); }
+        if (filters.node) { filters.node = undefined; filters.nodeName = undefined; updateFilterBadge(); loadPackets(); }
         return;
       }
       try {
@@ -860,6 +1462,7 @@
       fNode.setAttribute('aria-expanded', 'false');
       fNode.setAttribute('aria-activedescendant', '');
       nodeActiveIdx = -1;
+      updateFilterBadge();
       loadPackets();
     }
 
@@ -909,6 +1512,11 @@
         if (e.type === 'keydown') e.preventDefault();
         const action = row.dataset.action;
         const value = row.dataset.value;
+        // Clicking the expand chevron cell only toggles group — never opens detail
+        if (e.target.closest('.pkt-expand-cell')) {
+          if (action === 'toggle-select') pktToggleGroup(value);
+          return;
+        }
         if (action === 'select') {
           const hash = row.dataset.hash;
           if (hash) selectPacket(null, hash);
@@ -916,16 +1524,17 @@
         }
         else if (action === 'select-observation') {
           const parentHash = row.dataset.parentHash;
-          const group = packets.find(p => p.hash === parentHash);
+          const group = hashIndex.get(parentHash);
           const child = group?._children?.find(c => String(c.id) === String(value));
           if (child) {
             const parentData = group._fetchedData;
-            const obsPacket = parentData ? {...parentData.packet, observer_id: child.observer_id, observer_name: child.observer_name, snr: child.snr, rssi: child.rssi, path_json: child.path_json, timestamp: child.timestamp, first_seen: child.timestamp} : child;
+            const obsPacket = parentData ? {...parentData.packet, observer_id: child.observer_id, observer_name: child.observer_name, snr: child.snr, rssi: child.rssi, path_json: child.path_json, resolved_path: child.resolved_path, timestamp: child.timestamp, first_seen: child.timestamp} : child;
+            if (parentData) { clearParsedCache(obsPacket); }
             selectPacket(child.id, parentHash, {packet: obsPacket, breakdown: parentData?.breakdown, observations: parentData?.observations}, child.id);
           }
         }
         else if (action === 'select-hash') pktSelectHash(value);
-        else if (action === 'toggle-select') { pktToggleGroup(value); pktSelectHash(value); }
+        else if (action === 'toggle-select') { pktSelectHash(value); }
       };
       pktBody.addEventListener('click', handler);
       pktBody.addEventListener('keydown', handler);
@@ -939,7 +1548,358 @@
     });
 
     renderTableRows();
-    makeColumnsResizable('#pktTable', 'meshcore-pkt-col-widths');
+
+    // Initialize table sorting (virtual scroll — sort data array, not DOM)
+    if (window.TableSort) {
+      var pktTableEl = document.getElementById('pktTable');
+      if (pktTableEl) {
+        if (_tableSortInstance) _tableSortInstance.destroy();
+        _tableSortInstance = TableSort.init(pktTableEl, {
+          defaultColumn: 'time',
+          defaultDirection: 'desc',
+          storageKey: 'meshcore-packets-sort',
+          domReorder: false,
+          onSort: function(column, direction) {
+            _packetSortColumn = column;
+            _packetSortDirection = direction;
+            sortPacketsArray();
+            renderTableRows();
+          }
+        });
+        // Apply initial sort state from TableSort
+        if (_tableSortInstance) {
+          var st = _tableSortInstance.getState();
+          _packetSortColumn = st.column;
+          _packetSortDirection = st.direction;
+          sortPacketsArray();
+        }
+      }
+    }
+  }
+
+  // Build HTML for a single grouped packet row
+  function buildGroupRowHtml(p, entryIdx = -1) {
+    const isExpanded = expandedHashes.has(p.hash);
+    let headerObserverId = p.observer_id;
+    let headerPathJson = p.path_json;
+    if (_observerFilterSet && p._children?.length) {
+      const match = p._children.find(c => _observerFilterSet.has(String(c.observer_id)));
+      if (match) {
+        headerObserverId = match.observer_id;
+        headerPathJson = match.path_json;
+      }
+    }
+    const groupRegion = headerObserverId ? (observerMap.get(headerObserverId)?.iata || '') : '';
+    let groupPath = [];
+    try { groupPath = JSON.parse(headerPathJson || '[]'); } catch {}
+    const groupPathStr = renderPath(groupPath, headerObserverId);
+    const groupTypeName = payloadTypeName(p.payload_type);
+    const groupTypeClass = payloadTypeColor(p.payload_type);
+    const groupSize = p.raw_hex ? Math.floor(p.raw_hex.length / 2) : 0;
+    const groupHashBytes = ((parseInt(p.raw_hex?.slice(2, 4), 16) || 0) >> 6) + 1;
+    const isSingle = p.count <= 1;
+    // Channel color highlighting (#271)
+    const _grpDecoded = getParsedDecoded(p) || {};
+    const _grpChanStyle = window.ChannelColors ? window.ChannelColors.getRowStyle(_grpDecoded.type || groupTypeName, _grpDecoded.channel) : '';
+    let html = `<tr class="${isSingle ? '' : 'group-header'} ${isExpanded ? 'expanded' : ''}" data-hash="${p.hash}" data-action="${isSingle ? 'select-hash' : 'toggle-select'}" data-value="${p.hash}" data-entry-idx="${entryIdx}" tabindex="0" role="row"${_grpChanStyle ? ' style="' + _grpChanStyle + '"' : ''}>
+          <td class="pkt-expand-cell">${isSingle ? '' : `<span class="pkt-chevron${isExpanded ? ' expanded' : ''}"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg></span>`}</td>
+          <td class="col-region">${groupRegion || '—'}</td>
+          <td class="col-time">${renderTimestampCell(p.latest)}</td>
+          <td class="mono col-hash">${midTruncate(p.hash || '—', 4)}</td>
+          <td class="col-size">${groupSize ? groupSize + 'B' : '—'}</td>
+          <td class="col-type">${p.payload_type != null ? `<span class="badge badge-${groupTypeClass}">${groupTypeName}</span>${transportBadge(p.route_type)}` : '—'}</td>
+          <td class="col-observer">${truncate(obsNameOnly(headerObserverId), 25)}</td>
+          <td class="col-rpt">${p.observation_count > 1 ? '<span class="badge badge-obs" title="Seen ' + p.observation_count + ' times">×' + p.observation_count + '</span>' : (isSingle ? '' : p.count)}</td>
+          <td class="col-path"><span class="path-hops">${groupPathStr}</span></td>
+          <td class="col-details">${getDetailPreview(getParsedDecoded(p))}</td>
+        </tr>`;
+    if (isExpanded && p._children) {
+      let visibleChildren = p._children;
+      if (_observerFilterSet) {
+        visibleChildren = visibleChildren.filter(c => _observerFilterSet.has(String(c.observer_id)));
+      }
+      for (const c of visibleChildren) {
+        const typeName = payloadTypeName(c.payload_type);
+        const typeClass = payloadTypeColor(c.payload_type);
+        const size = c.raw_hex ? Math.floor(c.raw_hex.length / 2) : 0;
+        const childHashBytes = ((parseInt(c.raw_hex?.slice(2, 4), 16) || 0) >> 6) + 1;
+        const childRegion = c.observer_id ? (observerMap.get(c.observer_id)?.iata || '') : '';
+        const childPath = getParsedPath(c);
+        const childPathStr = renderPath(childPath, c.observer_id);
+        html += `<tr class="group-child" data-id="${c.id}" data-hash="${c.hash || ''}" data-action="select-observation" data-value="${c.id}" data-parent-hash="${p.hash}" data-entry-idx="${entryIdx}" tabindex="0" role="row">
+              <td></td><td class="col-region">${childRegion || '—'}</td>
+              <td class="col-time">${renderTimestampCell(c.timestamp)}</td>
+              <td class="mono col-hash">${midTruncate(c.hash || '', 4)}</td>
+              <td class="col-size">${size}B</td>
+              <td class="col-type"><span class="badge badge-${typeClass}">${typeName}</span>${transportBadge(c.route_type)}</td>
+              <td class="col-observer">${truncate(obsNameOnly(c.observer_id), 25)}</td>
+              <td class="col-rpt"></td>
+              <td class="col-path"><span class="path-hops">${childPathStr}</span></td>
+              <td class="col-details">${getDetailPreview(getParsedDecoded(c))}</td>
+            </tr>`;
+      }
+    }
+    return html;
+  }
+
+  // Build HTML for a single flat (ungrouped) packet row
+  function buildFlatRowHtml(p, entryIdx = -1) {
+    const decoded = getParsedDecoded(p) || {};
+    const pathHops = getParsedPath(p) || [];
+    const region = p.observer_id ? (observerMap.get(p.observer_id)?.iata || '') : '';
+    const typeName = payloadTypeName(p.payload_type);
+    const typeClass = payloadTypeColor(p.payload_type);
+    // Channel color highlighting (#271)
+    const _chanStyle = window.ChannelColors ? window.ChannelColors.getRowStyle(decoded.type || typeName, decoded.channel) : '';
+    const size = p.raw_hex ? Math.floor(p.raw_hex.length / 2) : 0;
+    const hashBytes = ((parseInt(p.raw_hex?.slice(2, 4), 16) || 0) >> 6) + 1;
+    const pathStr = renderPath(pathHops, p.observer_id);
+    const detail = getDetailPreview(decoded);
+    return `<tr data-id="${p.id}" data-hash="${p.hash || ''}" data-action="select-hash" data-value="${p.hash || p.id}" data-entry-idx="${entryIdx}" tabindex="0" role="row" class="${selectedId === p.id ? 'selected' : ''}"${_chanStyle ? ' style="' + _chanStyle + '"' : ''}>
+        <td></td><td class="col-region">${region || '—'}</td>
+        <td class="col-time">${renderTimestampCell(p.timestamp)}</td>
+        <td class="mono col-hash">${midTruncate(p.hash || String(p.id), 4)}</td>
+        <td class="col-size">${size}B</td>
+        <td class="col-type"><span class="badge badge-${typeClass}">${typeName}</span>${transportBadge(p.route_type)}</td>
+        <td class="col-observer">${truncate(obsNameOnly(p.observer_id), 25)}</td>
+        <td class="col-rpt"></td>
+        <td class="col-path"><span class="path-hops">${pathStr}</span></td>
+        <td class="col-details">${detail}</td>
+      </tr>`;
+  }
+
+  // Mark _rowCounts as stale so renderVisibleRows() recomputes them lazily.
+  // Called when expanded group children change outside renderTableRows() (#410).
+  function _invalidateRowCounts() {
+    _rowCountsDirty = true;
+    _cumulativeOffsetsCache = null;
+  }
+
+  // Recompute _rowCounts from _displayPackets if they've been invalidated.
+  function _refreshRowCountsIfDirty() {
+    if (!_rowCountsDirty || !_displayPackets.length) return;
+    _rowCounts = _displayPackets.map(function(p) { return _getRowCount(p); });
+    _cumulativeOffsetsCache = null;
+    _rowCountsDirty = false;
+  }
+
+  // Compute the number of DOM <tr> rows a single entry produces.
+  // Used by both row counting and renderVisibleRows to avoid divergence (#424).
+  function _getRowCount(p) {
+    if (!_displayGrouped) return 1;
+    if (!expandedHashes.has(p.hash) || !p._children) return 1;
+    let childCount = p._children.length;
+    if (_observerFilterSet) {
+      childCount = p._children.filter(c => _observerFilterSet.has(String(c.observer_id))).length;
+    }
+    return 1 + childCount;
+  }
+
+  // Get the column count from the thead (dynamic, avoids hardcoded colspan — #426)
+  function _getColCount() {
+    const thead = document.querySelector('#pktLeft thead tr');
+    return thead ? thead.children.length : 11;
+  }
+
+  // Compute cumulative DOM row offsets from per-entry row counts.
+  // Returns array where cumulativeOffsets[i] = total <tr> rows before entry i.
+  function _cumulativeRowOffsets() {
+    if (_cumulativeOffsetsCache) return _cumulativeOffsetsCache;
+    const offsets = new Array(_rowCounts.length + 1);
+    offsets[0] = 0;
+    for (let i = 0; i < _rowCounts.length; i++) {
+      offsets[i + 1] = offsets[i] + _rowCounts[i];
+    }
+    _cumulativeOffsetsCache = offsets;
+    return offsets;
+  }
+
+  function renderVisibleRows() {
+    const _rvr_t0 = performance.now();
+    const tbody = document.getElementById('pktBody');
+    if (!tbody || !_displayPackets.length) return;
+
+    const scrollContainer = document.getElementById('pktLeft');
+    if (!scrollContainer) return;
+
+    // Recompute row counts if they were invalidated (e.g. WS added children) (#410)
+    _refreshRowCountsIfDirty();
+
+    // Compute total DOM rows accounting for expanded groups
+    const offsets = _cumulativeRowOffsets();
+    const totalDomRows = offsets[offsets.length - 1];
+    const totalHeight = totalDomRows * VSCROLL_ROW_HEIGHT;
+    const colCount = _getColCount();
+
+    // Get or create spacer elements
+    let topSpacer = document.getElementById('vscroll-top');
+    let bottomSpacer = document.getElementById('vscroll-bottom');
+    if (!topSpacer) {
+      topSpacer = document.createElement('tr');
+      topSpacer.id = 'vscroll-top';
+      topSpacer.innerHTML = '<td colspan="' + colCount + '" style="padding:0;border:0"></td>';
+    }
+    if (!bottomSpacer) {
+      bottomSpacer = document.createElement('tr');
+      bottomSpacer.id = 'vscroll-bottom';
+      bottomSpacer.innerHTML = '<td colspan="' + colCount + '" style="padding:0;border:0"></td>';
+    }
+
+    // Calculate visible range based on scroll position
+    const scrollTop = scrollContainer.scrollTop;
+    const viewportHeight = scrollContainer.clientHeight;
+    // Account for thead height (measured dynamically)
+    const theadEl = scrollContainer.querySelector('thead');
+    if (theadEl) _vscrollTheadHeight = theadEl.offsetHeight || _vscrollTheadHeight;
+
+    const { startIdx, endIdx } = _calcVisibleRange(
+      offsets, _displayPackets.length, scrollTop, viewportHeight,
+      VSCROLL_ROW_HEIGHT, _vscrollTheadHeight, VSCROLL_BUFFER
+    );
+
+    // Skip DOM rebuild if visible range hasn't changed
+    if (startIdx === _lastVisibleStart && endIdx === _lastVisibleEnd) {
+      if (window.__PERF_LOG_RENDER) console.log('[perf] renderVisibleRows: skip (no change) %.2fms', performance.now() - _rvr_t0);
+      return;
+    }
+
+    const prevStart = _lastVisibleStart;
+    const prevEnd = _lastVisibleEnd;
+    _lastVisibleStart = startIdx;
+    _lastVisibleEnd = endIdx;
+
+    // Compute padding using cumulative row counts
+    const topPad = offsets[startIdx] * VSCROLL_ROW_HEIGHT;
+    const bottomPad = (totalDomRows - offsets[endIdx]) * VSCROLL_ROW_HEIGHT;
+
+    topSpacer.firstChild.style.height = topPad + 'px';
+    bottomSpacer.firstChild.style.height = bottomPad + 'px';
+
+    const builder = _displayGrouped ? buildGroupRowHtml : buildFlatRowHtml;
+    const hasOverlap = prevStart !== -1 && startIdx < prevEnd && endIdx > prevStart;
+
+    if (!hasOverlap) {
+      // Full rebuild: initial render or large scroll jump past buffer
+      const visibleHtml = _displayPackets.slice(startIdx, endIdx)
+        .map((p, i) => builder(p, startIdx + i)).join('');
+      tbody.innerHTML = '';
+      tbody.appendChild(topSpacer);
+      tbody.insertAdjacentHTML('beforeend', visibleHtml);
+      tbody.appendChild(bottomSpacer);
+      // Measure actual row height from first rendered data row (#407)
+      if (!_vscrollRowHeightMeasured) {
+        const firstRow = topSpacer.nextElementSibling;
+        if (firstRow && firstRow !== bottomSpacer) {
+          const h = firstRow.offsetHeight;
+          if (h > 0) { VSCROLL_ROW_HEIGHT = h; _vscrollRowHeightMeasured = true; }
+        }
+      }
+      if (window.__PERF_LOG_RENDER) console.log('[perf] renderVisibleRows: full rebuild %d entries, %.2fms', endIdx - startIdx, performance.now() - _rvr_t0);
+      return;
+    }
+
+    // Incremental update: remove rows that scrolled out at the top (positional)
+    const headRowCount = offsets[Math.min(startIdx, prevEnd)] - offsets[prevStart];
+    for (let r = 0; r < headRowCount; r++) {
+      const row = topSpacer.nextElementSibling;
+      if (row && row !== bottomSpacer) row.remove();
+    }
+    // Remove rows that scrolled out at the bottom (positional)
+    const tailFrom = Math.max(endIdx, prevStart);
+    const tailRowCount = offsets[prevEnd] - offsets[tailFrom];
+    for (let r = 0; r < tailRowCount; r++) {
+      const row = bottomSpacer.previousElementSibling;
+      if (row && row !== topSpacer) row.remove();
+    }
+    // Prepend rows that scrolled into view at the top
+    if (startIdx < prevStart) {
+      let html = '';
+      for (let i = startIdx; i < Math.min(prevStart, endIdx); i++) {
+        html += builder(_displayPackets[i], i);
+      }
+      topSpacer.insertAdjacentHTML('afterend', html);
+    }
+    // Append rows that scrolled into view at the bottom
+    if (endIdx > prevEnd) {
+      let html = '';
+      for (let i = Math.max(prevEnd, startIdx); i < endIdx; i++) {
+        html += builder(_displayPackets[i], i);
+      }
+      bottomSpacer.insertAdjacentHTML('beforebegin', html);
+    }
+    if (window.__PERF_LOG_RENDER) console.log('[perf] renderVisibleRows: incremental head=%d tail=%d, %.2fms', headRowCount, tailRowCount, performance.now() - _rvr_t0);
+  }
+
+  // Attach/detach scroll listener for virtual scrolling
+  function attachVScrollListener() {
+    const scrollContainer = document.getElementById('pktLeft');
+    if (!scrollContainer) return;
+    if (_vsScrollHandler) return; // already attached
+    let scrollRaf = null;
+    _vsScrollHandler = function () {
+      if (scrollRaf) return;
+      scrollRaf = requestAnimationFrame(function () {
+        scrollRaf = null;
+        renderVisibleRows();
+      });
+    };
+    scrollContainer.addEventListener('scroll', _vsScrollHandler, { passive: true });
+  }
+
+  function detachVScrollListener() {
+    if (!_vsScrollHandler) return;
+    const scrollContainer = document.getElementById('pktLeft');
+    if (scrollContainer) scrollContainer.removeEventListener('scroll', _vsScrollHandler);
+    _vsScrollHandler = null;
+  }
+
+  /** Sort the packets array by the current sort column. Called before renderTableRows. */
+  function sortPacketsArray() {
+    if (!_packetSortColumn || !packets.length) return;
+    var col = _packetSortColumn;
+    var dir = _packetSortDirection === 'asc' ? 1 : -1;
+
+    var accessor;
+    switch (col) {
+      case 'time': accessor = function(p) { return p.latest || p.timestamp || ''; }; break;
+      case 'type': accessor = function(p) { return typeName(p.payload_type); }; break;
+      case 'hash': accessor = function(p) { return p.hash || ''; }; break;
+      case 'observer': accessor = function(p) { return obsName(p.observer_id); }; break;
+      case 'size': accessor = function(p) { return p.packet_size || 0; }; break;
+      case 'hb': accessor = function(p) { return p.hash_byte_count != null ? p.hash_byte_count : (p.hash_size || 0); }; break;
+      case 'rpt': accessor = function(p) {
+        try { var pj = typeof p.path_json === 'string' ? JSON.parse(p.path_json) : p.path_json; return Array.isArray(pj) ? pj.length : 0; } catch(e) { return 0; }
+      }; break;
+      case 'region': accessor = function(p) { return (regionMap && regionMap[p.observer_id]) || ''; }; break;
+      case 'path': accessor = function(p) {
+        try { var pj = typeof p.path_json === 'string' ? JSON.parse(p.path_json) : p.path_json; return Array.isArray(pj) ? pj.join(',') : ''; } catch(e) { return ''; }
+      }; break;
+      default: return; // unsortable column
+    }
+
+    // Choose comparator based on column type
+    var isNumeric = (col === 'size' || col === 'hb' || col === 'rpt');
+    var isDate = (col === 'time');
+
+    packets.sort(function(a, b) {
+      var va = accessor(a), vb = accessor(b);
+      var result;
+      if (isDate) {
+        result = TableSort.comparators.date(va, vb);
+      } else if (isNumeric) {
+        result = TableSort.comparators.numeric(va, vb);
+      } else {
+        result = TableSort.comparators.text(va, vb);
+      }
+      // Stable tiebreaker: sort by timestamp (desc) when primary values are equal
+      if (result === 0 && !isDate) {
+        result = TableSort.comparators.date(
+          a.timestamp || a.first_seen || '',
+          b.timestamp || b.first_seen || ''
+        ) * -1; // desc (newest first)
+      }
+      return dir * result;
+    });
   }
 
   async function renderTableRows() {
@@ -951,7 +1911,7 @@
     const groupBtn = document.getElementById('fGroup');
     if (groupBtn) groupBtn.classList.toggle('active', groupByHash);
 
-    // Filter to claimed/favorited nodes if toggle is on — use server-side multi-node lookup
+    // Filter to claimed/favorited nodes — pure client-side filter (no server round-trip)
     let displayPackets = packets;
     if (filters.myNodes) {
       const myNodes = JSON.parse(localStorage.getItem('meshcore-my-nodes') || '[]');
@@ -959,10 +1919,10 @@
       const favs = getFavorites();
       const allKeys = [...new Set([...myKeys, ...favs])];
       if (allKeys.length > 0) {
-        try {
-          const myData = await api('/packets?nodes=' + allKeys.join(',') + '&limit=500');
-          displayPackets = myData.packets || [];
-        } catch { displayPackets = []; }
+        displayPackets = displayPackets.filter(p => {
+          const dj = p.decoded_json || '';
+          return allKeys.some(k => dj.includes(k));
+        });
       } else {
         displayPackets = [];
       }
@@ -975,121 +1935,43 @@
     }
     if (filters.observer) {
       const obsIds = new Set(filters.observer.split(','));
-      displayPackets = displayPackets.filter(p => obsIds.has(p.observer_id));
-    }
-
-    // Packet Filter Language
-    const pfCount = document.getElementById('packetFilterCount');
-    if (filters._packetFilter) {
-      const beforeCount = displayPackets.length;
-      displayPackets = displayPackets.filter(filters._packetFilter);
-      if (pfCount) {
-        pfCount.textContent = 'Showing ' + displayPackets.length.toLocaleString() + ' of ' + beforeCount.toLocaleString() + ' packets';
-        pfCount.style.display = 'block';
-      }
-    } else if (pfCount) {
-      pfCount.style.display = 'none';
+      displayPackets = displayPackets.filter(p => {
+        if (obsIds.has(p.observer_id)) return true;
+        if (p._children) return p._children.some(c => obsIds.has(String(c.observer_id)));
+        return false;
+      });
     }
 
     if (countEl) countEl.textContent = `(${displayPackets.length})`;
 
     if (!displayPackets.length) {
-      tbody.innerHTML = '<tr><td colspan="10" class="text-center text-muted" style="padding:24px">' + (filters.myNodes ? 'No packets from your claimed/favorited nodes' : 'No packets found') + '</td></tr>';
+      _displayPackets = [];
+      _rowCounts = [];
+      _rowCountsDirty = false;
+      _cumulativeOffsetsCache = null;
+      _observerFilterSet = null;
+      _lastVisibleStart = -1;
+      _lastVisibleEnd = -1;
+      detachVScrollListener();
+      const colCount = _getColCount();
+      tbody.innerHTML = '<tr><td colspan="' + colCount + '" class="text-center text-muted" style="padding:24px">' + (filters.myNodes ? 'No packets from your claimed/favorited nodes' : 'No packets found') + '</td></tr>';
       return;
     }
 
-    if (groupByHash) {
-      let html = '';
-      for (const p of displayPackets) {
-        const isExpanded = expandedHashes.has(p.hash);
-        // When observer filter is active, use first matching child's data for header
-        let headerObserverId = p.observer_id;
-        let headerPathJson = p.path_json;
-        if (filters.observer && p._children?.length) {
-          const obsIds = new Set(filters.observer.split(','));
-          const match = p._children.find(c => obsIds.has(String(c.observer_id)));
-          if (match) {
-            headerObserverId = match.observer_id;
-            headerPathJson = match.path_json;
-          }
-        }
-        const groupRegion = headerObserverId ? (observers.find(o => o.id === headerObserverId)?.iata || '') : '';
-        let groupPath = [];
-        try { groupPath = JSON.parse(headerPathJson || '[]'); } catch {}
-        const groupPathStr = renderPath(groupPath, headerObserverId);
-        const groupTypeName = payloadTypeName(p.payload_type);
-        const groupTypeClass = payloadTypeColor(p.payload_type);
-        const groupSize = p.raw_hex ? Math.floor(p.raw_hex.length / 2) : 0;
-        const isSingle = p.count <= 1;
-        html += `<tr class="${isSingle ? '' : 'group-header'} ${isExpanded ? 'expanded' : ''}" data-hash="${p.hash}" data-action="${isSingle ? 'select-hash' : 'toggle-select'}" data-value="${p.hash}" tabindex="0" role="row">
-          <td style="width:28px;text-align:center;cursor:pointer">${isSingle ? '' : (isExpanded ? '▼' : '▶')}</td>
-          <td class="col-region">${groupRegion ? `<span class="badge-region">${groupRegion}</span>` : '—'}</td>
-          <td class="col-time">${timeAgo(p.latest)}</td>
-          <td class="mono col-hash">${truncate(p.hash || '—', 8)}</td>
-          <td class="col-size">${groupSize ? groupSize + 'B' : '—'}</td>
-          <td class="col-type">${p.payload_type != null ? `<span class="badge badge-${groupTypeClass}">${groupTypeName}</span>` : '—'}</td>
-          <td class="col-observer">${isSingle ? truncate(obsName(headerObserverId), 16) : truncate(obsName(headerObserverId), 10) + (p.observer_count > 1 ? ' +' + (p.observer_count - 1) : '')}</td>
-          <td class="col-path"><span class="path-hops">${groupPathStr}</span></td>
-          <td class="col-rpt">${p.observation_count > 1 ? '<span class="badge badge-obs" title="Seen ' + p.observation_count + ' times">👁 ' + p.observation_count + '</span>' : (isSingle ? '' : p.count)}</td>
-          <td class="col-details">${getDetailPreview((() => { try { return JSON.parse(p.decoded_json || '{}'); } catch { return {}; } })())}</td>
-        </tr>`;
-        // Child rows (loaded async when expanded)
-        if (isExpanded && p._children) {
-          let visibleChildren = p._children;
-          // Filter children by selected observers
-          if (filters.observer) {
-            const obsSet = new Set(filters.observer.split(','));
-            visibleChildren = visibleChildren.filter(c => obsSet.has(String(c.observer_id)));
-          }
-          for (const c of visibleChildren) {
-            const typeName = payloadTypeName(c.payload_type);
-            const typeClass = payloadTypeColor(c.payload_type);
-            const size = c.raw_hex ? Math.floor(c.raw_hex.length / 2) : 0;
-            const childRegion = c.observer_id ? (observers.find(o => o.id === c.observer_id)?.iata || '') : '';
-            let childPath = [];
-            try { childPath = JSON.parse(c.path_json || '[]'); } catch {}
-            const childPathStr = renderPath(childPath, c.observer_id);
-            html += `<tr class="group-child" data-id="${c.id}" data-hash="${c.hash || ''}" data-action="select-observation" data-value="${c.id}" data-parent-hash="${p.hash}" tabindex="0" role="row">
-              <td></td><td class="col-region">${childRegion ? `<span class="badge-region">${childRegion}</span>` : '—'}</td>
-              <td class="col-time">${timeAgo(c.timestamp)}</td>
-              <td class="mono col-hash">${truncate(c.hash || '', 8)}</td>
-              <td class="col-size">${size}B</td>
-              <td class="col-type"><span class="badge badge-${typeClass}">${typeName}</span></td>
-              <td class="col-observer">${truncate(obsName(c.observer_id), 16)}</td>
-              <td class="col-path"><span class="path-hops">${childPathStr}</span></td>
-              <td class="col-rpt"></td>
-              <td class="col-details">${getDetailPreview((() => { try { return JSON.parse(c.decoded_json); } catch { return {}; } })())}</td>
-            </tr>`;
-          }
-        }
-      }
-      tbody.innerHTML = html;
-      return;
-    }
+    // Lazy virtual scroll: store display packets and row counts, but do NOT
+    // pre-generate HTML strings. HTML is built on-demand in renderVisibleRows()
+    // for only the visible slice + buffer (#422).
+    _lastVisibleStart = -1;
+    _lastVisibleEnd = -1;
+    _displayPackets = displayPackets;
+    _displayGrouped = groupByHash;
+    _observerFilterSet = filters.observer ? new Set(filters.observer.split(',')) : null;
+    _rowCounts = displayPackets.map(p => _getRowCount(p));
+    _rowCountsDirty = false;
+    _cumulativeOffsetsCache = null;
 
-    tbody.innerHTML = displayPackets.map(p => {
-      let decoded, pathHops = [];
-      try { decoded = JSON.parse(p.decoded_json); } catch {}
-      try { pathHops = JSON.parse(p.path_json || '[]'); } catch {}
-
-      const region = p.observer_id ? (observers.find(o => o.id === p.observer_id)?.iata || '') : '';
-      const typeName = payloadTypeName(p.payload_type);
-      const typeClass = payloadTypeColor(p.payload_type);
-      const size = p.raw_hex ? Math.floor(p.raw_hex.length / 2) : 0;
-      const pathStr = renderPath(pathHops, p.observer_id);      const detail = getDetailPreview(decoded);
-
-      return `<tr data-id="${p.id}" data-hash="${p.hash || ''}" data-action="select-hash" data-value="${p.hash || p.id}" tabindex="0" role="row" class="${selectedId === p.id ? 'selected' : ''}">
-        <td></td><td class="col-region">${region ? `<span class="badge-region">${region}</span>` : '—'}</td>
-        <td class="col-time">${timeAgo(p.timestamp)}</td>
-        <td class="mono col-hash">${truncate(p.hash || String(p.id), 8)}</td>
-        <td class="col-size">${size}B</td>
-        <td class="col-type"><span class="badge badge-${typeClass}">${typeName}</span></td>
-        <td class="col-observer">${truncate(obsName(p.observer_id), 16)}</td>
-        <td class="col-path"><span class="path-hops">${pathStr}</span></td>
-        <td class="col-rpt"></td>
-        <td class="col-details">${detail}</td>
-      </tr>`;
-    }).join('');
+    attachVScrollListener();
+    renderVisibleRows();
   }
 
   function getDetailPreview(decoded) {
@@ -1138,52 +2020,31 @@
       history.replaceState(null, '', `#/packets/${id}${obsParam}`);
     }
     renderTableRows();
-    const isMobileNow = window.innerWidth <= 640;
-    let panel;
-    if (isMobileNow) {
-      // Use mobile bottom sheet
-      let sheet = document.getElementById('mobileDetailSheet');
-      if (!sheet) {
-        sheet = document.createElement('div');
-        sheet.id = 'mobileDetailSheet';
-        sheet.className = 'mobile-detail-sheet';
-        sheet.innerHTML = '<div class="mobile-sheet-handle"></div><button class="mobile-sheet-close" id="mobileSheetClose">✕</button><div class="mobile-sheet-content"></div>';
-        document.body.appendChild(sheet);
-        sheet.querySelector('#mobileSheetClose').addEventListener('click', () => {
-          sheet.classList.remove('open');
-        });
-        sheet.querySelector('.mobile-sheet-handle').addEventListener('click', () => {
-          sheet.classList.remove('open');
-        });
-      }
-      panel = sheet.querySelector('.mobile-sheet-content');
-      panel.innerHTML = '<div class="text-center text-muted" style="padding:40px">Loading…</div>';
-      sheet.classList.add('open');
-    } else {
-      panel = document.getElementById('pktRight');
-      panel.classList.remove('empty');
-      var layout = panel.closest('.split-layout');
-      if (layout) layout.classList.remove('detail-collapsed');
-      panel.innerHTML = '<div class="panel-resize-handle" id="pktResizeHandle"></div>' + PANEL_CLOSE_HTML + '<div class="text-center text-muted" style="padding:40px">Loading…</div>';
-      initPanelResize();
-    }
+
+    const overlay = document.getElementById('pktDetailOverlay');
+    const body = document.getElementById('pktDetailBody');
+    const title = document.getElementById('pktDetailTitle');
+    if (!overlay || !body) return;
+
+    body.innerHTML = '<div class="text-center text-muted" style="padding:40px">Loading…</div>';
+    if (title) title.textContent = hash ? `Packet ${hash.slice(0, 8)}…` : `Packet #${id}`;
+    overlay.style.display = 'flex';
+    document.getElementById('pktDetailClose').focus();
 
     try {
       const data = prefetchedData || await api(hash ? `/packets/${hash}` : `/packets/${id}`);
-      // Resolve path hops for detail view
       const pkt = data.packet;
       try {
-        const hops = JSON.parse(pkt.path_json || '[]');
+        const hops = getParsedPath(pkt);
         const newHops = hops.filter(h => !(h in hopNameCache));
         if (newHops.length) await resolveHops(newHops);
       } catch {}
-      panel.innerHTML = isMobileNow ? '' : '<div class="panel-resize-handle" id="pktResizeHandle"></div>' + PANEL_CLOSE_HTML;
-      const content = document.createElement('div');
-      panel.appendChild(content);
-      await renderDetail(content, data);
-      if (!isMobileNow) initPanelResize();
+      body.innerHTML = '';
+      const detailTitle = await renderDetail(body, data);
+      if (title) title.textContent = detailTitle;
+      body.scrollTop = 0;
     } catch (e) {
-      panel.innerHTML = `<div class="text-muted">Error: ${e.message}</div>`;
+      body.innerHTML = `<div class="text-muted" style="padding:24px">Error: ${e.message}</div>`;
     }
   }
 
@@ -1191,10 +2052,8 @@
     const pkt = data.packet;
     const breakdown = data.breakdown || {};
     const ranges = breakdown.ranges || [];
-    let decoded;
-    try { decoded = JSON.parse(pkt.decoded_json); } catch { decoded = {}; }
-    let pathHops;
-    try { pathHops = JSON.parse(pkt.path_json || '[]'); } catch { pathHops = []; }
+    const decoded = getParsedDecoded(pkt) || {};
+    const pathHops = getParsedPath(pkt) || [];
 
     // Resolve sender GPS — from packet directly, or from known node in DB
     let senderLat = decoded.lat != null ? decoded.lat : (decoded.latitude || null);
@@ -1216,11 +2075,18 @@
       } catch {}
     }
 
-    // Re-resolve hops using client-side HopResolver with sender GPS context
+    // Resolve hops: prefer server-side resolved_path, fall back to client-side HopResolver
     if (pathHops.length) {
       try {
-        await ensureHopResolver();
-        const resolved = HopResolver.resolve(pathHops);
+        const serverResolved = getResolvedPath(pkt);
+        let resolved;
+        if (serverResolved && serverResolved.length === pathHops.length) {
+          await ensureHopResolver();
+          resolved = HopResolver.resolveFromServer(pathHops, serverResolved);
+        } else {
+          await ensureHopResolver();
+          resolved = HopResolver.resolve(pathHops);
+        }
         if (resolved) {
           for (const [k, v] of Object.entries(resolved)) {
             hopNameCache[k] = v;
@@ -1232,7 +2098,7 @@
 
     // Parse hash size from path byte
     const rawPathByte = pkt.raw_hex ? parseInt(pkt.raw_hex.slice(2, 4), 16) : NaN;
-    const hashSize = isNaN(rawPathByte) ? null : ((rawPathByte >> 6) + 1);
+    const hashSize = (isNaN(rawPathByte) || (rawPathByte & 0x3F) === 0) ? null : ((rawPathByte >> 6) + 1);
 
     const size = pkt.raw_hex ? Math.floor(pkt.raw_hex.length / 2) : 0;
     const typeName = payloadTypeName(pkt.payload_type);
@@ -1320,17 +2186,17 @@
     }
 
     panel.innerHTML = `
-      <div class="detail-title">${hasRawHex ? `Packet Byte Breakdown (${size} bytes)` : typeName + ' Packet'}</div>
-      <div class="detail-hash">${pkt.hash || 'Packet #' + pkt.id}</div>
+
       ${messageHtml}
       <dl class="detail-meta">
+        ${pkt.hash ? `<dt style="padding-top:10px">Hash ID</dt><dd class="detail-hash-id" style="padding-top:10px">${pkt.hash}</dd>` : ''}
         <dt>Observer</dt><dd>${obsName(pkt.observer_id)}</dd>
         <dt>Location</dt><dd>${locationHtml}</dd>
         <dt>SNR / RSSI</dt><dd>${snr != null ? snr + ' dB' : '—'} / ${rssi != null ? rssi + ' dBm' : '—'}</dd>
         <dt>Route Type</dt><dd>${routeTypeName(pkt.route_type)}</dd>
         <dt>Payload Type</dt><dd><span class="badge badge-${payloadTypeColor(pkt.payload_type)}">${typeName}</span></dd>
         ${hashSize ? `<dt>Hash Size</dt><dd>${hashSize} byte${hashSize !== 1 ? 's' : ''}</dd>` : ''}
-        <dt>Timestamp</dt><dd>${pkt.timestamp}</dd>
+        <dt>Timestamp</dt><dd>${renderTimestampCell(pkt.timestamp)}</dd>
         <dt>Propagation</dt><dd>${propagationHtml}</dd>
         <dt>Path</dt><dd>${pathHops.length ? renderPath(pathHops, pkt.observer_id) : '—'}</dd>
       </dl>
@@ -1370,10 +2236,8 @@
         const replayPackets = [];
         if (obs.length > 1) {
           for (const o of obs) {
-            let oPath;
-            try { oPath = JSON.parse(o.path_json || '[]'); } catch { oPath = pathHops; }
-            let oDec;
-            try { oDec = JSON.parse(o.decoded_json || '{}'); } catch { oDec = decoded; }
+            const oPath = getParsedPath(o);
+            const oDec = getParsedDecoded(o);
             replayPackets.push({
               id: o.id, hash: pkt.hash, raw: o.raw_hex || pkt.raw_hex,
               _ts: new Date(o.timestamp).getTime(),
@@ -1395,26 +2259,29 @@
     }
 
     // Wire up view route on map button
-    const routeBtn = document.getElementById('viewRouteBtn');
+    const routeBtn = panel.querySelector('#viewRouteBtn');
     if (routeBtn && pathHops.length) {
       routeBtn.addEventListener('click', async () => {
         try {
-          // Anchor disambiguation from sender's location if known (e.g. ADVERT lat/lon)
-          const senderLat = decoded.lat || decoded.latitude;
-          const senderLon = decoded.lon || decoded.longitude;
-          // Resolve observer position for backward-pass anchor
-          let obsLat = null, obsLon = null;
-          const obsId = obsName(pkt.observer_id);
-          if (obsId && HopResolver.ready()) {
-            // Try to find observer in nodes list by name — best effort
+          // Prefer server-side resolved_path if available
+          const serverResolved = getResolvedPath(pkt);
+          let resolvedKeys;
+          if (serverResolved && serverResolved.length === pathHops.length) {
+            // Use server-resolved pubkeys, fall back to short prefix for null entries
+            resolvedKeys = pathHops.map((h, i) => serverResolved[i] || h);
+          } else {
+            // Fall back to client-side HopResolver
+            const senderLat = decoded.lat || decoded.latitude;
+            const senderLon = decoded.lon || decoded.longitude;
+            let obsLat = null, obsLon = null;
+            const obsId = obsName(pkt.observer_id);
+            await ensureHopResolver();
+            const data = { resolved: HopResolver.resolve(pathHops, senderLat || null, senderLon || null, obsLat, obsLon, pkt.observer_id) };
+            resolvedKeys = pathHops.map(h => {
+              const r = data.resolved?.[h];
+              return r?.pubkey || h;
+            });
           }
-          await ensureHopResolver();
-          const data = { resolved: HopResolver.resolve(pathHops, senderLat || null, senderLon || null, obsLat, obsLon, pkt.observer_id) };
-          // Pass full pubkeys (client-disambiguated) to map, falling back to short prefix
-          const resolvedKeys = pathHops.map(h => {
-            const r = data.resolved?.[h];
-            return r?.pubkey || h;
-          });
           // Build origin info for the sender node
           const origin = {};
           if (decoded.pubKey) origin.pubkey = decoded.pubKey;
@@ -1431,6 +2298,7 @@
         }
       });
     }
+    return hasRawHex ? `Packet Byte Breakdown (${size} bytes)` : typeName + ' Packet';
   }
 
   function buildDecodedTable(decoded) {
@@ -1448,17 +2316,17 @@
     let rows = '';
 
     // Header section
-    rows += sectionRow('Header');
+    rows += sectionRow('Header', 'section-header');
     rows += fieldRow(0, 'Header Byte', '0x' + (buf.slice(0, 2) || '??'), `Route: ${routeTypeName(pkt.route_type)}, Payload: ${payloadTypeName(pkt.payload_type)}`);
     const pathByte0 = parseInt(buf.slice(2, 4), 16);
     const hashSizeVal = isNaN(pathByte0) ? '?' : ((pathByte0 >> 6) + 1);
     const hashCountVal = isNaN(pathByte0) ? '?' : (pathByte0 & 0x3F);
-    rows += fieldRow(1, 'Path Length', '0x' + (buf.slice(2, 4) || '??'), `hash_size=${hashSizeVal} byte${hashSizeVal !== 1 ? 's' : ''}, hash_count=${hashCountVal}`);
+    rows += fieldRow(1, 'Path Length', '0x' + (buf.slice(2, 4) || '??'), hashCountVal === 0 ? `hash_count=0 (direct advert)` : `hash_size=${hashSizeVal} byte${hashSizeVal !== 1 ? 's' : ''}, hash_count=${hashCountVal}`);
 
     // Transport codes
     let off = 2;
     if (pkt.route_type === 0 || pkt.route_type === 3) {
-      rows += sectionRow('Transport Codes');
+      rows += sectionRow('Transport Codes', 'section-transport');
       rows += fieldRow(off, 'Next Hop', buf.slice(off * 2, (off + 2) * 2), '');
       rows += fieldRow(off + 2, 'Last Hop', buf.slice((off + 2) * 2, (off + 4) * 2), '');
       off += 4;
@@ -1466,7 +2334,7 @@
 
     // Path
     if (pathHops.length > 0) {
-      rows += sectionRow('Path (' + pathHops.length + ' hops)');
+      rows += sectionRow('Path (' + pathHops.length + ' hops)', 'section-path');
       const pathByte = parseInt(buf.slice(2, 4), 16);
       const hashSize = (pathByte >> 6) + 1;
       for (let i = 0; i < pathHops.length; i++) {
@@ -1478,11 +2346,11 @@
     }
 
     // Payload
-    rows += sectionRow('Payload — ' + payloadTypeName(pkt.payload_type));
+    rows += sectionRow('Payload — ' + payloadTypeName(pkt.payload_type), 'section-payload');
 
     if (decoded.type === 'ADVERT') {
-      rows += fieldRow(1, 'Advertised Hash Size', hashSizeVal + ' byte' + (hashSizeVal !== 1 ? 's' : ''), 'From path byte 0x' + (buf.slice(2, 4) || '??') + ' — bits 7-6 = ' + (hashSizeVal - 1));
-      rows += fieldRow(off, 'Public Key (32B)', truncate(decoded.pubKey || '', 24), '');
+      if (hashCountVal !== 0) rows += fieldRow(1, 'Advertised Hash Size', hashSizeVal + ' byte' + (hashSizeVal !== 1 ? 's' : ''), 'From path byte 0x' + (buf.slice(2, 4) || '??') + ' — bits 7-6 = ' + (hashSizeVal - 1));
+      rows += fieldRow(off, 'Public Key (32B)', formatPubKey(decoded.pubKey || '', typeof hashSizeVal === 'number' ? hashSizeVal : 0, 24), '');
       rows += fieldRow(off + 32, 'Timestamp (4B)', decoded.timestampISO || '', 'Unix: ' + (decoded.timestamp || ''));
       rows += fieldRow(off + 36, 'Signature (64B)', truncate(decoded.signature || '', 24), '');
       if (decoded.flags) {
@@ -1528,8 +2396,8 @@
     </table>`;
   }
 
-  function sectionRow(label) {
-    return `<tr class="section-row"><td colspan="4">${label}</td></tr>`;
+  function sectionRow(label, cls) {
+    return `<tr class="section-row${cls ? ' ' + cls : ''}"><td colspan="4">${label}</td></tr>`;
   }
   function fieldRow(offset, name, value, desc) {
     return `<tr><td class="mono">${offset}</td><td>${name}</td><td class="mono">${value}</td><td class="text-muted">${desc || ''}</td></tr>`;
@@ -1537,9 +2405,10 @@
 
   // BYOP modal — decode only, no DB injection
   function showBYOP() {
+    removeAllByopOverlays();
     const triggerBtn = document.querySelector('[data-action="pkt-byop"]');
     const overlay = document.createElement('div');
-    overlay.className = 'modal-overlay';
+    overlay.className = 'modal-overlay byop-overlay';
     overlay.innerHTML = '<div class="modal byop-modal" role="dialog" aria-label="Decode a Packet" aria-modal="true">'
       + '<div class="byop-header"><h3>📦 Decode a Packet</h3><button class="btn-icon byop-x" title="Close" aria-label="Close dialog">✕</button></div>'
       + '<p class="text-muted" style="margin:0 0 12px;font-size:.85rem">Paste raw hex bytes from your radio or MQTT feed:</p>'
@@ -1550,7 +2419,7 @@
     document.body.appendChild(overlay);
 
     const modal = overlay.querySelector('.byop-modal');
-    const close = () => { overlay.remove(); if (triggerBtn) triggerBtn.focus(); };
+    const close = () => { removeAllByopOverlays(); if (triggerBtn) triggerBtn.focus(); };
     overlay.querySelector('.byop-x').onclick = close;
     overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
 
@@ -1586,7 +2455,7 @@
 
     async function doDecode() {
       const hex = textarea.value.trim().replace(/[\s\n]/g, '');
-      const result = document.getElementById('byopResult');
+      const result = overlay.querySelector('#byopResult');
       if (!hex) { result.innerHTML = '<p class="text-muted">Enter hex data</p>'; return; }
       if (!/^[0-9a-fA-F]+$/.test(hex)) { result.innerHTML = '<p class="byop-err" role="alert">Invalid hex — only 0-9 and A-F allowed</p>'; return; }
       result.innerHTML = '<p class="text-muted">Decoding...</p>';
@@ -1674,7 +2543,7 @@
   let obsSortMode = localStorage.getItem('meshcore-obs-sort') || SORT_OBSERVER;
 
   function getPathHopCount(c) {
-    try { return JSON.parse(c.path_json || '[]').length; } catch { return 0; }
+    try { return getParsedPath(c).length; } catch { return 0; }
   }
 
   function sortGroupChildren(group) {
@@ -1737,24 +2606,23 @@
       const data = await api(`/packets/${hash}`);
       const pkt = data.packet;
       if (!pkt) return;
-      const group = packets.find(p => p.hash === hash);
+      const group = hashIndex.get(hash);
       if (group && data.observations) {
-        group._children = data.observations.map(o => ({...pkt, ...o, _isObservation: true}));
+        group._children = data.observations.map(o => clearParsedCache({...pkt, ...o, _isObservation: true}));
         group._fetchedData = data;
         // Sort children based on current sort mode
         sortGroupChildren(group);
       }
-      // Resolve any new hops from children
+      // Resolve hops from children: prefer server-side resolved_path
+      await cacheResolvedPaths(group?._children || []);
       const childHops = new Set();
       for (const c of (group?._children || [])) {
-        try { JSON.parse(c.path_json || '[]').forEach(h => childHops.add(h)); } catch {}
+        try { getParsedPath(c).forEach(h => childHops.add(h)); } catch {}
       }
       const newHops = [...childHops].filter(h => !(h in hopNameCache));
       if (newHops.length) await resolveHops(newHops);
       expandedHashes.add(hash);
       renderTableRows();
-      // Also open detail panel — no extra fetch needed
-      selectPacket(pkt.id, hash, data);
     } catch {}
   }
   async function pktSelectHash(hash) {
@@ -1771,7 +2639,10 @@
     init: function(app, routeParam) {
       _themeRefreshHandler = () => { if (typeof renderTableRows === 'function') renderTableRows(); };
       window.addEventListener('theme-refresh', _themeRefreshHandler);
-      return init(app, routeParam);
+      var result = init(app, routeParam);
+      // Install channel color picker on packets table (M2, #271)
+      if (window.ChannelColorPicker) window.ChannelColorPicker.installPacketsTable();
+      return result;
     },
     destroy: function() {
       if (_themeRefreshHandler) { window.removeEventListener('theme-refresh', _themeRefreshHandler); _themeRefreshHandler = null; }
@@ -1780,6 +2651,32 @@
   });
 
   // Standalone packet detail page: #/packet/123 or #/packet/HASH
+  // Expose pure functions for unit testing (vm.createContext pattern)
+  if (typeof window !== 'undefined') {
+    document.addEventListener('channel-colors-changed', function() { renderVisibleRows(); });
+    window._packetsTestAPI = {
+      typeName,
+      obsName,
+      getDetailPreview,
+      sortGroupChildren,
+      getPathHopCount,
+      renderDecodedPacket,
+      kv,
+      buildFieldTable,
+      sectionRow,
+      fieldRow,
+      renderTimestampCell,
+      renderPath,
+      _getRowCount,
+      _cumulativeRowOffsets,
+      _invalidateRowCounts,
+      _refreshRowCountsIfDirty,
+      buildGroupRowHtml,
+      buildFlatRowHtml,
+      _calcVisibleRange,
+    };
+  }
+
   registerPage('packet-detail', {
     init: async (app, routeParam) => {
       const param = routeParam;
@@ -1787,21 +2684,21 @@
       try {
         await loadObservers();
         const data = await api(`/packets/${param}`);
-        if (!data?.packet) { app.innerHTML = `<div style="max-width:800px;margin:0 auto;padding:40px;text-align:center"><h2>Packet not found</h2><p>Packet ${param} doesn't exist.</p><a href="#/packets">← Back to packets</a></div>`; return; }
+        if (!data?.packet) { app.innerHTML = `<div style="max-width:800px;margin:0 auto;padding:40px;text-align:center"><h2>Packet not found</h2><p>Packet ${param} doesn't exist.</p><a href="#/packets" class="btn-icon" style="display:inline-flex;align-items:center;gap:6px;text-decoration:none"><svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="15 18 9 12 15 6"/></svg> Back to packets</a></div>`; return; }
         const hops = [];
-        try { const ph = JSON.parse(data.packet.path_json || '[]'); hops.push(...ph); } catch {}
+        try { hops.push(...getParsedPath(data.packet)); } catch {}
         const newHops = hops.filter(h => !(h in hopNameCache));
         if (newHops.length) await resolveHops(newHops);
         const container = document.createElement('div');
         container.style.cssText = 'max-width:800px;margin:0 auto;padding:20px';
-        container.innerHTML = `<div style="margin-bottom:16px"><a href="#/packets" style="color:var(--accent);text-decoration:none">← Back to packets</a></div>`;
+        container.innerHTML = `<div style="margin-bottom:16px"><a href="#/packets" class="btn-icon" style="display:inline-flex;align-items:center;gap:6px;text-decoration:none"><svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="15 18 9 12 15 6"/></svg> Back to packets</a></div>`;
         const detail = document.createElement('div');
         container.appendChild(detail);
         await renderDetail(detail, data);
         app.innerHTML = '';
         app.appendChild(container);
       } catch (e) {
-        app.innerHTML = `<div style="max-width:800px;margin:0 auto;padding:40px;text-align:center"><h2>Error</h2><p>${e.message}</p><a href="#/packets">← Back to packets</a></div>`;
+        app.innerHTML = `<div style="max-width:800px;margin:0 auto;padding:40px;text-align:center"><h2>Error</h2><p>${e.message}</p><a href="#/packets" class="btn-icon" style="display:inline-flex;align-items:center;gap:6px;text-decoration:none"><svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="15 18 9 12 15 6"/></svg> Back to packets</a></div>`;
       }
     },
     destroy: () => {}

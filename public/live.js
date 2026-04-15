@@ -1,15 +1,31 @@
 (function() {
   'use strict';
 
+  // Patch canvas getContext so leaflet-heat's internal canvas is created with willReadFrequently,
+  // which prevents a browser performance warning when getImageData is called frequently.
+  (function() {
+    var _orig = HTMLCanvasElement.prototype.getContext;
+    HTMLCanvasElement.prototype.getContext = function(type, attrs) {
+      if (type === '2d') attrs = Object.assign({ willReadFrequently: true }, attrs || {});
+      return _orig.call(this, type, attrs);
+    };
+  })();
+
+  // getParsedPath / getParsedDecoded are in shared packet-helpers.js (loaded before this file)
+  var getParsedPath = window.getParsedPath;
+  var getParsedDecoded = window.getParsedDecoded;
+
   // Status color helpers (read from CSS variables for theme support)
   function cssVar(name) { return getComputedStyle(document.documentElement).getPropertyValue(name).trim(); }
   function statusGreen() { return cssVar('--status-green') || '#22c55e'; }
 
-  let map, ws, nodesLayer, pathsLayer, animLayer, heatLayer;
+  let map, ws, nodesLayer, pathsLayer, animLayer, heatLayer, geoFilterLayer;
   let nodeMarkers = {};
+  let obsOffsetMarkers = {}; // key → { obsMarker, linkLine, obsGlow } for dual-role nodes
   let nodeData = {};
   let packetCount = 0;
   let activeAnims = 0;
+  const MAX_CONCURRENT_ANIMS = 20;
   let nodeActivity = {};
   let recentPaths = [];
   let showGhostHops = localStorage.getItem('live-ghost-hops') !== 'false';
@@ -25,6 +41,7 @@
   let _lcdClockInterval = null;
   let _rateCounterInterval = null;
   let _pruneInterval = null;
+  let activeNodeDetailKey = null;
 
   // === VCR State Machine ===
   const VCR = {
@@ -37,6 +54,7 @@
     timelineScope: 3600000, // 1h default ms
     timelineTimestamps: [], // historical timestamps from DB for sparkline
     timelineFetchedScope: 0, // last fetched scope to avoid redundant fetches
+    replayGen: 0,            // generation counter — incremented on each replay/rewind to discard stale async results
   };
 
   // ROLE_COLORS loaded from shared roles.js (includes 'unknown')
@@ -50,6 +68,110 @@
     ADVERT: '📡', GRP_TXT: '💬', TXT_MSG: '✉️', ACK: '✓',
     REQUEST: '❓', RESPONSE: '📨', TRACE: '🔍', PATH: '🛤️'
   };
+
+  // Legend filter state — null means "show all" (default)
+  var legendFilterActive = false;
+  var activeTypeFilters = null; // null = all pass; Set = only listed types shown
+  var activeRoleFilters = null; // null = all pass; Set = only listed roles shown
+
+  /* ---- Panel Corner Positioning (#608 M0) ---- */
+  var PANEL_DEFAULTS = { liveFeed: 'bl', liveLegend: 'br', liveNodeDetail: 'tr' };
+  var CORNER_CYCLE = ['tl', 'tr', 'br', 'bl'];
+  var CORNER_ARROWS = { tl: '↘', tr: '↙', bl: '↗', br: '↖' };
+  var CORNER_LABELS = { tl: 'top-left', tr: 'top-right', bl: 'bottom-left', br: 'bottom-right' };
+  var PANEL_NAMES = { liveFeed: 'Feed', liveLegend: 'Legend', liveNodeDetail: 'Node detail' };
+
+  function getPanelPositions() {
+    var pos = {};
+    for (var id in PANEL_DEFAULTS) {
+      try { pos[id] = localStorage.getItem('panel-corner-' + id) || PANEL_DEFAULTS[id]; }
+      catch (_) { pos[id] = PANEL_DEFAULTS[id]; }
+    }
+    return pos;
+  }
+
+  function nextAvailableCorner(panelId, desired, allPositions) {
+    var idx = CORNER_CYCLE.indexOf(desired);
+    for (var i = 0; i < 4; i++) {
+      var candidate = CORNER_CYCLE[(idx + i) % 4];
+      var occupied = false;
+      for (var otherId in allPositions) {
+        if (otherId !== panelId && allPositions[otherId] === candidate) { occupied = true; break; }
+      }
+      if (!occupied) return candidate;
+    }
+    return desired; // all occupied (impossible with 3 panels, 4 corners)
+  }
+
+  function applyPanelPosition(id, corner) {
+    var el = document.getElementById(id);
+    if (!el) return;
+    el.setAttribute('data-position', corner);
+    var btn = el.querySelector('.panel-corner-btn');
+    if (btn) {
+      btn.textContent = CORNER_ARROWS[corner];
+      btn.setAttribute('aria-label',
+        'Move ' + (PANEL_NAMES[id] || 'panel') + ' to next corner (currently ' + CORNER_LABELS[corner] + ')');
+    }
+  }
+
+  function initPanelPositions() {
+    var positions = getPanelPositions();
+    for (var id in positions) {
+      applyPanelPosition(id, positions[id]);
+    }
+    // Wire up click handlers on corner buttons
+    var btns = document.querySelectorAll('.panel-corner-btn[data-panel]');
+    for (var i = 0; i < btns.length; i++) {
+      btns[i].addEventListener('click', function(e) {
+        e.stopPropagation();
+        var panelId = this.getAttribute('data-panel');
+        onCornerClick(panelId);
+      });
+    }
+  }
+
+  function onCornerClick(panelId) {
+    var positions = getPanelPositions();
+    var current = positions[panelId];
+    var nextIdx = (CORNER_CYCLE.indexOf(current) + 1) % 4;
+    var next = nextAvailableCorner(panelId, CORNER_CYCLE[nextIdx], positions);
+    try { localStorage.setItem('panel-corner-' + panelId, next); } catch (_) { /* quota */ }
+    applyPanelPosition(panelId, next);
+    // Announce for screen readers
+    var announce = document.getElementById('panelPositionAnnounce');
+    if (announce) announce.textContent = (PANEL_NAMES[panelId] || 'Panel') + ' moved to ' + CORNER_LABELS[next];
+  }
+
+  function resetPanelPositions() {
+    for (var id in PANEL_DEFAULTS) {
+      try { localStorage.removeItem('panel-corner-' + id); } catch (_) { /* ignore */ }
+      applyPanelPosition(id, PANEL_DEFAULTS[id]);
+    }
+  }
+
+  // Export for testing
+  if (typeof window !== 'undefined') {
+    window._panelCorner = {
+      PANEL_DEFAULTS: PANEL_DEFAULTS, CORNER_CYCLE: CORNER_CYCLE,
+      getPanelPositions: getPanelPositions, nextAvailableCorner: nextAvailableCorner,
+      applyPanelPosition: applyPanelPosition, onCornerClick: onCornerClick,
+      resetPanelPositions: resetPanelPositions
+    };
+  }
+
+  function formatLiveTimestampHtml(isoLike) {
+    if (typeof formatTimestampWithTooltip !== 'function' || typeof getTimestampMode !== 'function') {
+      return escapeHtml(typeof timeAgo === 'function' ? timeAgo(isoLike) : '—');
+    }
+    const d = isoLike ? new Date(isoLike) : null;
+    const iso = d && isFinite(d.getTime()) ? d.toISOString() : null;
+    const f = formatTimestampWithTooltip(iso, getTimestampMode());
+    const warn = f.isFuture
+      ? ' <span class="timestamp-future-icon" title="Timestamp is in the future — node clock may be skewed">⚠️</span>'
+      : '';
+    return `<span class="timestamp-text" title="${escapeHtml(f.tooltip)}">${escapeHtml(f.text)}</span>${warn}`;
+  }
 
   function initResizeHandler() {
     let resizeTimer = null;
@@ -97,6 +219,7 @@
 
   function vcrResumeLive() {
     stopReplay();
+    VCR.replayGen++; // invalidate any in-flight async chunk processing
     VCR.playhead = -1;
     VCR.speed = 1;
     VCR.missedCount = 0;
@@ -106,7 +229,7 @@
     vcrSetMode('LIVE');
     // Reload all nodes (no time filter)
     clearNodeMarkers();
-    loadNodes();
+    loadNodes().then(loadObservers);
     const prompt = document.getElementById('vcrPrompt');
     if (prompt) prompt.classList.add('hidden');
   }
@@ -123,6 +246,8 @@
   function vcrReplayFromTs(targetTs) {
     const fetchFrom = new Date(targetTs).toISOString();
     stopReplay();
+    VCR.replayGen++;
+    var gen = VCR.replayGen;
     vcrSetMode('REPLAY');
 
     // Reload map nodes to match the replay time
@@ -134,7 +259,10 @@
       .then(r => r.json())
       .then(data => {
         const pkts = data.packets || [];
-        const replayEntries = expandToBufferEntries(pkts);
+        return expandToBufferEntriesAsync(pkts);
+      })
+      .then(function(replayEntries) {
+        if (gen !== VCR.replayGen) return; // stale async result — user changed mode
         if (replayEntries.length === 0) {
           vcrSetMode('PAUSED');
           return;
@@ -183,6 +311,8 @@
 
   function vcrRewind(ms) {
     stopReplay();
+    VCR.replayGen++;
+    var gen = VCR.replayGen;
     // Fetch packets from DB for the time window
     const now = Date.now();
     const from = new Date(now - ms).toISOString();
@@ -193,8 +323,11 @@
         // Prepend to buffer (avoid duplicates by ID)
         const existingIds = new Set(VCR.buffer.map(b => b.pkt.id).filter(Boolean));
         const filtered = pkts.filter(p => !existingIds.has(p.id));
-        const newEntries = expandToBufferEntries(filtered);
-        VCR.buffer = [...newEntries, ...VCR.buffer];
+        return expandToBufferEntriesAsync(filtered);
+      })
+      .then(function(newEntries) {
+        if (gen !== VCR.replayGen) return; // stale async result
+        VCR.buffer = [].concat(newEntries, VCR.buffer);
         VCR.playhead = 0;
         VCR.speed = 1;
         vcrSetMode('REPLAY');
@@ -255,15 +388,18 @@
     // Get timestamp of last packet in buffer to fetch the next page
     const last = VCR.buffer[VCR.buffer.length - 1];
     if (!last) return Promise.resolve(false);
+    var gen = VCR.replayGen;
     const since = new Date(last.ts + 1).toISOString(); // +1ms to avoid dupe
     return fetch(`/api/packets?limit=10000&grouped=false&expand=observations&since=${encodeURIComponent(since)}&order=asc`)
       .then(r => r.json())
       .then(data => {
         const pkts = data.packets || [];
         if (pkts.length === 0) return false;
-        const newEntries = expandToBufferEntries(pkts);
-        VCR.buffer = VCR.buffer.concat(newEntries);
-        return true;
+        return expandToBufferEntriesAsync(pkts).then(function(newEntries) {
+          if (gen !== VCR.replayGen) return false; // stale
+          VCR.buffer = VCR.buffer.concat(newEntries);
+          return true;
+        });
       })
       .catch(() => false);
   }
@@ -354,12 +490,17 @@
     }
   }
 
-  function updateVCRClock(tsMs) {
+  function vcrFormatTime(tsMs) {
     const d = new Date(tsMs);
-    const hh = String(d.getHours()).padStart(2, '0');
-    const mm = String(d.getMinutes()).padStart(2, '0');
-    const ss = String(d.getSeconds()).padStart(2, '0');
-    drawLcdText(`${hh}:${mm}:${ss}`, statusGreen());
+    const utc = typeof getTimestampTimezone === 'function' && getTimestampTimezone() === 'utc';
+    const hh = String(utc ? d.getUTCHours() : d.getHours()).padStart(2, '0');
+    const mm = String(utc ? d.getUTCMinutes() : d.getMinutes()).padStart(2, '0');
+    const ss = String(utc ? d.getUTCSeconds() : d.getSeconds()).padStart(2, '0');
+    return `${hh}:${mm}:${ss}`;
+  }
+
+  function updateVCRClock(tsMs) {
+    drawLcdText(vcrFormatTime(tsMs), statusGreen());
   }
 
   function updateVCRLcd() {
@@ -411,13 +552,14 @@
   }
 
   function dbPacketToLive(pkt) {
-    const raw = JSON.parse(pkt.decoded_json || '{}');
-    const hops = JSON.parse(pkt.path_json || '[]');
+    const raw = getParsedDecoded(pkt);
+    const hops = getParsedPath(pkt);
     const typeName = raw.type || pkt.payload_type_name || 'UNKNOWN';
     return {
       id: pkt.id, hash: pkt.hash,
       raw: pkt.raw_hex,
       path_json: pkt.path_json,
+      resolved_path: pkt.resolved_path,
       _ts: new Date(pkt.timestamp || pkt.created_at).getTime(),
       decoded: { header: { payloadTypeName: typeName }, payload: raw, path: { hops } },
       snr: pkt.snr, rssi: pkt.rssi, observer: pkt.observer_name
@@ -425,11 +567,53 @@
   }
 
   // Expand a DB packet (with optional observations[]) into VCR buffer entries
+  /**
+   * Process packets into buffer entries in chunks to avoid blocking the main thread.
+   * Returns a Promise that resolves with the entries array.
+   * Each chunk processes CHUNK_SIZE packets, then yields to the event loop via setTimeout(0).
+   */
+  var VCR_CHUNK_SIZE = 200;
+  function expandToBufferEntriesAsync(pkts) {
+    return new Promise(function(resolve) {
+      var entries = [];
+      var i = 0;
+      function processChunk() {
+        var end = Math.min(i + VCR_CHUNK_SIZE, pkts.length);
+        for (; i < end; i++) {
+          var p = pkts[i];
+          if (p.observations && p.observations.length > 0) {
+            for (var j = 0; j < p.observations.length; j++) {
+              var obs = p.observations[j];
+              entries.push({
+                ts: new Date(obs.timestamp || p.timestamp || p.created_at).getTime(),
+                pkt: dbPacketToLive(Object.assign({}, p, obs, { hash: p.hash, raw_hex: p.raw_hex, decoded_json: p.decoded_json }))
+              });
+            }
+          } else {
+            entries.push({
+              ts: new Date(p.timestamp || p.created_at).getTime(),
+              pkt: dbPacketToLive(p)
+            });
+          }
+        }
+        if (i < pkts.length) {
+          setTimeout(processChunk, 0);
+        } else {
+          resolve(entries);
+        }
+      }
+      processChunk();
+    });
+  }
+
+  // Synchronous version kept for small datasets and backward compat (tests)
   function expandToBufferEntries(pkts) {
-    const entries = [];
-    for (const p of pkts) {
+    var entries = [];
+    for (var k = 0; k < pkts.length; k++) {
+      var p = pkts[k];
       if (p.observations && p.observations.length > 0) {
-        for (const obs of p.observations) {
+        for (var j = 0; j < p.observations.length; j++) {
+          var obs = p.observations[j];
           entries.push({
             ts: new Date(obs.timestamp || p.timestamp || p.created_at).getTime(),
             pkt: dbPacketToLive(Object.assign({}, p, obs, { hash: p.hash, raw_hex: p.raw_hex, decoded_json: p.decoded_json }))
@@ -458,11 +642,18 @@
         clearTimeout(entry.timer);
       }
       propagationBuffer.clear();
+      // Batch-update timeline once on restore instead of per-packet while hidden
+      updateTimeline();
     }
   });
 
+  function packetTimestamp(pkt) {
+    return new Date(pkt.timestamp || pkt.created_at || Date.now()).getTime();
+  }
+  if (typeof window !== 'undefined') window._live_packetTimestamp = packetTimestamp;
+
   function bufferPacket(pkt) {
-    pkt._ts = Date.now();
+    pkt._ts = packetTimestamp(pkt);
     const entry = { ts: pkt._ts, pkt };
     VCR.buffer.push(entry);
     // Keep buffer capped at ~2000 — adjust playhead to avoid stale indices (#63)
@@ -477,7 +668,6 @@
     if (VCR.mode === 'LIVE') {
       // Skip animations when tab is backgrounded — just buffer for VCR timeline
       if (_tabHidden) {
-        updateTimeline();
         return;
       }
       if (realisticPropagation && pkt.hash) {
@@ -634,8 +824,7 @@
         <div id="liveMap" style="width:100%;height:100%;position:absolute;top:0;left:0;z-index:1"></div>
         <div class="live-overlay live-header" id="liveHeader">
           <div class="live-title">
-            <span class="live-beacon"></span>
-            MESH LIVE
+            LIVE STATS
           </div>
           <div class="live-stats-row">
             <div class="live-stat-pill"><span id="livePktCount">0</span> pkts</div>
@@ -658,6 +847,12 @@
             <span id="audioDesc" class="sr-only">Sonify packets — turn raw bytes into generative music</span>
             <label><input type="checkbox" id="liveFavoritesToggle" aria-describedby="favDesc"> ⭐ Favorites</label>
             <span id="favDesc" class="sr-only">Show only favorited and claimed nodes</span>
+            <label id="liveGeoFilterLabel" style="display:none"><input type="checkbox" id="liveGeoFilterToggle"> Mesh live area</label>
+          </div>
+          <div class="live-toggles-mobile">
+            <button class="live-options-btn" id="liveOptionsBtn" aria-label="Map options" aria-haspopup="dialog" aria-expanded="false">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="4" y1="6" x2="20" y2="6"/><line x1="8" y1="12" x2="16" y2="12"/><line x1="6" y1="18" x2="18" y2="18"/></svg>
+            </button>
           </div>
           <div class="audio-controls hidden" id="audioControls">
             <label class="audio-slider-label">Voice <select id="audioVoiceSelect" class="audio-voice-select"></select></label>
@@ -666,28 +861,44 @@
           </div>
         </div>
         <div class="live-overlay live-feed" id="liveFeed">
-          <button class="feed-hide-btn" id="feedHideBtn" title="Hide feed">✕</button>
+          <div class="panel-header">
+            <span class="panel-feed-title">Recent Packets</span>
+            <button class="feed-hide-btn" id="feedHideBtn" title="Hide feed">✕</button>
+          </div>
+          <div class="panel-content" aria-live="polite" aria-relevant="additions" role="log"></div>
         </div>
         <button class="feed-show-btn hidden" id="feedShowBtn" title="Show feed">📋</button>
+        <div class="node-detail-backdrop hidden" id="nodeDetailBackdrop"></div>
         <div class="live-overlay live-node-detail hidden" id="liveNodeDetail">
-          <button class="feed-hide-btn" id="nodeDetailClose" title="Close">✕</button>
-          <div id="nodeDetailContent"></div>
+          <div class="panel-header">
+            <button class="panel-corner-btn" data-panel="liveNodeDetail" title="Move panel to next corner" aria-label="Move panel to next corner">◫</button>
+            <button class="feed-hide-btn" id="nodeDetailClose" title="Close">✕</button>
+          </div>
+          <div class="panel-content" id="nodeDetailContent"></div>
         </div>
-        <button class="legend-toggle-btn hidden" id="legendToggleBtn" aria-label="Show legend" title="Show legend">🎨</button>
+        <button class="legend-toggle-btn" id="legendToggleBtn" aria-label="Show legend" title="Show legend">🎨</button>
         <div class="live-overlay live-legend" id="liveLegend" role="region" aria-label="Map legend">
-          <h3 class="legend-title">PACKET TYPES</h3>
-          <ul class="legend-list">
-            <li><span class="live-dot" style="background:${TYPE_COLORS.ADVERT}" aria-hidden="true"></span> Advert — Node advertisement</li>
-            <li><span class="live-dot" style="background:${TYPE_COLORS.GRP_TXT}" aria-hidden="true"></span> Message — Group text</li>
-            <li><span class="live-dot" style="background:${TYPE_COLORS.TXT_MSG}" aria-hidden="true"></span> Direct — Direct message</li>
-            <li><span class="live-dot" style="background:${TYPE_COLORS.REQUEST}" aria-hidden="true"></span> Request — Data request</li>
-            <li><span class="live-dot" style="background:${TYPE_COLORS.TRACE}" aria-hidden="true"></span> Trace — Route trace</li>
+          <div class="panel-header">
+            <span class="panel-feed-title">Packet Types</span>
+          </div>
+          <div class="panel-content">
+          <button class="legend-filter-btn" id="legendFilterBtn" title="Filter by type / role" aria-pressed="false">⊘ Filter</button>
+          <ul class="legend-list" id="typeLegendList">
+            <li data-type="ADVERT"><span class="live-dot" style="background:${TYPE_COLORS.ADVERT}" aria-hidden="true"></span> Advert</li>
+            <li data-type="GRP_TXT"><span class="live-dot" style="background:${TYPE_COLORS.GRP_TXT}" aria-hidden="true"></span> Message</li>
+            <li data-type="TXT_MSG"><span class="live-dot" style="background:${TYPE_COLORS.TXT_MSG}" aria-hidden="true"></span> Direct</li>
+            <li data-type="REQUEST"><span class="live-dot" style="background:${TYPE_COLORS.REQUEST}" aria-hidden="true"></span> Request</li>
+            <li data-type="RESPONSE"><span class="live-dot" style="background:${TYPE_COLORS.RESPONSE}" aria-hidden="true"></span> Response</li>
+            <li data-type="TRACE"><span class="live-dot" style="background:${TYPE_COLORS.TRACE}" aria-hidden="true"></span> Trace</li>
+            <li data-type="PATH"><span class="live-dot" style="background:${TYPE_COLORS.PATH}" aria-hidden="true"></span> Path</li>
           </ul>
           <h3 class="legend-title" style="margin-top:8px">NODE ROLES</h3>
           <ul class="legend-list" id="roleLegendList"></ul>
+          </div>
         </div>
 
         <!-- VCR Bar -->
+        <div class="sr-only" id="panelPositionAnnounce" aria-live="polite"></div>
         <div class="vcr-bar" id="vcrBar">
           <div class="vcr-controls">
             <button id="vcrRewindBtn" class="vcr-btn" title="Rewind" aria-label="Rewind">⏪</button>
@@ -713,6 +924,21 @@
             <div class="vcr-lcd-row vcr-lcd-pkts" id="vcrLcdPkts"></div>
           </div>
           <div id="vcrPrompt" class="vcr-prompt hidden"></div>
+        </div>
+        <!-- Map options modal (mobile) -->
+        <div class="live-options-backdrop" id="liveOptionsBackdrop"></div>
+        <div class="live-options-modal" id="liveOptionsMenu" role="dialog" aria-label="Map options" aria-modal="true">
+          <div class="live-options-modal-handle"></div>
+          <div class="live-options-modal-title">Map Options</div>
+          <div class="live-options-modal-body">
+            <label><input type="checkbox" id="liveHeatToggleMobile" checked> <span>Heat map</span></label>
+            <label><input type="checkbox" id="liveGhostToggleMobile" checked> <span>Ghost nodes</span></label>
+            <label><input type="checkbox" id="liveRealisticToggleMobile"> <span>Realistic view</span></label>
+            <label><input type="checkbox" id="liveMatrixToggleMobile"> <span>Matrix mode</span></label>
+            <label><input type="checkbox" id="liveMatrixRainToggleMobile"> <span>Matrix rain</span></label>
+            <label><input type="checkbox" id="liveAudioToggleMobile"> <span>🎵 Audio</span></label>
+            <label><input type="checkbox" id="liveFavoritesToggleMobile"> <span>⭐ Favorites only</span></label>
+          </div>
         </div>
       </div>`;
 
@@ -749,6 +975,7 @@
 
     injectSVGFilters();
     await loadNodes();
+    loadObservers();
     showHeatMap();
     connectWS();
     initResizeHandler();
@@ -800,6 +1027,50 @@
       localStorage.setItem('live-favorites-only', showOnlyFavorites);
       applyFavoritesFilter();
     });
+
+    // Geo filter overlay
+    (async function () {
+      try {
+        const gf = await api('/config/geo-filter', { ttl: 3600 });
+        if (!gf || !gf.polygon || gf.polygon.length < 3) return;
+        const geoColor = cssVar('--geo-filter-color') || '#3b82f6';
+        const latlngs = gf.polygon.map(function (p) { return [p[0], p[1]]; });
+        const innerPoly = L.polygon(latlngs, {
+          color: geoColor, weight: 2, opacity: 0.8,
+          fillColor: geoColor, fillOpacity: 0.08
+        });
+        const bufferPoly = gf.bufferKm > 0 ? (function () {
+          let cLat = 0, cLon = 0;
+          gf.polygon.forEach(function (p) { cLat += p[0]; cLon += p[1]; });
+          cLat /= gf.polygon.length; cLon /= gf.polygon.length;
+          const cosLat = Math.cos(cLat * Math.PI / 180);
+          const outer = gf.polygon.map(function (p) {
+            const dLatM = (p[0] - cLat) * 111000;
+            const dLonM = (p[1] - cLon) * 111000 * cosLat;
+            const dist = Math.sqrt(dLatM * dLatM + dLonM * dLonM);
+            if (dist === 0) return [p[0], p[1]];
+            const scale = (gf.bufferKm * 1000) / dist;
+            return [p[0] + dLatM * scale / 111000, p[1] + dLonM * scale / (111000 * cosLat)];
+          });
+          return L.polygon(outer, {
+            color: geoColor, weight: 1.5, opacity: 0.4, dashArray: '6 4',
+            fillColor: geoColor, fillOpacity: 0.04
+          });
+        })() : null;
+        geoFilterLayer = L.layerGroup(bufferPoly ? [bufferPoly, innerPoly] : [innerPoly]);
+        const label = document.getElementById('liveGeoFilterLabel');
+        if (label) label.style.display = '';
+        const el = document.getElementById('liveGeoFilterToggle');
+        if (el) {
+          const saved = localStorage.getItem('meshcore-map-geo-filter');
+          if (saved === 'true') { el.checked = true; geoFilterLayer.addTo(map); }
+          el.addEventListener('change', function (e) {
+            localStorage.setItem('meshcore-map-geo-filter', e.target.checked);
+            if (e.target.checked) { geoFilterLayer.addTo(map); } else { map.removeLayer(geoFilterLayer); }
+          });
+        }
+      } catch (e) { /* no geo filter configured */ }
+    })();
 
     const matrixToggle = document.getElementById('liveMatrixToggle');
     matrixToggle.checked = matrixMode;
@@ -882,6 +1153,73 @@
       if (window.MeshAudio) MeshAudio.setVolume(v / 100);
     });
 
+    // Mobile options hamburger menu — sync with desktop toggles
+    (function () {
+      const btn = document.getElementById('liveOptionsBtn');
+      const menu = document.getElementById('liveOptionsMenu');
+      if (!btn || !menu) return;
+
+      // Map: mobileId -> desktopId
+      const pairs = [
+        ['liveHeatToggleMobile',       'liveHeatToggle'],
+        ['liveGhostToggleMobile',      'liveGhostToggle'],
+        ['liveRealisticToggleMobile',  'liveRealisticToggle'],
+        ['liveMatrixToggleMobile',     'liveMatrixToggle'],
+        ['liveMatrixRainToggleMobile', 'liveMatrixRainToggle'],
+        ['liveAudioToggleMobile',      'liveAudioToggle'],
+        ['liveFavoritesToggleMobile',  'liveFavoritesToggle'],
+      ];
+
+      // Sync initial state from desktop toggles
+      pairs.forEach(([mId, dId]) => {
+        const m = document.getElementById(mId);
+        const d = document.getElementById(dId);
+        if (m && d) m.checked = d.checked;
+      });
+
+      // When mobile toggle changes, fire the desktop toggle's change event
+      pairs.forEach(([mId, dId]) => {
+        const m = document.getElementById(mId);
+        const d = document.getElementById(dId);
+        if (!m || !d) return;
+        m.addEventListener('change', () => {
+          d.checked = m.checked;
+          d.dispatchEvent(new Event('change', { bubbles: true }));
+        });
+      });
+
+      // Keep mobile in sync if desktop toggles change (e.g. matrix disables heat)
+      pairs.forEach(([mId, dId]) => {
+        const m = document.getElementById(mId);
+        const d = document.getElementById(dId);
+        if (!m || !d) return;
+        const obs = new MutationObserver(() => { m.checked = d.checked; m.disabled = d.disabled; });
+        obs.observe(d, { attributes: true, attributeFilter: ['checked', 'disabled'] });
+        // Also listen to programmatic property changes via change events
+        d.addEventListener('change', () => { m.checked = d.checked; });
+      });
+
+      const backdrop = document.getElementById('liveOptionsBackdrop');
+
+      function openMenu() {
+        menu.classList.add('open');
+        if (backdrop) backdrop.classList.add('open');
+        btn.setAttribute('aria-expanded', 'true');
+      }
+      function closeMenu() {
+        menu.classList.remove('open');
+        if (backdrop) backdrop.classList.remove('open');
+        btn.setAttribute('aria-expanded', 'false');
+      }
+
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        menu.classList.contains('open') ? closeMenu() : openMenu();
+      });
+
+      if (backdrop) backdrop.addEventListener('click', closeMenu);
+    })();
+
     // Feed show/hide
     const feedEl = document.getElementById('liveFeed');
     // Keyboard support for feed items (event delegation)
@@ -910,50 +1248,116 @@
     const legendEl = document.getElementById('liveLegend');
     const legendToggleBtn = document.getElementById('legendToggleBtn');
     if (legendToggleBtn && legendEl) {
+      // Restore legend collapsed state from localStorage (#279)
+      try {
+        if (localStorage.getItem('live-legend-hidden') === 'true') {
+          legendEl.classList.add('hidden');
+          legendToggleBtn.setAttribute('aria-label', 'Show legend');
+          legendToggleBtn.textContent = '🎨';
+        }
+      } catch (_) { /* private browsing / storage disabled */ }
       legendToggleBtn.addEventListener('click', () => {
-        const isVisible = legendEl.classList.toggle('legend-mobile-visible');
-        legendToggleBtn.setAttribute('aria-label', isVisible ? 'Hide legend' : 'Show legend');
-        legendToggleBtn.textContent = isVisible ? '✕' : '🎨';
+        const nowHidden = legendEl.classList.toggle('hidden');
+        legendToggleBtn.setAttribute('aria-label', nowHidden ? 'Show legend' : 'Hide legend');
+        legendToggleBtn.textContent = nowHidden ? '🎨' : '✕';
+        try { localStorage.setItem('live-legend-hidden', String(nowHidden)); } catch (_) { /* ignore */ }
       });
     }
 
     // Populate role legend from shared roles.js
+    // Initialize panel corner positions (#608 M0)
+    initPanelPositions();
     const roleLegendList = document.getElementById('roleLegendList');
+    const LEGEND_ROLES = window.ROLE_SORT || ['repeater', 'companion', 'room', 'sensor', 'observer'];
     if (roleLegendList) {
-      for (const role of (window.ROLE_SORT || ['repeater', 'companion', 'room', 'sensor', 'observer'])) {
+      for (const role of LEGEND_ROLES) {
         const li = document.createElement('li');
+        li.dataset.role = role;
         li.innerHTML = `<span class="live-dot" style="background:${ROLE_COLORS[role] || '#6b7280'}" aria-hidden="true"></span> ${(ROLE_LABELS[role] || role).replace(/s$/, '')}`;
         roleLegendList.appendChild(li);
       }
     }
 
+    // ---- Legend filter system ----
+    const legendPanel = document.getElementById('liveLegend');
+    const legendFilterBtn = document.getElementById('legendFilterBtn');
+
+    function applyRoleFilter() {
+      for (const key in nodeMarkers) {
+        const n = nodeData[key];
+        const role = n ? (n.role || 'unknown') : 'unknown';
+        const visible = !activeRoleFilters || activeRoleFilters.has(role);
+        const marker = nodeMarkers[key];
+        if (visible) {
+          if (!nodesLayer.hasLayer(marker)) marker.addTo(nodesLayer);
+          if (marker._glowMarker && !nodesLayer.hasLayer(marker._glowMarker)) marker._glowMarker.addTo(nodesLayer);
+        } else {
+          if (nodesLayer.hasLayer(marker)) nodesLayer.removeLayer(marker);
+          if (marker._glowMarker && nodesLayer.hasLayer(marker._glowMarker)) nodesLayer.removeLayer(marker._glowMarker);
+        }
+      }
+    }
+
+    function applyLegendFilter() {
+      const allTypeKeys = Object.keys(TYPE_COLORS);
+      const activeTypes = new Set();
+      legendPanel.querySelectorAll('#typeLegendList [data-type]').forEach(li => {
+        if (!li.classList.contains('legend-inactive')) activeTypes.add(li.dataset.type);
+      });
+      activeTypeFilters = activeTypes.size === allTypeKeys.length ? null : activeTypes;
+
+      const activeRoles = new Set();
+      legendPanel.querySelectorAll('#roleLegendList [data-role]').forEach(li => {
+        if (!li.classList.contains('legend-inactive')) activeRoles.add(li.dataset.role);
+      });
+      activeRoleFilters = activeRoles.size === LEGEND_ROLES.length ? null : activeRoles;
+
+      applyRoleFilter();
+    }
+
+    if (legendFilterBtn) {
+      legendFilterBtn.addEventListener('click', () => {
+        legendFilterActive = !legendFilterActive;
+        legendPanel.classList.toggle('legend-filter-active', legendFilterActive);
+        legendFilterBtn.classList.toggle('active', legendFilterActive);
+        legendFilterBtn.setAttribute('aria-pressed', String(legendFilterActive));
+        legendFilterBtn.title = legendFilterActive ? 'Exit filter mode (show all)' : 'Filter by type / role';
+        if (!legendFilterActive) {
+          // Revert: clear all inactive classes and reset filters
+          legendPanel.querySelectorAll('.legend-inactive').forEach(li => li.classList.remove('legend-inactive'));
+          activeTypeFilters = null;
+          activeRoleFilters = null;
+          applyRoleFilter();
+        }
+      });
+    }
+
+    // Click items to toggle when filter mode is active
+    legendPanel.addEventListener('click', e => {
+      if (!legendFilterActive) return;
+      const li = e.target.closest('[data-type],[data-role]');
+      if (!li) return;
+      li.classList.toggle('legend-inactive');
+      applyLegendFilter();
+    });
+
     // Node detail panel
     const nodeDetailPanel = document.getElementById('liveNodeDetail');
     const nodeDetailContent = document.getElementById('nodeDetailContent');
-    document.getElementById('nodeDetailClose').addEventListener('click', () => {
-      nodeDetailPanel.classList.add('hidden');
-    });
+    const nodeDetailBackdrop = document.getElementById('nodeDetailBackdrop');
 
-    // Feed panel resize handle (#27)
-    const savedFeedWidth = localStorage.getItem('live-feed-width');
-    if (savedFeedWidth) feedEl.style.width = savedFeedWidth + 'px';
-    const resizeHandle = document.createElement('div');
-    resizeHandle.className = 'feed-resize-handle';
-    resizeHandle.setAttribute('aria-label', 'Resize feed panel');
-    feedEl.appendChild(resizeHandle);
-    let feedResizing = false;
-    resizeHandle.addEventListener('mousedown', (e) => {
-      feedResizing = true; e.preventDefault();
-    });
-    document.addEventListener('mousemove', (e) => {
-      if (!feedResizing) return;
-      const newWidth = Math.max(200, Math.min(800, e.clientX - feedEl.getBoundingClientRect().left));
-      feedEl.style.width = newWidth + 'px';
-    });
-    document.addEventListener('mouseup', () => {
-      if (!feedResizing) return;
-      feedResizing = false;
-      localStorage.setItem('live-feed-width', parseInt(feedEl.style.width));
+    function closeNodeDetail() {
+      activeNodeDetailKey = null;
+      nodeDetailPanel.classList.add('hidden');
+      if (nodeDetailBackdrop) nodeDetailBackdrop.classList.add('hidden');
+    }
+
+    document.getElementById('nodeDetailClose').addEventListener('click', closeNodeDetail);
+    if (nodeDetailBackdrop) nodeDetailBackdrop.addEventListener('click', closeNodeDetail);
+
+    // Close node detail when tapping the map background on mobile/tablet
+    map.on('click', () => {
+      if (activeNodeDetailKey && window.innerWidth < 1024) closeNodeDetail();
     });
 
     // Save/restore map view
@@ -1000,8 +1404,7 @@
       const rect = timelineEl.getBoundingClientRect();
       const pct = (e.clientX - rect.left) / rect.width;
       const ts = Date.now() - VCR.timelineScope + pct * VCR.timelineScope;
-      const d = new Date(ts);
-      timeTooltip.textContent = d.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit',second:'2-digit'});
+      timeTooltip.textContent = vcrFormatTime(ts);
       timeTooltip.style.left = (e.clientX - rect.left) + 'px';
       timeTooltip.classList.remove('hidden');
     });
@@ -1014,8 +1417,7 @@
       const rect = timelineEl.getBoundingClientRect();
       const pct = Math.max(0, Math.min(1, (touch.clientX - rect.left) / rect.width));
       const ts = Date.now() - VCR.timelineScope + pct * VCR.timelineScope;
-      const d = new Date(ts);
-      timeTooltip.textContent = d.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit',second:'2-digit'});
+      timeTooltip.textContent = vcrFormatTime(ts);
       timeTooltip.style.left = (touch.clientX - rect.left) + 'px';
       timeTooltip.classList.remove('hidden');
     });
@@ -1092,47 +1494,10 @@
     // Prune stale nodes every 60 seconds
     _pruneInterval = setInterval(pruneStaleNodes, 60000);
 
-    // Auto-hide nav with pin toggle (#62)
+    // Nav always visible on live page
     const topNav = document.querySelector('.top-nav');
     if (topNav) { topNav.style.position = 'fixed'; topNav.style.width = '100%'; topNav.style.zIndex = '1100'; }
-    _navCleanup = { timeout: null, fn: null, pinned: false };
-    // Add pin button to nav (guard against duplicate)
-    if (topNav && !document.getElementById('navPinBtn')) {
-      const pinBtn = document.createElement('button');
-      pinBtn.id = 'navPinBtn';
-      pinBtn.className = 'nav-pin-btn';
-      pinBtn.setAttribute('aria-label', 'Pin navigation open');
-      pinBtn.setAttribute('title', 'Pin navigation open');
-      pinBtn.textContent = '📌';
-      pinBtn.addEventListener('click', (e) => {
-        e.stopPropagation();
-        _navCleanup.pinned = !_navCleanup.pinned;
-        pinBtn.classList.toggle('pinned', _navCleanup.pinned);
-        pinBtn.setAttribute('aria-pressed', _navCleanup.pinned);
-        if (_navCleanup.pinned) {
-          clearTimeout(_navCleanup.timeout);
-          topNav.classList.remove('nav-autohide');
-        } else {
-          _navCleanup.timeout = setTimeout(() => { topNav.classList.add('nav-autohide'); }, 4000);
-        }
-      });
-      topNav.appendChild(pinBtn);
-    }
-    function showNav() {
-      if (topNav) topNav.classList.remove('nav-autohide');
-      clearTimeout(_navCleanup.timeout);
-      if (!_navCleanup.pinned) {
-        _navCleanup.timeout = setTimeout(() => { if (topNav) topNav.classList.add('nav-autohide'); }, 4000);
-      }
-    }
-    _navCleanup.fn = showNav;
-    const livePage = document.querySelector('.live-page');
-    if (livePage) {
-      livePage.addEventListener('mousemove', showNav);
-      livePage.addEventListener('touchstart', showNav);
-      livePage.addEventListener('click', showNav);
-    }
-    showNav();
+    _navCleanup = { timeout: null, fn: null };
   }
 
   function injectSVGFilters() {
@@ -1154,25 +1519,29 @@
     }, 2000);
   }
 
-  async function showNodeDetail(pubkey) {
+  async function showNodeDetail(pubkey, asObserver) {
+    activeNodeDetailKey = pubkey;
     const panel = document.getElementById('liveNodeDetail');
     const content = document.getElementById('nodeDetailContent');
+    const backdrop = document.getElementById('nodeDetailBackdrop');
     panel.classList.remove('hidden');
+    if (backdrop && window.innerWidth < 1024) backdrop.classList.remove('hidden');
     content.innerHTML = '<div style="padding:20px;color:var(--text-muted)">Loading…</div>';
     try {
       const [data, healthData] = await Promise.all([
-        api('/nodes/' + encodeURIComponent(pubkey), { ttl: 30 }),
-        api('/nodes/' + encodeURIComponent(pubkey) + '/health', { ttl: 30 }).catch(() => null)
+        api('/nodes/' + encodeURIComponent(pubkey), { ttl: 60000 }),
+        api('/nodes/' + encodeURIComponent(pubkey) + '/health', { ttl: 60000 }).catch(() => null)
       ]);
       const n = data.node;
       const h = healthData || {};
       const stats = h.stats || {};
       const observers = h.observers || [];
       const recent = h.recentPackets || [];
-      const roleColor = ROLE_COLORS[n.role] || '#6b7280';
-      const roleLabel = (ROLE_LABELS[n.role] || n.role || 'unknown').replace(/s$/, '');
+      const displayRole = asObserver ? 'observer' : n.role;
+      const roleColor = ROLE_COLORS[displayRole] || '#6b7280';
+      const roleLabel = (ROLE_LABELS[displayRole] || displayRole || 'unknown').replace(/s$/, '');
       const hasLoc = n.lat != null && n.lon != null;
-      const lastSeen = n.last_seen ? timeAgo(n.last_seen) : '—';
+      const lastSeen = formatLiveTimestampHtml(n.last_seen);
       const thresholds = window.getHealthThresholds ? getHealthThresholds(n.role) : { degradedMs: 3600000, silentMs: 86400000 };
       const ageMs = n.last_seen ? Date.now() - new Date(n.last_seen).getTime() : Infinity;
       const statusDot = ageMs < thresholds.degradedMs ? 'health-green' : ageMs < thresholds.silentMs ? 'health-yellow' : 'health-red';
@@ -1181,7 +1550,7 @@
       let html = `
         <div style="padding:16px;">
           <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px;">
-            <span class="${statusDot}" style="font-size:18px">●</span>
+            <span class="${statusDot}" style="font-size:18px" aria-hidden="true">●</span>
             <h3 style="margin:0;font-size:16px;font-weight:700;">${escapeHtml(n.name || 'Unknown')}</h3>
           </div>
           <div style="margin-bottom:12px;">
@@ -1212,8 +1581,8 @@
         html += `<h4 style="font-size:12px;margin:12px 0 6px;color:var(--text-muted);">Recent Packets</h4>
           <div style="font-size:11px;max-height:200px;overflow-y:auto;">` +
           recent.slice(0, 10).map(p => `<div style="padding:2px 0;display:flex;justify-content:space-between;">
-            <a href="#/packets/${encodeURIComponent(p.hash || '')}" style="color:var(--accent);text-decoration:none;">${escapeHtml(p.payload_type || '?')}${p.observation_count > 1 ? ' <span class="badge badge-obs" style="font-size:9px">👁 ' + p.observation_count + '</span>' : ''}</a>
-            <span style="color:var(--text-muted)">${p.timestamp ? timeAgo(p.timestamp) : '—'}</span>
+            <a href="#/packets/${encodeURIComponent(p.hash || '')}" style="color:var(--accent);text-decoration:none;">${escapeHtml(p.payload_type || '?')}${transportBadge(p.route_type)}${p.observation_count > 1 ? ' <span class="badge badge-obs" style="font-size:9px">👁 ' + p.observation_count + '</span>' : ''}</a>
+            <span style="color:var(--text-muted)">${formatLiveTimestampHtml(p.timestamp)}</span>
           </div>`).join('') +
           '</div>';
       }
@@ -1285,13 +1654,144 @@
       const _el2 = document.getElementById('liveNodeCount'); if (_el2) _el2.textContent = Object.keys(nodeMarkers).length;
       // Initialize shared HopResolver with loaded nodes
       if (window.HopResolver) HopResolver.init(list);
+      // Fetch affinity data for hop disambiguation
+      fetchAffinityData();
+      startAffinityRefresh();
     } catch (e) { console.error('Failed to load nodes:', e); }
+  }
+
+  // Convert a pixel offset [dx, dy] from a latLng into a new latLng at the current zoom.
+  // This keeps the visual gap constant on screen regardless of map position.
+  function _getOffsetLatLng(latLng, dx, dy) {
+    if (!map) return latLng;
+    const pt = map.latLngToContainerPoint(latLng);
+    return map.containerPointToLatLng(L.point(pt.x + dx, pt.y + dy));
+  }
+
+  async function loadObservers() {
+    try {
+      const resp = await fetch('/api/observers');
+      const data = await resp.json();
+      const list = Array.isArray(data) ? data : (data.observers || []);
+      const obsColor = ROLE_COLORS.observer || '#8b5cf6';
+      list.forEach(obs => {
+        if (!obs.lat || !obs.lon) return;
+        const key = (obs.public_key || obs.id || obs.observer_id || '').toLowerCase();
+        if (!key) return;
+
+        if (nodeMarkers[key]) {
+          // Node already on map as another role (e.g. repeater) — create an offset observer dot
+          if (obsOffsetMarkers[key]) return; // already set up
+
+          const existingMarker = nodeMarkers[key];
+          const origLatLng = existingMarker.getLatLng();
+          const offsetLatLng = _getOffsetLatLng(origLatLng, 22, -22);
+
+          const linkLine = L.polyline([origLatLng, offsetLatLng], {
+            color: obsColor, weight: 1.5, opacity: 0.45, dashArray: '5 4', interactive: false
+          }).addTo(nodesLayer);
+
+          const obsGlow = L.circleMarker(offsetLatLng, {
+            radius: 11, fillColor: obsColor, fillOpacity: 0.1, stroke: false, interactive: false
+          }).addTo(nodesLayer);
+
+          const obsMarker = L.circleMarker(offsetLatLng, {
+            radius: 7, color: '#fff', weight: 1.5, fillColor: obsColor, fillOpacity: 0.9
+          });
+          obsMarker._baseColor = obsColor;
+          obsMarker._nodeKey = key;
+          obsMarker._origKey = key;
+
+          // Hover: brighten link and glow when either dot is hovered
+          const onOver = () => {
+            linkLine.setStyle({ opacity: 0.9, weight: 2.5 });
+            obsGlow.setStyle({ fillOpacity: 0.25 });
+          };
+          const onOut = () => {
+            linkLine.setStyle({ opacity: 0.45, weight: 1.5 });
+            obsGlow.setStyle({ fillOpacity: 0.1 });
+          };
+          obsMarker.on('mouseover', onOver).on('mouseout', onOut);
+          existingMarker.on('mouseover', onOver).on('mouseout', onOut);
+
+          obsMarker.bindTooltip(
+            escapeHtml(obs.name || key.slice(0, 12)) + ' (Observer)',
+            { permanent: false, direction: 'top', offset: [0, -10], className: 'live-tooltip' }
+          );
+          obsMarker.on('click', (e) => { L.DomEvent.stopPropagation(e); showNodeDetail(key, true); });
+
+          // Don't add to map yet — _updateObsOffsetVisibility() handles zoom-gated display
+          obsOffsetMarkers[key] = { obsMarker, linkLine, obsGlow };
+          existingMarker._obsOffset = obsOffsetMarkers[key];
+          return;
+        }
+
+        // Pure observer — place normally
+        const latLng = L.latLng(obs.lat, obs.lon);
+        const circle = L.circleMarker(latLng, {
+          radius: 7, color: '#fff', weight: 1.5, fillColor: obsColor, fillOpacity: 0.9
+        });
+        circle._baseColor = obsColor;
+        circle._nodeKey = key;
+        circle.bindTooltip(escapeHtml(obs.name || key.slice(0, 12)), {
+          permanent: false, direction: 'top', offset: [0, -10], className: 'live-tooltip'
+        });
+        circle.on('click', (e) => { L.DomEvent.stopPropagation(e); showNodeDetail(key); });
+        circle.addTo(nodesLayer);
+        nodeMarkers[key] = circle;
+      });
+      _updateObsOffsetVisibility();
+    } catch (e) { console.warn('Failed to load observers:', e); }
+  }
+
+  const OBS_OFFSET_MIN_ZOOM = 12;
+
+  function _updateObsOffsetVisibility() {
+    if (!map) return;
+    const zoom = map.getZoom();
+    const show = zoom >= OBS_OFFSET_MIN_ZOOM;
+    for (const [key, obs] of Object.entries(obsOffsetMarkers)) {
+      const origMarker = nodeMarkers[key];
+      if (show && origMarker) {
+        // Recompute pixel-stable offset at current zoom
+        const origLatLng = origMarker.getLatLng();
+        const newOffset = _getOffsetLatLng(origLatLng, 22, -22);
+        obs.obsMarker.setLatLng(newOffset);
+        obs.obsGlow.setLatLng(newOffset);
+        obs.linkLine.setLatLngs([origLatLng, newOffset]);
+        if (!nodesLayer.hasLayer(obs.obsMarker)) obs.obsMarker.addTo(nodesLayer);
+        if (!nodesLayer.hasLayer(obs.obsGlow)) obs.obsGlow.addTo(nodesLayer);
+        if (!nodesLayer.hasLayer(obs.linkLine)) obs.linkLine.addTo(nodesLayer);
+      } else {
+        if (nodesLayer.hasLayer(obs.obsMarker)) nodesLayer.removeLayer(obs.obsMarker);
+        if (nodesLayer.hasLayer(obs.obsGlow)) nodesLayer.removeLayer(obs.obsGlow);
+        if (nodesLayer.hasLayer(obs.linkLine)) nodesLayer.removeLayer(obs.linkLine);
+      }
+    }
+  }
+
+  let _affinityInterval = null;
+
+  async function fetchAffinityData() {
+    try {
+      const resp = await fetch('/api/analytics/neighbor-graph');
+      const graph = await resp.json();
+      if (window.HopResolver && HopResolver.setAffinity) {
+        HopResolver.setAffinity(graph);
+      }
+    } catch (e) { console.warn('Failed to fetch affinity data:', e); }
+  }
+
+  function startAffinityRefresh() {
+    if (_affinityInterval) clearInterval(_affinityInterval);
+    _affinityInterval = setInterval(fetchAffinityData, 60000);
   }
 
   function clearNodeMarkers() {
     if (nodesLayer) nodesLayer.clearLayers();
     if (animLayer) animLayer.clearLayers();
     nodeMarkers = {};
+    obsOffsetMarkers = {};
     nodeData = {};
     nodeActivity = {};
     if (window.HopResolver) HopResolver.init([]);
@@ -1340,7 +1840,9 @@
   function rebuildFeedList() {
     const feed = document.getElementById('liveFeed');
     if (!feed) return;
-    feed.querySelectorAll('.live-feed-item').forEach(el => el.remove());
+    const feedContent = feed.querySelector('.panel-content');
+    if (!feedContent) return;
+    feedContent.querySelectorAll('.live-feed-item').forEach(el => el.remove());
     feedDedup.clear();
 
     // Aggregate VCR buffer by hash, then create one feed item per unique hash
@@ -1375,7 +1877,7 @@
       for (const op of group.packets) {
         let opHops = [];
         if (op.path_json) {
-          try { opHops = typeof op.path_json === 'string' ? JSON.parse(op.path_json) : op.path_json; } catch {}
+          try { opHops = getParsedPath(op); } catch {}
         } else if (op.decoded?.path?.hops) {
           opHops = op.decoded.path.hops;
         }
@@ -1388,6 +1890,10 @@
       const hopStr = longestHops.length ? `<span class="feed-hops">${longestHops.length}⇢</span>` : '';
       const obsBadge = group.count > 1 ? `<span class="badge badge-obs" style="font-size:10px;margin-left:4px">👁 ${group.count}</span>` : '';
 
+      var _ccPayload = (pkt.decoded || {}).payload || {};
+      var _ccChan1 = (typeName === 'GRP_TXT' || typeName === 'CHAN') ? (_ccPayload.channel || null) : null;
+      var dotHtml1 = _ccChan1 ? _feedColorDot(_ccChan1) : '';
+
       const item = document.createElement('div');
       item.className = 'live-feed-item';
       item.setAttribute('tabindex', '0');
@@ -1397,12 +1903,13 @@
       item.innerHTML = `
         <span class="feed-icon" style="color:${color}">${icon}</span>
         <span class="feed-type" style="color:${color}">${typeName}</span>
-        ${hopStr}${obsBadge}
+        ${dotHtml1}${transportBadge(pkt.route_type)}${hopStr}${obsBadge}
         <span class="feed-text">${escapeHtml(preview)}</span>
-        <span class="feed-time">${new Date(group.latestTs || Date.now()).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit',second:'2-digit'})}</span>
+        <span class="feed-time">${formatLiveTimestampHtml(group.latestTs || Date.now())}</span>
       `;
+      if (_ccChan1) item._ccChannel = _ccChan1; // channel color picker (#674)
       item.addEventListener('click', () => showFeedCard(item, pkt, color));
-      feed.appendChild(item);
+      feedContent.appendChild(item);
 
       // Register in dedup map so replay and live updates work
       if (group.hash) {
@@ -1437,12 +1944,18 @@
       permanent: false, direction: 'top', offset: [0, -10], className: 'live-tooltip'
     });
 
-    marker.on('click', () => showNodeDetail(n.public_key));
+    marker.on('click', (e) => { L.DomEvent.stopPropagation(e); showNodeDetail(n.public_key); });
 
     marker._glowMarker = glow;
     marker._baseColor = color;
     marker._baseSize = size;
     nodeMarkers[n.public_key] = marker;
+
+    // Hide if role is currently filtered out
+    if (activeRoleFilters && !activeRoleFilters.has(n.role || 'unknown')) {
+      nodesLayer.removeLayer(marker);
+      nodesLayer.removeLayer(glow);
+    }
 
     // Apply matrix tint if active
     if (matrixMode) {
@@ -1466,6 +1979,7 @@
       marker._baseSize = size;
       if (marker._glowMarker) marker._glowMarker.setRadius(size + 4);
     }
+    _updateObsOffsetVisibility();
   }
 
   // Prune nodes not seen within their role's health threshold.
@@ -1499,6 +2013,7 @@
           }
           delete nodeMarkers[key];
           delete nodeData[key];
+          delete nodeActivity[key];
           pruned = true;
         }
       } else if (marker && marker._staleDimmed) {
@@ -1514,29 +2029,43 @@
       if (_el2) _el2.textContent = Object.keys(nodeMarkers).length;
       if (window.HopResolver) HopResolver.init(Object.values(nodeData));
     }
+    // Prune orphaned nodeActivity entries (nodes removed above or never tracked)
+    for (var aKey in nodeActivity) {
+      if (!(aKey in nodeData)) delete nodeActivity[aKey];
+    }
   }
 
   // Expose for testing
   window._livePruneStaleNodes = pruneStaleNodes;
   window._liveNodeMarkers = function() { return nodeMarkers; };
   window._liveNodeData = function() { return nodeData; };
+  window._liveNodeActivity = function() { return nodeActivity; };
+  window._vcrFormatTime = vcrFormatTime;
+  window._liveDbPacketToLive = dbPacketToLive;
+  window._liveExpandToBufferEntries = expandToBufferEntries;
+  window._liveExpandToBufferEntriesAsync = expandToBufferEntriesAsync;
+  window._liveSEG_MAP = SEG_MAP;
+  window._liveBufferPacket = bufferPacket;
+  window._liveVCR = function() { return VCR; };
+  window._liveGetFavoritePubkeys = getFavoritePubkeys;
+  window._livePacketInvolvesFavorite = packetInvolvesFavorite;
+  window._liveIsNodeFavorited = isNodeFavorited;
+  window._liveFormatLiveTimestampHtml = formatLiveTimestampHtml;
+  window._liveResolveHopPositions = resolveHopPositions;
+  window._liveVcrSpeedCycle = vcrSpeedCycle;
+  window._liveVcrPause = vcrPause;
+  window._liveVcrResumeLive = vcrResumeLive;
+  window._liveVcrSetMode = vcrSetMode;
 
   async function replayRecent() {
     try {
-      const resp = await fetch('/api/packets?limit=8&groupByHash=true');
+      // Single bulk fetch with expand=observations — no N+1 calls
+      const resp = await fetch('/api/packets?limit=8&expand=observations');
       const data = await resp.json();
       const groups = (data.packets || []).reverse();
 
-      // Fetch all observations first, then stagger rendering
-      const allGroups = [];
-      for (let i = 0; i < groups.length; i++) {
-        const group = groups[i];
-        let observations = [];
-        try {
-          const detail = await fetch('/api/packets/' + encodeURIComponent(group.hash));
-          const detailData = await detail.json();
-          observations = detailData.observations || [];
-        } catch {}
+      const allGroups = groups.map((group) => {
+        const observations = group.observations || [];
 
         const livePackets = observations.map(obs => {
           const livePkt = dbPacketToLive(Object.assign({}, group, obs, {
@@ -1555,8 +2084,8 @@
         }
 
         livePackets.forEach(lp => VCR.buffer.push({ ts: lp._ts, pkt: lp }));
-        allGroups.push(livePackets);
-      }
+        return livePackets;
+      });
 
       // Render with real timing gaps between packets
       // Sort by earliest timestamp
@@ -1611,6 +2140,9 @@
     // --- Favorites filter ---
     if (showOnlyFavorites && !packets.some(function(p) { return packetInvolvesFavorite(p); })) return;
 
+    // --- Type filter ---
+    if (activeTypeFilters && !activeTypeFilters.has(typeName)) return;
+
     // --- Ensure ADVERT nodes appear on map ---
     for (var pi = 0; pi < packets.length; pi++) {
       var pkt = packets[pi];
@@ -1644,7 +2176,7 @@
       for (const fp of packets) {
         let fpHops = [];
         if (fp.path_json) {
-          try { fpHops = typeof fp.path_json === 'string' ? JSON.parse(fp.path_json) : fp.path_json; } catch {}
+          try { fpHops = getParsedPath(fp); } catch {}
         } else if (fp.decoded?.path?.hops) {
           fpHops = fp.decoded.path.hops;
         }
@@ -1681,14 +2213,14 @@
       var qp = qd.payload || {};
       var hops;
       if (qpkt.path_json) {
-        try { hops = typeof qpkt.path_json === 'string' ? JSON.parse(qpkt.path_json) : qpkt.path_json; } catch (e) { hops = qd.path?.hops || []; }
+        try { hops = getParsedPath(qpkt); } catch (e) { hops = qd.path?.hops || []; }
       } else {
         hops = qd.path?.hops || [];
       }
       var pathKey = hops.join(',');
       if (seenPathKeys.has(pathKey)) continue;
       seenPathKeys.add(pathKey);
-      var hopPositions = resolveHopPositions(hops, qp);
+      var hopPositions = resolveHopPositions(hops, qp, window.getResolvedPath ? getResolvedPath(qpkt) : null);
       if (hopPositions.length >= 2) {
         allPaths.push({ hopPositions: hopPositions, raw: qpkt.raw || first.raw });
       } else if (hopPositions.length === 1) {
@@ -1721,19 +2253,83 @@
         }
       }
       firstPathDone = true;
-      animatePath(allPaths[ai].hopPositions, typeName, color, allPaths[ai].raw, onHop);
+      // For TRACE packets, split at hopsCompleted: solid for completed, dashed for remaining
+      var hopsCompleted = decoded.path && decoded.path.hopsCompleted;
+      if (typeName === 'TRACE' && hopsCompleted != null && hopsCompleted < allPaths[ai].hopPositions.length) {
+        var completedPositions = allPaths[ai].hopPositions.slice(0, hopsCompleted + 1);
+        var remainingPositions = allPaths[ai].hopPositions.slice(hopsCompleted);
+        if (completedPositions.length >= 2) {
+          animatePath(completedPositions, typeName, color, allPaths[ai].raw, onHop);
+        } else if (completedPositions.length === 1) {
+          pulseNode(completedPositions[0].key, completedPositions[0].pos, typeName);
+        }
+        if (remainingPositions.length >= 2) {
+          drawDashedPath(remainingPositions, color);
+        }
+      } else {
+        animatePath(allPaths[ai].hopPositions, typeName, color, allPaths[ai].raw, onHop);
+      }
     }
   }
 
-  function resolveHopPositions(hops, payload) {
-    // Delegate to shared HopResolver (from hop-resolver.js) instead of reimplementing
-    const originLat = payload.lat != null && !(payload.lat === 0 && payload.lon === 0) ? payload.lat : null;
-    const originLon = payload.lon != null && !(payload.lon === 0 && payload.lon === 0) ? payload.lon : null;
+  // Draw a static dashed/ghosted line for unreached TRACE hops
+  function drawDashedPath(hopPositions, color) {
+    var GHOST_TIMEOUT_MS = 10000;
+    var ghostColor = getComputedStyle(document.documentElement).getPropertyValue('--trace-ghost-color').trim() || '#94a3b8';
+    if (!pathsLayer) return;
+    for (var i = 0; i < hopPositions.length - 1; i++) {
+      var from = hopPositions[i].pos;
+      var to = hopPositions[i + 1].pos;
+      var line = L.polyline([from, to], {
+        color: color, weight: 2, opacity: 0.25, dashArray: '6, 8'
+      }).addTo(pathsLayer);
+      // Pulse the unreached hop nodes as ghost markers
+      if (i > 0) {
+        var hp = hopPositions[i];
+        if (!nodeMarkers[hp.key]) {
+          var ghost = L.circleMarker(hp.pos, {
+            radius: 3, fillColor: ghostColor, fillOpacity: 0.2, color: color, weight: 1, opacity: 0.3
+          }).addTo(pathsLayer);
+          setTimeout((function(g) { return function() { if (pathsLayer.hasLayer(g)) pathsLayer.removeLayer(g); }; })(ghost), GHOST_TIMEOUT_MS);
+        }
+      }
+      // Remove dashed line after timeout
+      setTimeout((function(l) { return function() { if (pathsLayer.hasLayer(l)) pathsLayer.removeLayer(l); }; })(line), GHOST_TIMEOUT_MS);
+    }
+    // Ghost marker for the final unreached hop
+    var last = hopPositions[hopPositions.length - 1];
+    if (!nodeMarkers[last.key]) {
+      var ghostEnd = L.circleMarker(last.pos, {
+        radius: 4, fillColor: ghostColor, fillOpacity: 0.25, color: color, weight: 1, opacity: 0.35
+      }).addTo(pathsLayer);
+      setTimeout(function() { if (pathsLayer.hasLayer(ghostEnd)) pathsLayer.removeLayer(ghostEnd); }, GHOST_TIMEOUT_MS);
+    }
+  }
 
-    // Use HopResolver if available and initialized, otherwise fall back to simple lookup
-    const resolvedMap = (window.HopResolver && HopResolver.ready())
-      ? HopResolver.resolve(hops, originLat, originLon, null, null, null)
-      : {};
+  function resolveHopPositions(hops, payload, resolvedPath) {
+    // Hoist sender GPS guard once — reject (0,0) as "no GPS"
+    const hasValidGps = payload.lat != null && payload.lon != null
+      && !(payload.lat === 0 && payload.lon === 0);
+    const senderLat = hasValidGps ? payload.lat : null;
+    const senderLon = hasValidGps ? payload.lon : null;
+
+    // Prefer server-side resolved_path when available
+    var resolvedMap;
+    if (resolvedPath && resolvedPath.length === hops.length && window.HopResolver && HopResolver.ready()) {
+      resolvedMap = HopResolver.resolveFromServer(hops, resolvedPath);
+      // Fill in any null entries from client-side fallback, preserving sender GPS context
+      var nullHops = hops.filter(function(h, i) { return !resolvedPath[i] && !resolvedMap[h]; });
+      if (nullHops.length) {
+        var fallback = HopResolver.resolve(nullHops, senderLat, senderLon, null, null, null);
+        for (var k in fallback) resolvedMap[k] = fallback[k];
+      }
+    } else {
+      // Delegate to shared HopResolver (from hop-resolver.js) instead of reimplementing
+      // Use HopResolver if available and initialized, otherwise fall back to simple lookup
+      resolvedMap = (window.HopResolver && HopResolver.ready())
+        ? HopResolver.resolve(hops, senderLat, senderLon, null, null, null)
+        : {};
+    }
 
     // Convert HopResolver's map format to the array format live.js expects: {key, pos, name, known}
     const raw = hops.map(hop => {
@@ -1750,7 +2346,7 @@
     });
 
     // Add sender position as anchor if available
-    if (payload.pubKey && originLat != null) {
+    if (payload.pubKey && senderLat != null) {
       const existing = raw.find(p => p.key === payload.pubKey);
       if (!existing) {
         raw.unshift({ key: payload.pubKey, pos: [payload.lat, payload.lon], name: payload.name || payload.pubKey.slice(0, 8), known: true });
@@ -1782,6 +2378,7 @@
 
   function animatePath(hopPositions, typeName, color, rawHex, onHop) {
     if (!animLayer || !pathsLayer) return;
+    if (activeAnims >= MAX_CONCURRENT_ANIMS) return;
     activeAnims++;
     document.getElementById('liveAnimCount').textContent = activeAnims;
     let hopIndex = 0;
@@ -1789,9 +2386,11 @@
     function nextHop() {
       if (hopIndex >= hopPositions.length) {
         activeAnims = Math.max(0, activeAnims - 1);
-        document.getElementById('liveAnimCount').textContent = activeAnims;
+        const countEl = document.getElementById('liveAnimCount');
+        if (countEl) countEl.textContent = activeAnims;
         return;
       }
+      if (!animLayer) return;
       // Audio hook: notify per-hop callback
       if (onHop) try { onHop(hopIndex, hopPositions.length, hopPositions[hopIndex]); } catch (e) {}
       const hp = hopPositions[hopIndex];
@@ -1803,12 +2402,22 @@
             radius: 3, fillColor: '#94a3b8', fillOpacity: 0.35, color: '#94a3b8', weight: 1, opacity: 0.5
           }).addTo(animLayer);
           let pulseUp = true;
-          const pulseTimer = setInterval(() => {
-            if (!animLayer.hasLayer(ghost)) { clearInterval(pulseTimer); return; }
-            ghost.setStyle({ fillOpacity: pulseUp ? 0.6 : 0.25, opacity: pulseUp ? 0.7 : 0.4 });
-            pulseUp = !pulseUp;
-          }, 600);
-          setTimeout(() => { clearInterval(pulseTimer); if (animLayer.hasLayer(ghost)) animLayer.removeLayer(ghost); }, 3000);
+          let lastPulseTime = performance.now();
+          const pulseExpiry = lastPulseTime + 3000;
+          function ghostPulse(now) {
+            if (!animLayer || !animLayer.hasLayer(ghost)) return;
+            if (now >= pulseExpiry) {
+              if (animLayer && animLayer.hasLayer(ghost)) animLayer.removeLayer(ghost);
+              return;
+            }
+            if (now - lastPulseTime >= 600) {
+              lastPulseTime = now;
+              ghost.setStyle({ fillOpacity: pulseUp ? 0.6 : 0.25, opacity: pulseUp ? 0.7 : 0.4 });
+              pulseUp = !pulseUp;
+            }
+            requestAnimationFrame(ghostPulse);
+          }
+          requestAnimationFrame(ghostPulse);
         }
       } else {
         pulseNode(hp.key, hp.pos, typeName);
@@ -1852,20 +2461,31 @@
     }).addTo(animLayer);
 
     let r = 2, op = 0.9;
-    const iv = setInterval(() => {
-      r += 1.5; op -= 0.03;
-      if (op <= 0) {
-        clearInterval(iv);
+    let lastPulse = performance.now();
+    const pulseStart = lastPulse;
+    function animatePulse(now) {
+      if (!animLayer) return;
+      if (now - pulseStart > 2000) {
         try { animLayer.removeLayer(ring); } catch {}
         return;
       }
-      try {
-        ring.setRadius(r);
-        ring.setStyle({ opacity: op, weight: Math.max(0.3, 3 - r * 0.04) });
-      } catch { clearInterval(iv); }
-    }, 26);
-    // Safety cleanup — never let a ring live longer than 2s
-    setTimeout(() => { clearInterval(iv); try { animLayer.removeLayer(ring); } catch {} }, 2000);
+      const elapsed = now - lastPulse;
+      if (elapsed >= 26) {
+        const ticks = Math.min(Math.floor(elapsed / 26), 4);
+        r += 0.375 * ticks; op -= 0.03 * ticks;
+        lastPulse = now;
+        if (op <= 0) {
+          try { animLayer.removeLayer(ring); } catch {}
+          return;
+        }
+        try {
+          ring.setRadius(r);
+          ring.setStyle({ opacity: op, weight: Math.max(0.3, 3 - r * 0.04) });
+        } catch { return; }
+      }
+      requestAnimationFrame(animatePulse);
+    }
+    requestAnimationFrame(animatePulse);
 
     const baseColor = marker._baseColor || '#6b7280';
     const baseSize = marker._baseSize || 6;
@@ -2089,6 +2709,10 @@
     const startTime = performance.now();
 
     function tick(now) {
+      if (!animLayer || !pathsLayer) {
+        if (onComplete) onComplete();
+        return;
+      }
       const elapsed = now - startTime;
       const t = Math.min(1, elapsed / DURATION_MS);
       const lat = from[0] + (to[0] - from[0]) * t;
@@ -2133,6 +2757,11 @@
         // Fade out
         const fadeStart = performance.now();
         function fadeOut(now) {
+          if (!animLayer || !pathsLayer) {
+            charMarkers.length = 0;
+            if (onComplete) onComplete();
+            return;
+          }
           const ft = Math.min(1, (now - fadeStart) / 300);
           if (ft >= 1) {
             for (const cm of charMarkers) try { animLayer.removeLayer(cm.marker); } catch {}
@@ -2178,43 +2807,66 @@
       radius: 3.5, fillColor: '#fff', fillOpacity: 1, color: color, weight: 1.5
     }).addTo(animLayer);
 
-    const interval = setInterval(() => {
-      step++;
-      const lat = from[0] + latStep * step;
-      const lon = from[1] + lonStep * step;
-      currentCoords.push([lat, lon]);
-      line.setLatLngs(currentCoords);
-      contrail.setLatLngs(currentCoords);
-      dot.setLatLng([lat, lon]);
-
-      if (step >= steps) {
-        clearInterval(interval);
-        if (animLayer) animLayer.removeLayer(dot);
-
-        recentPaths.push({ line, glowLine: contrail, time: Date.now() });
-        while (recentPaths.length > 5) {
-          const old = recentPaths.shift();
-          if (pathsLayer) { pathsLayer.removeLayer(old.line); pathsLayer.removeLayer(old.glowLine); }
-        }
-
-        setTimeout(() => {
-          let fadeOp = mainOpacity;
-          const fi = setInterval(() => {
-            fadeOp -= 0.1;
-            if (fadeOp <= 0) {
-              clearInterval(fi);
-              if (pathsLayer) { pathsLayer.removeLayer(line); pathsLayer.removeLayer(contrail); }
-              recentPaths = recentPaths.filter(p => p.line !== line);
-            } else {
-              line.setStyle({ opacity: fadeOp });
-              contrail.setStyle({ opacity: fadeOp * 0.15 });
-            }
-          }, 52);
-        }, 800);
-
+    let lastStep = performance.now();
+    function animateLine(now) {
+      if (!animLayer || !pathsLayer) {
         if (onComplete) onComplete();
+        return;
       }
-    }, 33);
+      const elapsed = now - lastStep;
+      if (elapsed >= 33) {
+        const ticks = Math.min(Math.floor(elapsed / 33), 4);
+        lastStep = now;
+        for (let t = 0; t < ticks && step < steps; t++) {
+          step++;
+          const lat = from[0] + latStep * step;
+          const lon = from[1] + lonStep * step;
+          currentCoords.push([lat, lon]);
+        }
+        const lastPt = currentCoords[currentCoords.length - 1];
+        line.setLatLngs(currentCoords);
+        contrail.setLatLngs(currentCoords);
+        dot.setLatLng(lastPt);
+
+        if (step >= steps) {
+          if (animLayer) animLayer.removeLayer(dot);
+
+          recentPaths.push({ line, glowLine: contrail, time: Date.now() });
+          while (recentPaths.length > 5) {
+            const old = recentPaths.shift();
+            if (pathsLayer) { pathsLayer.removeLayer(old.line); pathsLayer.removeLayer(old.glowLine); }
+          }
+
+          setTimeout(() => {
+            let fadeOp = mainOpacity;
+            let lastFade = performance.now();
+            function animateFade(now) {
+              if (!pathsLayer) return;
+              const fadeElapsed = now - lastFade;
+              if (fadeElapsed >= 52) {
+                const fadeTicks = Math.min(Math.floor(fadeElapsed / 52), 4);
+                lastFade = now;
+                fadeOp -= 0.1 * fadeTicks;
+                if (fadeOp <= 0) {
+                  if (pathsLayer) { pathsLayer.removeLayer(line); pathsLayer.removeLayer(contrail); }
+                  recentPaths = recentPaths.filter(p => p.line !== line);
+                  return;
+                }
+                line.setStyle({ opacity: fadeOp });
+                contrail.setStyle({ opacity: fadeOp * 0.15 });
+              }
+              requestAnimationFrame(animateFade);
+            }
+            requestAnimationFrame(animateFade);
+          }, 800);
+
+          if (onComplete) onComplete();
+          return;
+        }
+      }
+      requestAnimationFrame(animateLine);
+    }
+    requestAnimationFrame(animateLine);
   }
 
   function showHeatMap() {
@@ -2248,23 +2900,52 @@
     if (heatLayer) { map.removeLayer(heatLayer); heatLayer = null; }
   }
 
+  /** Extract channel row style from a packet (shared by feed item builders). */
+  function _getChannelStyle(pkt) {
+    if (!window.ChannelColors) return '';
+    var d = pkt.decoded || {};
+    var p = d.payload || {};
+    var typeName = p.type || (d.header || {}).payloadTypeName || '';
+    var ch = p.channel || null;
+    return window.ChannelColors.getRowStyle(typeName, ch);
+  }
+
+  /** Build a clickable 12×12 color dot for a channel feed item (#674). */
+  function _feedColorDot(channel) {
+    if (!channel || !window.ChannelColors) return '';
+    var c = window.ChannelColors.get(channel);
+    var bg = c || 'transparent';
+    var border = c ? c : 'var(--border-color, #555)';
+    var style = c
+      ? 'background:' + bg + ';border:1px solid ' + border
+      : 'background:transparent;border:1px dashed ' + border;
+    return '<span class="feed-color-dot" data-channel="' + escapeHtml(channel) + '" style="display:inline-block;width:12px;height:12px;border-radius:50%;' + style + ';cursor:pointer;vertical-align:middle;margin-left:4px;flex-shrink:0" title="Set color for ' + escapeHtml(channel) + '"></span>';
+  }
+
   function addFeedItemDOM(icon, typeName, payload, hops, color, pkt, feed) {
     const text = payload.text || payload.name || '';
     const preview = text ? ' ' + (text.length > 35 ? text.slice(0, 35) + '…' : text) : '';
     const hopStr = hops.length ? `<span class="feed-hops">${hops.length}⇢</span>` : '';
     const obsBadge = pkt.observation_count > 1 ? `<span class="badge badge-obs" style="font-size:10px;margin-left:4px">👁 ${pkt.observation_count}</span>` : '';
+    var _ccPayload2 = (pkt.decoded || {}).payload || {};
+    var _ccChan = (typeName === 'GRP_TXT' || typeName === 'CHAN') ? (_ccPayload2.channel || null) : null;
+    var dotHtml = _ccChan ? _feedColorDot(_ccChan) : '';
     const item = document.createElement('div');
     item.className = 'live-feed-item';
     item.setAttribute('tabindex', '0');
     item.setAttribute('role', 'button');
     item.style.cursor = 'pointer';
+    // Channel color highlighting for GRP_TXT packets (#271)
+    var _cs = _getChannelStyle(pkt);
+    if (_cs) item.style.cssText += _cs;
     item.innerHTML = `
       <span class="feed-icon" style="color:${color}">${icon}</span>
       <span class="feed-type" style="color:${color}">${typeName}</span>
-      ${hopStr}${obsBadge}
+      ${dotHtml}${transportBadge(pkt.route_type)}${hopStr}${obsBadge}
       <span class="feed-text">${escapeHtml(preview)}</span>
-      <span class="feed-time">${new Date(pkt._ts || Date.now()).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit',second:'2-digit'})}</span>
+      <span class="feed-time">${formatLiveTimestampHtml(pkt._ts || Date.now())}</span>
     `;
+    if (_ccChan) item._ccChannel = _ccChan; // channel color picker (#674)
     item.addEventListener('click', () => showFeedCard(item, pkt, color));
     feed.appendChild(item);
   }
@@ -2277,7 +2958,8 @@
   const DEDUP_WINDOW = 30000;
 
   function addFeedItem(icon, typeName, payload, hops, color, pkt) {
-    const feed = document.getElementById('liveFeed');
+    const feedPanel = document.getElementById('liveFeed');
+    const feed = feedPanel ? feedPanel.querySelector('.panel-content') : null;
     if (!feed) return;
     if (showOnlyFavorites && !packetInvolvesFavorite(pkt)) return;
 
@@ -2319,6 +3001,9 @@
     const preview = text ? ' ' + (text.length > 35 ? text.slice(0, 35) + '…' : text) : '';
     const hopStr = hops.length ? `<span class="feed-hops">${hops.length}⇢</span>` : '';
     const obsBadge = incomingObs > 1 ? `<span class="badge badge-obs" style="font-size:10px;margin-left:4px">👁 ${incomingObs}</span>` : '';
+    var _ccPayload3 = (pkt.decoded || {}).payload || {};
+    var _ccChan3 = (typeName === 'GRP_TXT' || typeName === 'CHAN') ? (_ccPayload3.channel || null) : null;
+    var dotHtml3 = _ccChan3 ? _feedColorDot(_ccChan3) : '';
 
     const item = document.createElement('div');
     item.className = 'live-feed-item live-feed-enter';
@@ -2326,13 +3011,17 @@
     item.setAttribute('role', 'button');
     if (hash) item.setAttribute('data-hash', hash);
     item.style.cursor = 'pointer';
+    // Channel color highlighting for GRP_TXT packets (#271)
+    var _chanStyle = _getChannelStyle(pkt);
+    if (_chanStyle) item.style.cssText += _chanStyle;
     item.innerHTML = `
       <span class="feed-icon" style="color:${color}">${icon}</span>
       <span class="feed-type" style="color:${color}">${typeName}</span>
-      ${hopStr}${obsBadge}
+      ${dotHtml3}${transportBadge(pkt.route_type)}${hopStr}${obsBadge}
       <span class="feed-text">${escapeHtml(preview)}</span>
-      <span class="feed-time">${new Date(pkt._ts || Date.now()).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit',second:'2-digit'})}</span>
+      <span class="feed-time">${formatLiveTimestampHtml(pkt._ts || Date.now())}</span>
     `;
+    if (_ccChan3) item._ccChannel = _ccChan3; // channel color picker (#674)
     item.addEventListener('click', () => showFeedCard(item, pkt, color));
     feed.prepend(item);
     requestAnimationFrame(() => requestAnimationFrame(() => item.classList.remove('live-feed-enter')));
@@ -2407,6 +3096,7 @@
     if (_lcdClockInterval) { clearInterval(_lcdClockInterval); _lcdClockInterval = null; }
     if (_rateCounterInterval) { clearInterval(_rateCounterInterval); _rateCounterInterval = null; }
     if (_pruneInterval) { clearInterval(_pruneInterval); _pruneInterval = null; }
+    if (_affinityInterval) { clearInterval(_affinityInterval); _affinityInterval = null; }
     if (ws) { ws.onclose = null; ws.close(); ws = null; }
     if (map) { map.remove(); map = null; }
     if (_onResize) {
@@ -2431,23 +3121,30 @@
       }
       _navCleanup = null;
     }
-    nodesLayer = pathsLayer = animLayer = heatLayer = null;
+    nodesLayer = pathsLayer = animLayer = heatLayer = geoFilterLayer = null;
     stopMatrixRain();
     nodeMarkers = {}; nodeData = {};
+    activeNodeDetailKey = null;
     recentPaths = [];
     packetCount = 0; activeAnims = 0;
     nodeActivity = {}; pktTimestamps = [];
     feedDedup.clear();
-    VCR.buffer = []; VCR.playhead = -1; VCR.mode = 'LIVE'; VCR.missedCount = 0; VCR.speed = 1;
+    VCR.buffer = []; VCR.playhead = -1; VCR.mode = 'LIVE'; VCR.missedCount = 0; VCR.speed = 1; VCR.replayGen = 0;
   }
 
   let _themeRefreshHandler = null;
 
   registerPage('live', {
     init: function(app, routeParam) {
-      _themeRefreshHandler = () => { /* live map rebuilds on next packet */ };
+      _themeRefreshHandler = () => {
+        rebuildFeedList();
+        if (activeNodeDetailKey) showNodeDetail(activeNodeDetailKey);
+      };
       window.addEventListener('theme-refresh', _themeRefreshHandler);
-      return init(app, routeParam);
+      var result = init(app, routeParam);
+      // Install channel color picker (M2, #271)
+      if (window.ChannelColorPicker) window.ChannelColorPicker.installLiveFeed();
+      return result;
     },
     destroy: function() {
       if (_themeRefreshHandler) { window.removeEventListener('theme-refresh', _themeRefreshHandler); _themeRefreshHandler = null; }

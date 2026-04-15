@@ -51,9 +51,9 @@
     const nodeName = escapeHtml(n.name || n.public_key.slice(0, 12));
 
     container.innerHTML = `
-      <div style="max-width:1000px;margin:0 auto;padding:12px 16px;height:100%;overflow-y:auto">
+      <div style="max-width:1000px;margin:0 auto;padding:12px 16px">
         <div style="margin-bottom:12px">
-          <a href="#/nodes/${encodeURIComponent(n.public_key)}" style="color:var(--accent);text-decoration:none;font-size:12px">← Back to ${nodeName}</a>
+          <a href="#/nodes/${encodeURIComponent(n.public_key)}" class="btn-icon" style="display:inline-flex;align-items:center;gap:6px;text-decoration:none;font-size:12px"><svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="15 18 9 12 15 6"/></svg> Back to ${nodeName}</a>
           <h2 style="margin:4px 0 2px;font-size:18px">📊 ${nodeName} — Analytics</h2>
           <div style="color:var(--text-muted);font-size:11px">${n.role || 'Unknown role'} · ${s.totalTransmissions || s.totalPackets} packets in ${days}d window</div>
         </div>

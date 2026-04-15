@@ -63,6 +63,12 @@
         { label: '📡 All Nodes', url: '#/nodes' },
         { label: '💬 Channels', url: '#/channels' }
       ]
+    },
+    ui: {
+      timestampMode: 'ago',
+      timestampTimezone: 'local',
+      timestampFormat: 'iso',
+      timestampCustomFormat: ''
     }
   };
 
@@ -441,19 +447,48 @@
     // Merge: DEFAULTS → server config → localStorage saved values
     var local = {};
     try { var s = localStorage.getItem('meshcore-user-theme'); if (s) local = JSON.parse(s); } catch {}
+    function mergeSection(key) {
+      return Object.assign({}, DEFAULTS[key], cfg[key] || {}, local[key] || {});
+    }
+    var serverHome = window._SITE_CONFIG_ORIGINAL_HOME || cfg.home || {};
+    var mergedHome = Object.assign({}, DEFAULTS.home, serverHome, local.home || {});
+    var localTsMode = localStorage.getItem('meshcore-timestamp-mode');
+    var localTsTimezone = localStorage.getItem('meshcore-timestamp-timezone');
+    var localTsFormat = localStorage.getItem('meshcore-timestamp-format');
+    var localTsCustomFormat = localStorage.getItem('meshcore-timestamp-custom-format');
+    var serverTsMode = (cfg.timestamps && cfg.timestamps.defaultMode === 'absolute') ? 'absolute' : 'ago';
+    var serverTsTimezone = (cfg.timestamps && cfg.timestamps.timezone === 'utc') ? 'utc' : 'local';
+    var serverTsFormat = (cfg.timestamps && (cfg.timestamps.formatPreset === 'iso' || cfg.timestamps.formatPreset === 'iso-seconds' || cfg.timestamps.formatPreset === 'locale'))
+      ? cfg.timestamps.formatPreset
+      : 'iso';
+    var serverTsCustomFormat = (cfg.timestamps && typeof cfg.timestamps.customFormat === 'string') ? cfg.timestamps.customFormat : '';
+    var mergedUi = mergeSection('ui');
+    mergedUi.timestampMode = (localTsMode === 'ago' || localTsMode === 'absolute')
+      ? localTsMode
+      : (mergedUi.timestampMode === 'absolute' || serverTsMode === 'absolute' ? 'absolute' : 'ago');
+    mergedUi.timestampTimezone = (localTsTimezone === 'local' || localTsTimezone === 'utc')
+      ? localTsTimezone
+      : (mergedUi.timestampTimezone === 'utc' || serverTsTimezone === 'utc' ? 'utc' : 'local');
+    mergedUi.timestampFormat = (localTsFormat === 'iso' || localTsFormat === 'iso-seconds' || localTsFormat === 'locale')
+      ? localTsFormat
+      : ((mergedUi.timestampFormat === 'iso' || mergedUi.timestampFormat === 'iso-seconds' || mergedUi.timestampFormat === 'locale') ? mergedUi.timestampFormat : serverTsFormat);
+    mergedUi.timestampCustomFormat = (localTsCustomFormat != null)
+      ? localTsCustomFormat
+      : (typeof mergedUi.timestampCustomFormat === 'string' ? mergedUi.timestampCustomFormat : serverTsCustomFormat);
     state = {
-      branding: Object.assign({}, DEFAULTS.branding, cfg.branding || {}, local.branding || {}),
-      theme: Object.assign({}, DEFAULTS.theme, cfg.theme || {}, local.theme || {}),
-      themeDark: Object.assign({}, DEFAULTS.themeDark, cfg.themeDark || {}, local.themeDark || {}),
-      nodeColors: Object.assign({}, DEFAULTS.nodeColors, cfg.nodeColors || {}, local.nodeColors || {}),
-      typeColors: Object.assign({}, DEFAULTS.typeColors, cfg.typeColors || {}, local.typeColors || {}),
+      branding: mergeSection('branding'),
+      theme: mergeSection('theme'),
+      themeDark: mergeSection('themeDark'),
+      nodeColors: mergeSection('nodeColors'),
+      typeColors: mergeSection('typeColors'),
       home: {
-        heroTitle: (local.home && local.home.heroTitle) || (cfg.home && cfg.home.heroTitle) || DEFAULTS.home.heroTitle,
-        heroSubtitle: (local.home && local.home.heroSubtitle) || (cfg.home && cfg.home.heroSubtitle) || DEFAULTS.home.heroSubtitle,
-        steps: deepClone((local.home && local.home.steps) || (cfg.home && cfg.home.steps) || DEFAULTS.home.steps),
-        checklist: deepClone((local.home && local.home.checklist) || (cfg.home && cfg.home.checklist) || DEFAULTS.home.checklist),
-        footerLinks: deepClone((local.home && local.home.footerLinks) || (cfg.home && cfg.home.footerLinks) || DEFAULTS.home.footerLinks)
-      }
+        heroTitle: mergedHome.heroTitle,
+        heroSubtitle: mergedHome.heroSubtitle,
+        steps: deepClone(mergedHome.steps),
+        checklist: deepClone(mergedHome.checklist),
+        footerLinks: deepClone(mergedHome.footerLinks)
+      },
+      ui: mergedUi
     };
   }
 
@@ -502,7 +537,9 @@
 
   // Auto-save to localStorage on every change
   let _autoSaveTimer = null;
+  let _initialized = false;
   function autoSave() {
+    if (!_initialized) return;
     if (_autoSaveTimer) clearTimeout(_autoSaveTimer);
     _autoSaveTimer = setTimeout(function() {
       _autoSaveTimer = null;
@@ -512,7 +549,6 @@
         // Sync to SITE_CONFIG so live pages (home, etc.) pick up changes
         if (window.SITE_CONFIG) {
           if (state.branding) window.SITE_CONFIG.branding = Object.assign(window.SITE_CONFIG.branding || {}, state.branding);
-          if (state.home) window.SITE_CONFIG.home = deepClone(state.home);
         }
         // Re-render current page to reflect home/branding changes
         window.dispatchEvent(new HashChangeEvent('hashchange'));
@@ -630,6 +666,7 @@
       { id: 'theme', label: '🎨', title: 'Theme Colors' },
       { id: 'nodes', label: '🎯', title: 'Colors' },
       { id: 'home', label: '🏠', title: 'Home Page' },
+      { id: 'display', label: '🖥️', title: 'Display' },
       { id: 'export', label: '📤', title: 'Export / Save' }
     ];
     return '<div class="cust-tabs">' +
@@ -646,6 +683,46 @@
       '<div class="cust-field"><label for="cust-tagline">Tagline</label><input type="text" id="cust-tagline" data-key="branding.tagline" value="' + escAttr(b.tagline) + '"></div>' +
       '<div class="cust-field"><label for="cust-logoUrl">Logo URL</label><input type="text" id="cust-logoUrl" data-key="branding.logoUrl" value="' + escAttr(b.logoUrl) + '" placeholder="https://...">' + logoPreview + '</div>' +
       '<div class="cust-field"><label for="cust-faviconUrl">Favicon URL</label><input type="text" id="cust-faviconUrl" data-key="branding.faviconUrl" value="' + escAttr(b.faviconUrl) + '" placeholder="https://..."></div>' +
+    '</div>';
+  }
+
+  function renderDisplay() {
+    var tsMode = state.ui.timestampMode === 'absolute' ? 'absolute' : 'ago';
+    var tsTimezone = state.ui.timestampTimezone === 'utc' ? 'utc' : 'local';
+    var tsFormat = (state.ui.timestampFormat === 'iso-seconds' || state.ui.timestampFormat === 'locale') ? state.ui.timestampFormat : 'iso';
+    var canCustomFormat = !!(window.SITE_CONFIG && window.SITE_CONFIG.timestamps && window.SITE_CONFIG.timestamps.allowCustomFormat === true);
+    var customFormat = typeof state.ui.timestampCustomFormat === 'string' ? state.ui.timestampCustomFormat : '';
+    var showAbsoluteOnly = tsMode === 'absolute' ? '' : ' style="display:none"';
+    return '<div class="cust-panel' + (activeTab === 'display' ? ' active' : '') + '" data-panel="display">' +
+      '<p class="cust-section-title">Display Settings</p>' +
+      '<p style="font-size:12px;color:var(--text-muted);margin-bottom:12px">UI preferences that affect how data is shown across pages.</p>' +
+      '<p class="cust-section-title" style="font-size:14px;margin-bottom:8px">Timestamps</p>' +
+      '<p style="font-size:12px;color:var(--text-muted);margin-bottom:8px">Global setting — applies to all pages.</p>' +
+      '<div class="cust-field"><label for="custTimestampMode">Timestamp Display</label>' +
+        '<select id="custTimestampMode" data-ui="timestampMode" style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:6px;background:var(--input-bg);color:var(--text)">' +
+          '<option value="ago"' + (tsMode === 'ago' ? ' selected' : '') + '>Relative (3m ago)</option>' +
+          '<option value="absolute"' + (tsMode === 'absolute' ? ' selected' : '') + '>Absolute (ISO timestamp)</option>' +
+        '</select>' +
+      '</div>' +
+      '<div class="cust-field"><label for="custTimestampTimezone">Timestamp Timezone</label>' +
+        '<select id="custTimestampTimezone" data-ui="timestampTimezone" style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:6px;background:var(--input-bg);color:var(--text)">' +
+          '<option value="local"' + (tsTimezone === 'local' ? ' selected' : '') + '>Local time</option>' +
+          '<option value="utc"' + (tsTimezone === 'utc' ? ' selected' : '') + '>UTC</option>' +
+        '</select>' +
+      '</div>' +
+      '<div class="cust-field" data-ts-absolute-only="format"' + showAbsoluteOnly + '><label for="custTimestampFormat">Timestamp Format (Absolute mode)</label>' +
+        '<select id="custTimestampFormat" data-ui="timestampFormat" style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:6px;background:var(--input-bg);color:var(--text)">' +
+          '<option value="iso"' + (tsFormat === 'iso' ? ' selected' : '') + '>ISO (2024-01-15 14:30:00)</option>' +
+          '<option value="iso-seconds"' + (tsFormat === 'iso-seconds' ? ' selected' : '') + '>ISO + milliseconds (2024-01-15 14:30:00.123)</option>' +
+          '<option value="locale"' + (tsFormat === 'locale' ? ' selected' : '') + '>Locale (browser format)</option>' +
+        '</select>' +
+      '</div>' +
+      (canCustomFormat
+        ? ('<div class="cust-field" data-ts-absolute-only="custom"' + showAbsoluteOnly + '><label for="custTimestampCustomFormat">Custom Timestamp Format (Absolute mode)</label>' +
+            '<input type="text" id="custTimestampCustomFormat" data-ui-input="timestampCustomFormat" value="' + escAttr(customFormat) + '" placeholder="YYYY-MM-DD HH:mm:ss">' +
+            '<div class="cust-hint">If non-empty, this overrides preset formatting.</div>' +
+          '</div>')
+        : '') +
     '</div>';
   }
 
@@ -851,6 +928,14 @@
     if (JSON.stringify(state.home.footerLinks) !== JSON.stringify(DEFAULTS.home.footerLinks)) hm.footerLinks = state.home.footerLinks;
     if (Object.keys(hm).length) out.home = hm;
 
+    // UI
+    var ui = {};
+    if ((state.ui.timestampMode || 'ago') !== DEFAULTS.ui.timestampMode) ui.timestampMode = state.ui.timestampMode;
+    if ((state.ui.timestampTimezone || 'local') !== DEFAULTS.ui.timestampTimezone) ui.timestampTimezone = state.ui.timestampTimezone;
+    if ((state.ui.timestampFormat || 'iso') !== DEFAULTS.ui.timestampFormat) ui.timestampFormat = state.ui.timestampFormat;
+    if ((state.ui.timestampCustomFormat || '') !== DEFAULTS.ui.timestampCustomFormat) ui.timestampCustomFormat = state.ui.timestampCustomFormat;
+    if (Object.keys(ui).length) out.ui = ui;
+
     return out;
   }
 
@@ -889,6 +974,7 @@
       renderTheme() +
       renderNodes() +
       renderHome() +
+      renderDisplay() +
       renderExport() +
       '</div>';
     bindEvents(container);
@@ -935,6 +1021,49 @@
           var link = document.querySelector('link[rel="icon"]');
           if (link && inp.value) link.href = inp.value;
         }
+      });
+    });
+
+    // UI settings
+    container.querySelectorAll('select[data-ui]').forEach(function (sel) {
+      sel.addEventListener('change', function () {
+        var key = sel.dataset.ui;
+        state.ui[key] = sel.value;
+        if (key === 'timestampMode' || key === 'timestampTimezone' || key === 'timestampFormat') {
+          if (!window.SITE_CONFIG) window.SITE_CONFIG = {};
+          if (!window.SITE_CONFIG.timestamps) window.SITE_CONFIG.timestamps = {};
+          if (key === 'timestampMode') {
+            localStorage.setItem('meshcore-timestamp-mode', sel.value);
+            window.SITE_CONFIG.timestamps.defaultMode = sel.value;
+            var formatRow = container.querySelector('[data-ts-absolute-only="format"]');
+            if (formatRow) formatRow.style.display = sel.value === 'absolute' ? '' : 'none';
+            var customRow = container.querySelector('[data-ts-absolute-only="custom"]');
+            if (customRow) customRow.style.display = sel.value === 'absolute' ? '' : 'none';
+          } else if (key === 'timestampTimezone') {
+            localStorage.setItem('meshcore-timestamp-timezone', sel.value);
+            window.SITE_CONFIG.timestamps.timezone = sel.value;
+          } else if (key === 'timestampFormat') {
+            localStorage.setItem('meshcore-timestamp-format', sel.value);
+            window.SITE_CONFIG.timestamps.formatPreset = sel.value;
+          }
+          window.dispatchEvent(new CustomEvent('timestamp-mode-changed'));
+        }
+        autoSave();
+      });
+    });
+
+    container.querySelectorAll('input[data-ui-input]').forEach(function (inp) {
+      inp.addEventListener('input', function () {
+        var key = inp.dataset.uiInput;
+        state.ui[key] = inp.value;
+        if (key === 'timestampCustomFormat') {
+          localStorage.setItem('meshcore-timestamp-custom-format', inp.value);
+          if (!window.SITE_CONFIG) window.SITE_CONFIG = {};
+          if (!window.SITE_CONFIG.timestamps) window.SITE_CONFIG.timestamps = {};
+          window.SITE_CONFIG.timestamps.customFormat = inp.value;
+          window.dispatchEvent(new CustomEvent('timestamp-mode-changed'));
+        }
+        autoSave();
       });
     });
 
@@ -1074,19 +1203,19 @@
         var tmp = state.home.steps[i];
         state.home.steps[i] = state.home.steps[j];
         state.home.steps[j] = tmp;
-        render(container);
+        render(container); autoSave();
       });
     });
     container.querySelectorAll('[data-rm-step]').forEach(function (btn) {
       btn.addEventListener('click', function () {
         state.home.steps.splice(parseInt(btn.dataset.rmStep), 1);
-        render(container);
+        render(container); autoSave();
       });
     });
     var addStepBtn = document.getElementById('addStep');
     if (addStepBtn) addStepBtn.addEventListener('click', function () {
       state.home.steps.push({ emoji: '📌', title: '', description: '' });
-      render(container);
+      render(container); autoSave();
     });
 
     // Checklist
@@ -1099,13 +1228,13 @@
     container.querySelectorAll('[data-rm-check]').forEach(function (btn) {
       btn.addEventListener('click', function () {
         state.home.checklist.splice(parseInt(btn.dataset.rmCheck), 1);
-        render(container);
+        render(container); autoSave();
       });
     });
     var addCheckBtn = document.getElementById('addCheck');
     if (addCheckBtn) addCheckBtn.addEventListener('click', function () {
       state.home.checklist.push({ question: '', answer: '' });
-      render(container);
+      render(container); autoSave();
     });
 
     // Footer links
@@ -1118,13 +1247,13 @@
     container.querySelectorAll('[data-rm-link]').forEach(function (btn) {
       btn.addEventListener('click', function () {
         state.home.footerLinks.splice(parseInt(btn.dataset.rmLink), 1);
-        render(container);
+        render(container); autoSave();
       });
     });
     var addLinkBtn = document.getElementById('addLink');
     if (addLinkBtn) addLinkBtn.addEventListener('click', function () {
       state.home.footerLinks.push({ label: '', url: '' });
-      render(container);
+      render(container); autoSave();
     });
 
     // Export copy
@@ -1231,6 +1360,7 @@
     // First open — create the panel
     injectStyles();
     saveOriginalCSS();
+    _initialized = false;
     initState();
 
     panelEl = document.createElement('div');
@@ -1263,7 +1393,8 @@
     });
 
     render(panelEl.querySelector('.cust-inner'));
-    applyThemePreview(); autoSave();
+    applyThemePreview();
+    _initialized = true;
   }
 
   // Restore saved user theme IMMEDIATELY (before DOMContentLoaded, before map/app init)

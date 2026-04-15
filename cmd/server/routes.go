@@ -1,11 +1,17 @@
 package main
 
 import (
+	"crypto/sha256"
+	"crypto/subtle"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"regexp"
 	"runtime"
 	"sort"
@@ -13,6 +19,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/gorilla/mux"
 )
@@ -38,10 +45,18 @@ type Server struct {
 	statsMu      sync.Mutex
 	statsCache   *StatsResponse
 	statsCachedAt time.Time
+
+	// Neighbor affinity graph (lazy-built, cached with TTL)
+	neighborMu    sync.Mutex
+	neighborGraph *NeighborGraph
+
+	// Router reference for OpenAPI spec generation
+	router *mux.Router
 }
 
 // PerfStats tracks request performance.
 type PerfStats struct {
+	mu          sync.Mutex
 	Requests    int64
 	TotalMs     float64
 	Endpoints   map[string]*EndpointPerf
@@ -93,8 +108,12 @@ func (s *Server) getMemStats() runtime.MemStats {
 
 // RegisterRoutes sets up all HTTP routes on the given router.
 func (s *Server) RegisterRoutes(r *mux.Router) {
+	s.router = r
 	// Performance instrumentation middleware
 	r.Use(s.perfMiddleware)
+
+	// Backfill status header middleware
+	r.Use(s.backfillStatusMiddleware)
 
 	// Config endpoints
 	r.HandleFunc("/api/config/cache", s.handleConfigCache).Methods("GET")
@@ -102,18 +121,22 @@ func (s *Server) RegisterRoutes(r *mux.Router) {
 	r.HandleFunc("/api/config/regions", s.handleConfigRegions).Methods("GET")
 	r.HandleFunc("/api/config/theme", s.handleConfigTheme).Methods("GET")
 	r.HandleFunc("/api/config/map", s.handleConfigMap).Methods("GET")
+	r.HandleFunc("/api/config/geo-filter", s.handleConfigGeoFilter).Methods("GET")
 
 	// System endpoints
 	r.HandleFunc("/api/health", s.handleHealth).Methods("GET")
 	r.HandleFunc("/api/stats", s.handleStats).Methods("GET")
 	r.HandleFunc("/api/perf", s.handlePerf).Methods("GET")
-	r.HandleFunc("/api/perf/reset", s.handlePerfReset).Methods("POST")
+	r.Handle("/api/perf/reset", s.requireAPIKey(http.HandlerFunc(s.handlePerfReset))).Methods("POST")
+	r.Handle("/api/admin/prune", s.requireAPIKey(http.HandlerFunc(s.handleAdminPrune))).Methods("POST")
+	r.Handle("/api/debug/affinity", s.requireAPIKey(http.HandlerFunc(s.handleDebugAffinity))).Methods("GET")
 
 	// Packet endpoints
+	r.HandleFunc("/api/packets/observations", s.handleBatchObservations).Methods("POST")
 	r.HandleFunc("/api/packets/timestamps", s.handlePacketTimestamps).Methods("GET")
 	r.HandleFunc("/api/packets/{id}", s.handlePacketDetail).Methods("GET")
 	r.HandleFunc("/api/packets", s.handlePackets).Methods("GET")
-	r.HandleFunc("/api/packets", s.handlePostPacket).Methods("POST")
+	r.Handle("/api/packets", s.requireAPIKey(http.HandlerFunc(s.handlePostPacket))).Methods("POST")
 
 	// Decode endpoint
 	r.HandleFunc("/api/decode", s.handleDecode).Methods("POST")
@@ -125,6 +148,7 @@ func (s *Server) RegisterRoutes(r *mux.Router) {
 	r.HandleFunc("/api/nodes/{pubkey}/health", s.handleNodeHealth).Methods("GET")
 	r.HandleFunc("/api/nodes/{pubkey}/paths", s.handleNodePaths).Methods("GET")
 	r.HandleFunc("/api/nodes/{pubkey}/analytics", s.handleNodeAnalytics).Methods("GET")
+	r.HandleFunc("/api/nodes/{pubkey}/neighbors", s.handleNodeNeighbors).Methods("GET")
 	r.HandleFunc("/api/nodes/{pubkey}", s.handleNodeDetail).Methods("GET")
 	r.HandleFunc("/api/nodes", s.handleNodes).Methods("GET")
 
@@ -134,19 +158,113 @@ func (s *Server) RegisterRoutes(r *mux.Router) {
 	r.HandleFunc("/api/analytics/channels", s.handleAnalyticsChannels).Methods("GET")
 	r.HandleFunc("/api/analytics/distance", s.handleAnalyticsDistance).Methods("GET")
 	r.HandleFunc("/api/analytics/hash-sizes", s.handleAnalyticsHashSizes).Methods("GET")
+	r.HandleFunc("/api/analytics/hash-collisions", s.handleAnalyticsHashCollisions).Methods("GET")
 	r.HandleFunc("/api/analytics/subpaths", s.handleAnalyticsSubpaths).Methods("GET")
+	r.HandleFunc("/api/analytics/subpaths-bulk", s.handleAnalyticsSubpathsBulk).Methods("GET")
 	r.HandleFunc("/api/analytics/subpath-detail", s.handleAnalyticsSubpathDetail).Methods("GET")
+	r.HandleFunc("/api/analytics/neighbor-graph", s.handleNeighborGraph).Methods("GET")
 
 	// Other endpoints
 	r.HandleFunc("/api/resolve-hops", s.handleResolveHops).Methods("GET")
+	r.HandleFunc("/api/channels/add", s.handleAddChannel).Methods("POST")
 	r.HandleFunc("/api/channels/{hash}/messages", s.handleChannelMessages).Methods("GET")
 	r.HandleFunc("/api/channels", s.handleChannels).Methods("GET")
+	r.HandleFunc("/api/observers/metrics/summary", s.handleMetricsSummary).Methods("GET")
+	r.HandleFunc("/api/observers/{id}/metrics", s.handleObserverMetrics).Methods("GET")
 	r.HandleFunc("/api/observers/{id}/analytics", s.handleObserverAnalytics).Methods("GET")
 	r.HandleFunc("/api/observers/{id}", s.handleObserverDetail).Methods("GET")
 	r.HandleFunc("/api/observers", s.handleObservers).Methods("GET")
 	r.HandleFunc("/api/traces/{hash}", s.handleTraces).Methods("GET")
 	r.HandleFunc("/api/iata-coords", s.handleIATACoords).Methods("GET")
 	r.HandleFunc("/api/audio-lab/buckets", s.handleAudioLabBuckets).Methods("GET")
+
+	// OpenAPI spec + Swagger UI
+	r.HandleFunc("/api/spec", s.handleOpenAPISpec).Methods("GET")
+	r.HandleFunc("/api/docs", s.handleSwaggerUI).Methods("GET")
+}
+
+// handleAddChannel allows users to register a new # channel for decryption.
+// Writes the name to user-channels.json in the data directory and signals
+// the ingestor process to reload via SIGUSR1.
+func (s *Server) handleAddChannel(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Name string `json:"name"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid JSON", http.StatusBadRequest)
+		return
+	}
+	name := strings.TrimSpace(req.Name)
+	if !strings.HasPrefix(name, "#") {
+		name = "#" + name
+	}
+	// Basic validation: must have at least one character after #, no spaces, printable ASCII.
+	inner := name[1:]
+	if len(inner) == 0 || len(inner) > 64 {
+		http.Error(w, "channel name must be 1–64 characters", http.StatusBadRequest)
+		return
+	}
+	for _, c := range inner {
+		if c > 127 || unicode.IsSpace(c) {
+			http.Error(w, "channel name must be ASCII with no spaces", http.StatusBadRequest)
+			return
+		}
+	}
+
+	// Derive AES key: SHA256(name)[:16].
+	h := sha256.Sum256([]byte(name))
+	key := hex.EncodeToString(h[:16])
+
+	// Persist to user-channels.json in the data directory.
+	dataDir := filepath.Dir(s.db.path)
+	userChannelsPath := filepath.Join(dataDir, "user-channels.json")
+
+	// Read existing list.
+	var names []string
+	if data, err := os.ReadFile(userChannelsPath); err == nil {
+		_ = json.Unmarshal(data, &names)
+	}
+	// Deduplicate.
+	exists := false
+	for _, n := range names {
+		if n == name {
+			exists = true
+			break
+		}
+	}
+	if !exists {
+		names = append(names, name)
+		data, _ := json.MarshalIndent(names, "", "  ")
+		if err := os.WriteFile(userChannelsPath, data, 0644); err != nil {
+			log.Printf("[channels] failed to write user-channels.json: %v", err)
+			http.Error(w, "failed to save channel", http.StatusInternalServerError)
+			return
+		}
+	}
+
+	// Signal ingestor to reload.
+	if err := exec.Command("pkill", "-USR1", "corescope-ingestor").Run(); err != nil {
+		log.Printf("[channels] failed to signal ingestor: %v", err)
+	} else {
+		log.Printf("[channels] signalled ingestor to reload keys")
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{
+		"name": name,
+		"key":  key,
+	})
+}
+
+func (s *Server) backfillStatusMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if s.store != nil && s.store.backfillComplete.Load() {
+			w.Header().Set("X-CoreScope-Status", "ready")
+		} else {
+			w.Header().Set("X-CoreScope-Status", "backfilling")
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 func (s *Server) perfMiddleware(next http.Handler) http.Handler {
@@ -159,10 +277,7 @@ func (s *Server) perfMiddleware(next http.Handler) http.Handler {
 		next.ServeHTTP(w, r)
 		ms := float64(time.Since(start).Microseconds()) / 1000.0
 
-		s.perfStats.Requests++
-		s.perfStats.TotalMs += ms
-
-		// Normalize key: prefer mux route template (like Node.js req.route.path)
+		// Normalize key outside lock (no shared state needed)
 		key := r.URL.Path
 		if route := mux.CurrentRoute(r); route != nil {
 			if tmpl, err := route.GetPathTemplate(); err == nil {
@@ -172,6 +287,11 @@ func (s *Server) perfMiddleware(next http.Handler) http.Handler {
 		if key == r.URL.Path {
 			key = perfHexFallback.ReplaceAllString(key, ":id")
 		}
+
+		s.perfStats.mu.Lock()
+		s.perfStats.Requests++
+		s.perfStats.TotalMs += ms
+
 		if _, ok := s.perfStats.Endpoints[key]; !ok {
 			s.perfStats.Endpoints[key] = &EndpointPerf{Recent: make([]float64, 0, 100)}
 		}
@@ -197,6 +317,26 @@ func (s *Server) perfMiddleware(next http.Handler) http.Handler {
 				s.perfStats.SlowQueries = s.perfStats.SlowQueries[1:]
 			}
 		}
+		s.perfStats.mu.Unlock()
+	})
+}
+
+func (s *Server) requireAPIKey(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if s.cfg == nil || s.cfg.APIKey == "" {
+			writeError(w, http.StatusForbidden, "write endpoints disabled — set apiKey in config.json")
+			return
+		}
+		key := r.Header.Get("X-API-Key")
+		if !constantTimeEqual(key, s.cfg.APIKey) {
+			writeError(w, http.StatusUnauthorized, "unauthorized")
+			return
+		}
+		if IsWeakAPIKey(key) {
+			writeError(w, http.StatusForbidden, "forbidden")
+			return
+		}
+		next.ServeHTTP(w, r)
 	})
 }
 
@@ -224,6 +364,8 @@ func (s *Server) handleConfigClient(w http.ResponseWriter, r *http.Request) {
 		CacheInvalidateMs:   s.cfg.CacheInvalidMs,
 		ExternalUrls:        s.cfg.ExternalUrls,
 		PropagationBufferMs: float64(s.cfg.PropagationBufferMs()),
+		Timestamps:          s.cfg.GetTimestampConfig(),
+		DebugAffinity:       s.cfg.DebugAffinity,
 	})
 }
 
@@ -254,6 +396,26 @@ func (s *Server) handleConfigTheme(w http.ResponseWriter, r *http.Request) {
 		"accentHover": "#6db3ff",
 		"navBg":       "#0f0f23",
 		"navBg2":      "#1a1a2e",
+		"navText":     "#ffffff",
+		"navTextMuted": "#cbd5e1",
+		"background":  "#f4f5f7",
+		"text":        "#1a1a2e",
+		"textMuted":   "#5b6370",
+		"border":      "#e2e5ea",
+		"surface1":    "#ffffff",
+		"surface2":    "#ffffff",
+		"surface3":    "#ffffff",
+		"sectionBg":   "#eef2ff",
+		"cardBg":      "#ffffff",
+		"contentBg":   "#f4f5f7",
+		"detailBg":    "#ffffff",
+		"inputBg":     "#ffffff",
+		"rowStripe":   "#f9fafb",
+		"rowHover":    "#eef2ff",
+		"selectedBg":  "#dbeafe",
+		"statusGreen": "#22c55e",
+		"statusYellow": "#eab308",
+		"statusRed":   "#ef4444",
 	}, s.cfg.Theme, theme.Theme)
 
 	nodeColors := mergeMap(map[string]interface{}{
@@ -264,15 +426,60 @@ func (s *Server) handleConfigTheme(w http.ResponseWriter, r *http.Request) {
 		"observer":  "#8b5cf6",
 	}, s.cfg.NodeColors, theme.NodeColors)
 
-	themeDark := mergeMap(map[string]interface{}{}, s.cfg.ThemeDark, theme.ThemeDark)
-	typeColors := mergeMap(map[string]interface{}{}, s.cfg.TypeColors, theme.TypeColors)
+	themeDark := mergeMap(map[string]interface{}{
+		"accent":      "#4a9eff",
+		"accentHover": "#6db3ff",
+		"navBg":       "#0f0f23",
+		"navBg2":      "#1a1a2e",
+		"navText":     "#ffffff",
+		"navTextMuted": "#cbd5e1",
+		"background":  "#0f0f23",
+		"text":        "#e2e8f0",
+		"textMuted":   "#a8b8cc",
+		"border":      "#334155",
+		"surface1":    "#1a1a2e",
+		"surface2":    "#232340",
+		"cardBg":      "#1a1a2e",
+		"contentBg":   "#0f0f23",
+		"detailBg":    "#232340",
+		"inputBg":     "#1e1e34",
+		"rowStripe":   "#1e1e34",
+		"rowHover":    "#2d2d50",
+		"selectedBg":  "#1e3a5f",
+		"statusGreen": "#22c55e",
+		"statusYellow": "#eab308",
+		"statusRed":   "#ef4444",
+		"surface3":    "#2d2d50",
+		"sectionBg":   "#1e1e34",
+	}, s.cfg.ThemeDark, theme.ThemeDark)
+	typeColors := mergeMap(map[string]interface{}{
+		"ADVERT":   "#22c55e",
+		"GRP_TXT":  "#3b82f6",
+		"TXT_MSG":  "#f59e0b",
+		"ACK":      "#6b7280",
+		"REQUEST":  "#a855f7",
+		"RESPONSE": "#06b6d4",
+		"TRACE":    "#ec4899",
+		"PATH":     "#14b8a6",
+		"ANON_REQ": "#f43f5e",
+		"UNKNOWN":  "#6b7280",
+	}, s.cfg.TypeColors, theme.TypeColors)
 
-	var home interface{}
-	if theme.Home != nil {
-		home = theme.Home
-	} else if s.cfg.Home != nil {
-		home = s.cfg.Home
+	defaultHome := map[string]interface{}{
+		"heroTitle":    "CoreScope",
+		"heroSubtitle": "Real-time MeshCore LoRa mesh network analyzer",
+		"steps": []interface{}{
+			map[string]interface{}{"emoji": "🔵", "title": "Connect via Bluetooth", "description": "Flash **BLE companion** firmware from [MeshCore Flasher](https://flasher.meshcore.co.uk/).\n- Screenless devices: default PIN `123456`\n- Screen devices: random PIN shown on display\n- If pairing fails: forget device, reboot, re-pair"},
+			map[string]interface{}{"emoji": "📻", "title": "Set the right frequency preset", "description": "**US Recommended:**\n`910.525 MHz · BW 62.5 kHz · SF 7 · CR 5`\nSelect **\"US Recommended\"** in the app or flasher."},
+			map[string]interface{}{"emoji": "📡", "title": "Advertise yourself", "description": "Tap the signal icon → **Flood** to broadcast your node to the mesh. Companions only advert when you trigger it manually."},
+			map[string]interface{}{"emoji": "🔁", "title": "Check \"Heard N repeats\"", "description": "- **\"Sent\"** = transmitted, no confirmation\n- **\"Heard 0 repeats\"** = no repeater picked it up\n- **\"Heard 1+ repeats\"** = you're on the mesh!"},
+		},
+		"footerLinks": []interface{}{
+			map[string]interface{}{"label": "📦 Packets", "url": "#/packets"},
+			map[string]interface{}{"label": "🗺️ Network Map", "url": "#/map"},
+		},
 	}
+	home := mergeMap(defaultHome, s.cfg.Home, theme.Home)
 
 	writeJSON(w, ThemeResponse{
 		Branding:   branding,
@@ -294,6 +501,15 @@ func (s *Server) handleConfigMap(w http.ResponseWriter, r *http.Request) {
 		zoom = 9
 	}
 	writeJSON(w, MapConfigResponse{Center: center, Zoom: zoom})
+}
+
+func (s *Server) handleConfigGeoFilter(w http.ResponseWriter, r *http.Request) {
+	gf := s.cfg.GeoFilter
+	if gf == nil || len(gf.Polygon) == 0 {
+		writeJSON(w, map[string]interface{}{"polygon": nil, "bufferKm": 0})
+		return
+	}
+	writeJSON(w, map[string]interface{}{"polygon": gf.Polygon, "bufferKm": gf.BufferKm})
 }
 
 // --- System Handlers ---
@@ -338,7 +554,8 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		lastPauseMs = float64(m.PauseNs[(m.NumGC+255)%256]) / 1e6
 	}
 
-	// Build slow queries list
+	// Build slow queries list (copy under lock)
+	s.perfStats.mu.Lock()
 	recentSlow := make([]SlowQuery, 0)
 	sliceEnd := s.perfStats.SlowQueries
 	if len(sliceEnd) > 5 {
@@ -347,6 +564,10 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	for _, sq := range sliceEnd {
 		recentSlow = append(recentSlow, sq)
 	}
+	perfRequests := s.perfStats.Requests
+	perfTotalMs := s.perfStats.TotalMs
+	perfSlowCount := len(s.perfStats.SlowQueries)
+	s.perfStats.mu.Unlock()
 
 	writeJSON(w, HealthResponse{
 		Status:      "ok",
@@ -376,9 +597,9 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 			EstimatedMB: pktEstMB,
 		},
 		Perf: HealthPerfStats{
-			TotalRequests: int(s.perfStats.Requests),
-			AvgMs:         safeAvg(s.perfStats.TotalMs, float64(s.perfStats.Requests)),
-			SlowQueries:   len(s.perfStats.SlowQueries),
+			TotalRequests: int(perfRequests),
+			AvgMs:         safeAvg(perfTotalMs, float64(perfRequests)),
+			SlowQueries:   perfSlowCount,
 			RecentSlow:    recentSlow,
 		},
 	})
@@ -408,6 +629,19 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	counts := s.db.GetRoleCounts()
+
+	// Compute backfill progress
+	backfilling := s.store != nil && !s.store.backfillComplete.Load()
+	var backfillProgress float64
+	if backfilling && s.store != nil && s.store.backfillTotal.Load() > 0 {
+		backfillProgress = float64(s.store.backfillProcessed.Load()) / float64(s.store.backfillTotal.Load())
+		if backfillProgress > 1 {
+			backfillProgress = 1
+		}
+	} else if !backfilling {
+		backfillProgress = 1
+	}
+
 	resp := &StatsResponse{
 		TotalPackets:       stats.TotalPackets,
 		TotalTransmissions: &stats.TotalTransmissions,
@@ -427,6 +661,8 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 			Companions: counts["companions"],
 			Sensors:    counts["sensors"],
 		},
+		Backfilling:      backfilling,
+		BackfillProgress: backfillProgress,
 	}
 
 	s.statsMu.Lock()
@@ -438,22 +674,50 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handlePerf(w http.ResponseWriter, r *http.Request) {
-	// Endpoint performance summary
+	// Copy perfStats under lock to avoid data races
+	s.perfStats.mu.Lock()
+	type epSnapshot struct {
+		path    string
+		count   int
+		totalMs float64
+		maxMs   float64
+		recent  []float64
+	}
+	epSnapshots := make([]epSnapshot, 0, len(s.perfStats.Endpoints))
+	for path, ep := range s.perfStats.Endpoints {
+		recentCopy := make([]float64, len(ep.Recent))
+		copy(recentCopy, ep.Recent)
+		epSnapshots = append(epSnapshots, epSnapshot{path, ep.Count, ep.TotalMs, ep.MaxMs, recentCopy})
+	}
+	uptimeSec := int(time.Since(s.perfStats.StartedAt).Seconds())
+	totalRequests := s.perfStats.Requests
+	totalMs := s.perfStats.TotalMs
+	slowQueries := make([]SlowQuery, 0)
+	sliceEnd := s.perfStats.SlowQueries
+	if len(sliceEnd) > 20 {
+		sliceEnd = sliceEnd[len(sliceEnd)-20:]
+	}
+	for _, sq := range sliceEnd {
+		slowQueries = append(slowQueries, sq)
+	}
+	s.perfStats.mu.Unlock()
+
+	// Process snapshots outside lock
 	type epEntry struct {
 		path string
 		data *EndpointStatsResp
 	}
 	var entries []epEntry
-	for path, ep := range s.perfStats.Endpoints {
-		sorted := sortedCopy(ep.Recent)
+	for _, snap := range epSnapshots {
+		sorted := sortedCopy(snap.recent)
 		d := &EndpointStatsResp{
-			Count: ep.Count,
-			AvgMs: safeAvg(ep.TotalMs, float64(ep.Count)),
+			Count: snap.count,
+			AvgMs: safeAvg(snap.totalMs, float64(snap.count)),
 			P50Ms: round(percentile(sorted, 0.5), 1),
 			P95Ms: round(percentile(sorted, 0.95), 1),
-			MaxMs: round(ep.MaxMs, 1),
+			MaxMs: round(snap.maxMs, 1),
 		}
-		entries = append(entries, epEntry{path, d})
+		entries = append(entries, epEntry{snap.path, d})
 	}
 	// Sort by total time spent (count * avg) descending, matching Node.js
 	sort.Slice(entries, func(i, j int) bool {
@@ -494,22 +758,10 @@ func (s *Server) handlePerf(w http.ResponseWriter, r *http.Request) {
 		sqliteStats = &ss
 	}
 
-	uptimeSec := int(time.Since(s.perfStats.StartedAt).Seconds())
-
-	// Convert slow queries
-	slowQueries := make([]SlowQuery, 0)
-	sliceEnd := s.perfStats.SlowQueries
-	if len(sliceEnd) > 20 {
-		sliceEnd = sliceEnd[len(sliceEnd)-20:]
-	}
-	for _, sq := range sliceEnd {
-		slowQueries = append(slowQueries, sq)
-	}
-
 	writeJSON(w, PerfResponse{
 		Uptime:        uptimeSec,
-		TotalRequests: s.perfStats.Requests,
-		AvgMs:         safeAvg(s.perfStats.TotalMs, float64(s.perfStats.Requests)),
+		TotalRequests: totalRequests,
+		AvgMs:         safeAvg(totalMs, float64(totalRequests)),
 		Endpoints:     summary,
 		SlowQueries:   slowQueries,
 		Cache:         perfCS,
@@ -533,7 +785,13 @@ func (s *Server) handlePerf(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handlePerfReset(w http.ResponseWriter, r *http.Request) {
-	s.perfStats = NewPerfStats()
+	s.perfStats.mu.Lock()
+	s.perfStats.Requests = 0
+	s.perfStats.TotalMs = 0
+	s.perfStats.Endpoints = make(map[string]*EndpointPerf)
+	s.perfStats.SlowQueries = make([]SlowQuery, 0)
+	s.perfStats.StartedAt = time.Now()
+	s.perfStats.mu.Unlock()
 	writeJSON(w, OkResp{Ok: true})
 }
 
@@ -581,13 +839,14 @@ func (s *Server) handlePackets(w http.ResponseWriter, r *http.Request) {
 	q := PacketQuery{
 		Limit:    queryInt(r, "limit", 50),
 		Offset:   queryInt(r, "offset", 0),
-		Observer: r.URL.Query().Get("observer"),
-		Hash:     r.URL.Query().Get("hash"),
-		Since:    r.URL.Query().Get("since"),
-		Until:    r.URL.Query().Get("until"),
-		Region:   r.URL.Query().Get("region"),
-		Node:     r.URL.Query().Get("node"),
-		Order:    "DESC",
+		Observer: queryString(r, "observer", 256),
+		Hash:     queryString(r, "hash", 128),
+		Since:    queryString(r, "since", 64),
+		Until:    queryString(r, "until", 64),
+		Region:   queryString(r, "region", 32),
+		Node:     queryString(r, "node", 256),
+		Order:              "DESC",
+		ExpandObservations: r.URL.Query().Get("expand") == "observations",
 	}
 	if r.URL.Query().Get("order") == "asc" {
 		q.Order = "ASC"
@@ -629,13 +888,6 @@ func (s *Server) handlePackets(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Strip observations from default response
-	if r.URL.Query().Get("expand") != "observations" {
-		for _, p := range result.Packets {
-			delete(p, "observations")
-		}
-	}
-
 	writeJSON(w, result)
 }
 
@@ -659,6 +911,38 @@ var muxBraceParam = regexp.MustCompile(`\{([^}]+)\}`)
 
 // perfHexFallback matches hex IDs for perf path normalization fallback.
 var perfHexFallback = regexp.MustCompile(`[0-9a-f]{8,}`)
+
+// handleBatchObservations returns observations for multiple hashes in a single request.
+// POST /api/packets/observations with JSON body: {"hashes": ["abc123", "def456", ...]}
+// Response: {"results": {"abc123": [...observations...], "def456": [...], ...}}
+// Limited to 200 hashes per request to prevent abuse.
+func (s *Server) handleBatchObservations(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Hashes []string `json:"hashes"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, 400, "invalid JSON body")
+		return
+	}
+	const maxHashes = 200
+	if len(body.Hashes) > maxHashes {
+		writeError(w, 400, fmt.Sprintf("too many hashes (max %d)", maxHashes))
+		return
+	}
+	if len(body.Hashes) == 0 {
+		writeJSON(w, map[string]interface{}{"results": map[string]interface{}{}})
+		return
+	}
+
+	results := make(map[string][]ObservationResp, len(body.Hashes))
+	if s.store != nil {
+		for _, hash := range body.Hashes {
+			obs := s.store.GetObservationsForHash(hash)
+			results[hash] = mapSliceToObservations(obs)
+		}
+	}
+	writeJSON(w, map[string]interface{}{"results": results})
+}
 
 func (s *Server) handlePacketDetail(w http.ResponseWriter, r *http.Request) {
 	param := mux.Vars(r)["id"]
@@ -703,10 +987,11 @@ func (s *Server) handlePacketDetail(w http.ResponseWriter, r *http.Request) {
 		pathHops = []interface{}{}
 	}
 
+	rawHex, _ := packet["raw_hex"].(string)
 	writeJSON(w, PacketDetailResponse{
 		Packet:           packet,
 		Path:             pathHops,
-		Breakdown:        struct{}{},
+		Breakdown:        BuildBreakdown(rawHex),
 		ObservationCount: observationCount,
 		Observations:     mapSliceToObservations(observations),
 	})
@@ -830,11 +1115,21 @@ func (s *Server) handleNodes(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+	if s.cfg.GeoFilter != nil {
+		filtered := nodes[:0]
+		for _, node := range nodes {
+			if NodePassesGeoFilter(node["lat"], node["lon"], s.cfg.GeoFilter) {
+				filtered = append(filtered, node)
+			}
+		}
+		total = len(filtered)
+		nodes = filtered
+	}
 	writeJSON(w, NodeListResponse{Nodes: nodes, Total: total, Counts: counts})
 }
 
 func (s *Server) handleNodeSearch(w http.ResponseWriter, r *http.Request) {
-	q := r.URL.Query().Get("q")
+	q := queryString(r, "q", 256)
 	if strings.TrimSpace(q) == "" {
 		writeJSON(w, NodeSearchResponse{Nodes: []map[string]interface{}{}})
 		return
@@ -923,16 +1218,55 @@ func (s *Server) handleNodePaths(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	prefix1 := strings.ToLower(pubkey)
-	if len(prefix1) > 2 {
-		prefix1 = prefix1[:2]
-	}
-	prefix2 := strings.ToLower(pubkey)
+	// Use the precomputed byPathHop index instead of scanning all packets.
+	// Look up by full pubkey (resolved hops) and by short prefixes (raw hops).
+	lowerPK := strings.ToLower(pubkey)
+	prefix2 := lowerPK
 	if len(prefix2) > 4 {
 		prefix2 = prefix2[:4]
 	}
+	prefix1 := lowerPK
+	if len(prefix1) > 2 {
+		prefix1 = prefix1[:2]
+	}
+
 	s.store.mu.RLock()
 	_, pm := s.store.getCachedNodesAndPM()
+
+	// Collect candidate transmissions from the index, deduplicating by tx ID.
+	seen := make(map[int]bool)
+	var candidates []*StoreTx
+	addCandidates := func(key string) {
+		for _, tx := range s.store.byPathHop[key] {
+			if !seen[tx.ID] {
+				seen[tx.ID] = true
+				candidates = append(candidates, tx)
+			}
+		}
+	}
+	addCandidates(lowerPK) // full pubkey match (from resolved_path)
+	addCandidates(prefix1) // 2-char raw hop match
+	addCandidates(prefix2) // 4-char raw hop match
+	// Also check any raw hops that start with prefix2 (longer prefixes).
+	// Raw hops are typically 2 chars, so iterate only keys with HasPrefix
+	// on the small set of index keys rather than all packets.
+	for key := range s.store.byPathHop {
+		if len(key) > 4 && len(key) < len(lowerPK) && strings.HasPrefix(key, prefix2) {
+			addCandidates(key)
+		}
+	}
+
+	// Post-filter: verify target node actually appears in each candidate's resolved_path.
+	// The byPathHop index uses short prefixes which can collide (e.g. "c0" matches multiple nodes).
+	// We lean on resolved_path (from neighbor affinity graph) to disambiguate.
+	filtered := candidates[:0] // reuse backing array
+	for _, tx := range candidates {
+		if nodeInResolvedPath(tx, lowerPK) {
+			filtered = append(filtered, tx)
+		}
+	}
+	candidates = filtered
+
 	type pathAgg struct {
 		Hops       []PathHopResp
 		Count      int
@@ -946,28 +1280,13 @@ func (s *Server) handleNodePaths(w http.ResponseWriter, r *http.Request) {
 		if cached, ok := hopCache[hop]; ok {
 			return cached
 		}
-		r := pm.resolve(hop)
+		r, _, _ := pm.resolveWithContext(hop, nil, s.store.graph)
 		hopCache[hop] = r
 		return r
 	}
-	for _, tx := range s.store.packets {
-		hops := txGetParsedPath(tx)
-		if len(hops) == 0 {
-			continue
-		}
-		found := false
-		for _, hop := range hops {
-			hl := strings.ToLower(hop)
-			if hl == prefix1 || hl == prefix2 || strings.HasPrefix(hl, prefix2) {
-				found = true
-				break
-			}
-		}
-		if !found {
-			continue
-		}
-
+	for _, tx := range candidates {
 		totalTransmissions++
+		hops := txGetParsedPath(tx)
 		resolvedHops := make([]PathHopResp, len(hops))
 		sigParts := make([]string, len(hops))
 		for i, hop := range hops {
@@ -1165,6 +1484,18 @@ func (s *Server) handleAnalyticsHashSizes(w http.ResponseWriter, r *http.Request
 	})
 }
 
+func (s *Server) handleAnalyticsHashCollisions(w http.ResponseWriter, r *http.Request) {
+	if s.store != nil {
+		region := r.URL.Query().Get("region")
+		writeJSON(w, s.store.GetAnalyticsHashCollisions(region))
+		return
+	}
+	writeJSON(w, map[string]interface{}{
+		"inconsistent_nodes": []interface{}{},
+		"by_size":            map[string]interface{}{},
+	})
+}
+
 func (s *Server) handleAnalyticsSubpaths(w http.ResponseWriter, r *http.Request) {
 	if s.store != nil {
 		region := r.URL.Query().Get("region")
@@ -1181,6 +1512,57 @@ func (s *Server) handleAnalyticsSubpaths(w http.ResponseWriter, r *http.Request)
 		Subpaths:   []SubpathResp{},
 		TotalPaths: 0,
 	})
+}
+
+// handleAnalyticsSubpathsBulk returns multiple length-range buckets in a single
+// response, avoiding repeated scans of the same packet data. Query format:
+//   ?groups=2-2:50,3-3:30,4-4:20,5-8:15   (minLen-maxLen:limit per group)
+func (s *Server) handleAnalyticsSubpathsBulk(w http.ResponseWriter, r *http.Request) {
+	region := r.URL.Query().Get("region")
+	groupsParam := r.URL.Query().Get("groups")
+	if groupsParam == "" {
+		writeJSON(w, ErrorResp{Error: "groups parameter required (e.g. groups=2-2:50,3-3:30)"})
+		return
+	}
+
+	var groups []subpathGroup
+	for _, g := range strings.Split(groupsParam, ",") {
+		parts := strings.SplitN(g, ":", 2)
+		if len(parts) != 2 {
+			writeJSON(w, ErrorResp{Error: "invalid group format: " + g})
+			return
+		}
+		rangeParts := strings.SplitN(parts[0], "-", 2)
+		if len(rangeParts) != 2 {
+			writeJSON(w, ErrorResp{Error: "invalid range format: " + parts[0]})
+			return
+		}
+		mn, err1 := strconv.Atoi(rangeParts[0])
+		mx, err2 := strconv.Atoi(rangeParts[1])
+		lim, err3 := strconv.Atoi(parts[1])
+		if err1 != nil || err2 != nil || err3 != nil || mn < 2 || mx < mn || lim < 1 {
+			writeJSON(w, ErrorResp{Error: "invalid group: " + g})
+			return
+		}
+		groups = append(groups, subpathGroup{mn, mx, lim})
+	}
+
+	if s.store == nil {
+		results := make([]map[string]interface{}, len(groups))
+		for i := range groups {
+			results[i] = map[string]interface{}{"subpaths": []interface{}{}, "totalPaths": 0}
+		}
+		writeJSON(w, map[string]interface{}{"results": results})
+		return
+	}
+
+	results := s.store.GetAnalyticsSubpathsBulk(region, groups)
+	writeJSON(w, map[string]interface{}{"results": results})
+}
+
+// subpathGroup defines a length-range + limit for the bulk subpaths endpoint.
+type subpathGroup struct {
+	MinLen, MaxLen, Limit int
 }
 
 func (s *Server) handleAnalyticsSubpathDetail(w http.ResponseWriter, r *http.Request) {
@@ -1222,43 +1604,128 @@ func (s *Server) handleResolveHops(w http.ResponseWriter, r *http.Request) {
 	hops := strings.Split(hopsParam, ",")
 	resolved := map[string]*HopResolution{}
 
+	// Context for affinity-based disambiguation.
+	fromNode := r.URL.Query().Get("from_node")
+	observer := r.URL.Query().Get("observer")
+	var contextPubkeys []string
+	if fromNode != "" {
+		contextPubkeys = append(contextPubkeys, fromNode)
+	}
+	if observer != "" {
+		contextPubkeys = append(contextPubkeys, observer)
+	}
+
+	// Get the neighbor graph for affinity scoring (may be nil).
+	var graph *NeighborGraph
+	if len(contextPubkeys) > 0 {
+		graph = s.getNeighborGraph()
+	}
+
+	// Get the server's prefix map for resolveWithContext.
+	var pm *prefixMap
+	if s.store != nil {
+		s.store.mu.RLock()
+		_, pm = s.store.getCachedNodesAndPM()
+		s.store.mu.RUnlock()
+	}
+
 	for _, hop := range hops {
 		if hop == "" {
 			continue
 		}
 		hopLower := strings.ToLower(hop)
-		rows, err := s.db.conn.Query("SELECT public_key, name, lat, lon FROM nodes WHERE LOWER(public_key) LIKE ?", hopLower+"%")
-		if err != nil {
-			resolved[hop] = &HopResolution{Name: nil, Candidates: []HopCandidate{}, Conflicts: []interface{}{}}
-			continue
-		}
 
+		// Resolve candidates from the in-memory prefix map instead of
+		// issuing per-hop DB queries (fixes N+1 pattern, see #369).
 		var candidates []HopCandidate
-		for rows.Next() {
-			var pk string
-			var name sql.NullString
-			var lat, lon sql.NullFloat64
-			rows.Scan(&pk, &name, &lat, &lon)
-			candidates = append(candidates, HopCandidate{
-				Name: nullStr(name), Pubkey: pk,
-				Lat: nullFloat(lat), Lon: nullFloat(lon),
-			})
+		if pm != nil {
+			if matched, ok := pm.m[hopLower]; ok {
+				for _, ni := range matched {
+					c := HopCandidate{Pubkey: ni.PublicKey}
+					if ni.Name != "" {
+						c.Name = ni.Name
+					}
+					if ni.HasGPS {
+						c.Lat = ni.Lat
+						c.Lon = ni.Lon
+					}
+					candidates = append(candidates, c)
+				}
+			}
 		}
-		rows.Close()
 
 		if len(candidates) == 0 {
-			resolved[hop] = &HopResolution{Name: nil, Candidates: []HopCandidate{}, Conflicts: []interface{}{}}
+			resolved[hop] = &HopResolution{Name: nil, Candidates: []HopCandidate{}, Conflicts: []interface{}{}, Confidence: "no_match"}
 		} else if len(candidates) == 1 {
 			resolved[hop] = &HopResolution{
 				Name: candidates[0].Name, Pubkey: candidates[0].Pubkey,
 				Candidates: candidates, Conflicts: []interface{}{},
+				Confidence: "unique_prefix",
 			}
 		} else {
+			// Compute affinity scores for each candidate if we have context.
+			if graph != nil && len(contextPubkeys) > 0 {
+				now := time.Now()
+				for i := range candidates {
+					candPK := strings.ToLower(candidates[i].Pubkey)
+					bestScore := 0.0
+					for _, ctxPK := range contextPubkeys {
+						edges := graph.Neighbors(strings.ToLower(ctxPK))
+						for _, e := range edges {
+							if e.Ambiguous {
+								continue
+							}
+							otherPK := e.NodeA
+							if strings.EqualFold(otherPK, ctxPK) {
+								otherPK = e.NodeB
+							}
+							if strings.EqualFold(otherPK, candPK) {
+								sc := e.Score(now)
+								if sc > bestScore {
+									bestScore = sc
+								}
+							}
+						}
+					}
+					if bestScore > 0 {
+						s := bestScore
+						candidates[i].AffinityScore = &s
+					}
+				}
+			}
+
+			// Use resolveWithContext for 4-tier disambiguation.
+			var best *nodeInfo
+			var confidence string
+			if pm != nil {
+				best, confidence, _ = pm.resolveWithContext(hopLower, contextPubkeys, graph)
+			}
+
 			ambig := true
-			resolved[hop] = &HopResolution{
+			hr := &HopResolution{
 				Name: candidates[0].Name, Pubkey: candidates[0].Pubkey,
 				Ambiguous: &ambig, Candidates: candidates, Conflicts: hopCandidatesToConflicts(candidates),
+				Confidence: "ambiguous",
 			}
+
+			// Use the resolved node as the default (best-effort pick).
+			if best != nil {
+				hr.Name = best.Name
+				hr.Pubkey = best.PublicKey
+			}
+
+			// Only promote to bestCandidate when affinity is confident.
+			if confidence == "neighbor_affinity" && best != nil {
+				pk := best.PublicKey
+				hr.BestCandidate = &pk
+				hr.Confidence = "neighbor_affinity"
+			} else if (confidence == "geo_proximity" || confidence == "gps_preference" || confidence == "first_match") && best != nil {
+				// Propagate lower-priority tiers so the API reflects the actual
+				// resolution strategy used, rather than collapsing everything to "ambiguous".
+				hr.Confidence = confidence
+			}
+
+			resolved[hop] = hr
 		}
 	}
 	writeJSON(w, ResolveHopsResponse{Resolved: resolved})
@@ -1283,12 +1750,13 @@ func (s *Server) handleChannelMessages(w http.ResponseWriter, r *http.Request) {
 	hash := mux.Vars(r)["hash"]
 	limit := queryInt(r, "limit", 100)
 	offset := queryInt(r, "offset", 0)
+	region := r.URL.Query().Get("region")
 	if s.store != nil {
-		messages, total := s.store.GetChannelMessages(hash, limit, offset)
+		messages, total := s.store.GetChannelMessages(hash, limit, offset, region)
 		writeJSON(w, ChannelMessagesResponse{Messages: messages, Total: total})
 		return
 	}
-	messages, total, err := s.db.GetChannelMessages(hash, limit, offset)
+	messages, total, err := s.db.GetChannelMessages(hash, limit, offset, region)
 	if err != nil {
 		writeError(w, 500, err.Error())
 		return
@@ -1307,8 +1775,12 @@ func (s *Server) handleObservers(w http.ResponseWriter, r *http.Request) {
 	oneHourAgo := time.Now().Add(-1 * time.Hour).Unix()
 	pktCounts := s.db.GetObserverPacketCounts(oneHourAgo)
 
-	// Batch lookup: node locations (observer ID may match a node public_key)
-	nodeLocations := s.db.GetNodeLocations()
+	// Batch lookup: node locations only for observer IDs (not all nodes)
+	observerIDs := make([]string, len(observers))
+	for i, o := range observers {
+		observerIDs[i] = o.ID
+	}
+	nodeLocations := s.db.GetNodeLocationsByKeys(observerIDs)
 
 	result := make([]ObserverResp, 0, len(observers))
 	for _, o := range observers {
@@ -1671,7 +2143,32 @@ func queryInt(r *http.Request, key string, def int) int {
 	if err != nil {
 		return def
 	}
+	if n < 0 {
+		return 0
+	}
+	// Enforce per-key maximums to prevent runaway queries
+	switch key {
+	case "limit":
+		if n > 5000 {
+			n = 5000
+		}
+	case "offset":
+		if n > 500000 {
+			n = 500000
+		}
+	}
 	return n
+}
+
+// queryString returns a query parameter value capped to maxLen bytes.
+// Returns "" if the value exceeds the limit, preventing oversized inputs from
+// reaching database queries.
+func queryString(r *http.Request, key string, maxLen int) string {
+	v := r.URL.Query().Get(key)
+	if len(v) > maxLen {
+		return ""
+	}
+	return v
 }
 
 func mergeMap(base map[string]interface{}, overlays ...map[string]interface{}) map[string]interface{} {
@@ -1719,13 +2216,7 @@ func percentile(sorted []float64, p float64) float64 {
 func sortedCopy(arr []float64) []float64 {
 	cp := make([]float64, len(arr))
 	copy(cp, arr)
-	for i := 0; i < len(cp); i++ {
-		for j := i + 1; j < len(cp); j++ {
-			if cp[j] < cp[i] {
-				cp[i], cp[j] = cp[j], cp[i]
-			}
-		}
-	}
+	sort.Float64s(cp)
 	return cp
 }
 
@@ -1764,6 +2255,9 @@ func mapSliceToTransmissions(maps []map[string]interface{}) []TransmissionResp {
 		tx.PathJSON = m["path_json"]
 		tx.Direction = m["direction"]
 		tx.Score = m["score"]
+		if rp, ok := m["resolved_path"].([]*string); ok {
+			tx.ResolvedPath = rp
+		}
 		result = append(result, tx)
 	}
 	return result
@@ -1785,6 +2279,9 @@ func mapSliceToObservations(maps []map[string]interface{}) []ObservationResp {
 		obs.RSSI = m["rssi"]
 		obs.PathJSON = m["path_json"]
 		obs.Timestamp = m["timestamp"]
+		if rp, ok := m["resolved_path"].([]*string); ok {
+			obs.ResolvedPath = rp
+		}
 		result = append(result, obs)
 	}
 	return result
@@ -1815,4 +2312,136 @@ func nullFloatVal(n sql.NullFloat64) float64 {
 		return n.Float64
 	}
 	return 0
+}
+
+func (s *Server) handleObserverMetrics(w http.ResponseWriter, r *http.Request) {
+	id := mux.Vars(r)["id"]
+	since := r.URL.Query().Get("since")
+	until := r.URL.Query().Get("until")
+	resolution := r.URL.Query().Get("resolution")
+
+	// Default to last 24h if no since provided
+	if since == "" {
+		since = time.Now().UTC().Add(-24 * time.Hour).Format(time.RFC3339)
+	}
+
+	// Validate resolution
+	if resolution == "" {
+		resolution = "5m"
+	}
+	switch resolution {
+	case "5m", "1h", "1d":
+		// valid
+	default:
+		writeError(w, 400, "invalid resolution: "+resolution+". Must be 5m, 1h, or 1d")
+		return
+	}
+
+	// Sample interval (default 300s = 5min)
+	sampleInterval := 300
+
+	metrics, reboots, err := s.db.GetObserverMetrics(id, since, until, resolution, sampleInterval)
+	if err != nil {
+		writeError(w, 500, err.Error())
+		return
+	}
+	if metrics == nil {
+		metrics = []MetricsSample{}
+	}
+	if reboots == nil {
+		reboots = []string{}
+	}
+
+	// Get observer name
+	obs, _ := s.db.GetObserverByID(id)
+	var name *string
+	if obs != nil {
+		name = obs.Name
+	}
+
+	writeJSON(w, map[string]interface{}{
+		"observer_id":   id,
+		"observer_name": name,
+		"reboots":       reboots,
+		"metrics":       metrics,
+	})
+}
+
+func (s *Server) handleMetricsSummary(w http.ResponseWriter, r *http.Request) {
+	window := r.URL.Query().Get("window")
+	if window == "" {
+		window = "24h"
+	}
+	region := r.URL.Query().Get("region")
+
+	// Parse window duration
+	dur, err := parseWindowDuration(window)
+	if err != nil {
+		writeError(w, 400, "invalid window: "+window)
+		return
+	}
+
+	since := time.Now().UTC().Add(-dur).Format(time.RFC3339)
+	summary, err := s.db.GetMetricsSummary(since)
+	if err != nil {
+		writeError(w, 500, err.Error())
+		return
+	}
+	if summary == nil {
+		summary = []MetricsSummaryRow{}
+	}
+
+	// Filter by region if specified
+	if region != "" {
+		filtered := make([]MetricsSummaryRow, 0)
+		for _, row := range summary {
+			if strings.EqualFold(row.IATA, region) {
+				filtered = append(filtered, row)
+			}
+		}
+		summary = filtered
+	}
+
+	writeJSON(w, map[string]interface{}{
+		"observers": summary,
+	})
+}
+
+// parseWindowDuration parses strings like "24h", "3d", "7d", "30d".
+func parseWindowDuration(window string) (time.Duration, error) {
+	if strings.HasSuffix(window, "d") {
+		daysStr := strings.TrimSuffix(window, "d")
+		days, err := strconv.Atoi(daysStr)
+		if err != nil || days <= 0 {
+			return 0, fmt.Errorf("invalid days: %s", daysStr)
+		}
+		return time.Duration(days) * 24 * time.Hour, nil
+	}
+	return time.ParseDuration(window)
+}
+
+func (s *Server) handleAdminPrune(w http.ResponseWriter, r *http.Request) {
+	days := 0
+	if d := r.URL.Query().Get("days"); d != "" {
+		fmt.Sscanf(d, "%d", &days)
+	}
+	if days <= 0 && s.cfg.Retention != nil {
+		days = s.cfg.Retention.PacketDays
+	}
+	if days <= 0 {
+		writeError(w, 400, "days parameter required (or set retention.packetDays in config)")
+		return
+	}
+	n, err := s.db.PruneOldPackets(days)
+	if err != nil {
+		writeError(w, 500, err.Error())
+		return
+	}
+	log.Printf("[prune] deleted %d transmissions older than %d days", n, days)
+	writeJSON(w, map[string]interface{}{"deleted": n, "days": days})
+}
+
+// constantTimeEqual compares two strings in constant time to prevent timing attacks.
+func constantTimeEqual(a, b string) bool {
+	return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
 }
