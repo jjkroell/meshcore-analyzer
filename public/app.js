@@ -600,6 +600,7 @@ function navigate() {
   // Pages with fixed-height containers (maps, virtual-scroll, split-panels)
   const fixedPages = { packets: 1, nodes: 1, map: 1, live: 1, channels: 1, 'audio-lab': 1 };
   app.classList.toggle('app-fixed', basePage in fixedPages);
+  window.scrollTo(0, 0);
   if (pages[basePage]?.init) {
     const t0 = performance.now();
     pages[basePage].init(app, routeParam);

@@ -19,12 +19,19 @@
   };
 
   function init(app) {
+    const isMobile = window.matchMedia('(max-width: 1023px)').matches;
     app.innerHTML = `
       <div class="observers-page">
         <div class="page-header">
           <h2>Observer Status</h2>
         </div>
-        <div id="obsRegionFilter" class="region-filter-container" style="margin-bottom:16px"></div>
+        <div class="obs-toolbar">
+          <div id="obsRegionFilter" class="region-filter-container"></div>
+          ${isMobile ? `<button class="obs-refresh-btn" data-action="obs-refresh" title="Refresh observer data" aria-label="Refresh">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+            Refresh
+          </button>` : ''}
+        </div>
         <div id="obsContent"><div class="text-center text-muted" style="padding:40px">Loading…</div></div>
       </div>`;
     RegionFilter.init(document.getElementById('obsRegionFilter'));
@@ -45,11 +52,13 @@
       e.preventDefault();
       location.hash = row.dataset.value;
     });
-    // Auto-refresh every 30s
-    refreshTimer = setInterval(loadObservers, 30000);
-    wsHandler = debouncedOnWS(function (msgs) {
-      if (msgs.some(function (m) { return m.type === 'packet'; })) loadObservers();
-    });
+    // On mobile/tablet: snapshot only — no auto-refresh or WS-driven reloads
+    if (!isMobile) {
+      refreshTimer = setInterval(loadObservers, 30000);
+      wsHandler = debouncedOnWS(function (msgs) {
+        if (msgs.some(function (m) { return m.type === 'packet'; })) loadObservers();
+      });
+    }
   }
 
   function destroy() {
