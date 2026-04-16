@@ -32,7 +32,7 @@
       <style>
         @keyframes eggFadeIn { from { opacity:0; transform:scale(0.92); } to { opacity:1; transform:scale(1); } }
         @keyframes eggSpin { 0% { transform:rotate(0deg) scale(1); } 50% { transform:rotate(180deg) scale(1.08); } 100% { transform:rotate(360deg) scale(1); } }
-        #easterEggLogo { animation: eggSpin 8s linear infinite; filter:brightness(0) invert(1) drop-shadow(0 0 28px rgba(74,158,255,0.7)); }
+        #easterEggLogo { animation: eggSpin 8s linear infinite; filter:brightness(0) drop-shadow(0 0 2px #fff) drop-shadow(0 0 2px #fff) drop-shadow(0 0 2px #fff) drop-shadow(0 0 28px rgba(74,158,255,0.7)); }
         #easterEggOverlay h2 { color:#fff; font-size:1.6rem; font-weight:700; margin:28px 0 8px; letter-spacing:0.04em; }
         #easterEggOverlay p { color:#64748b; font-size:0.9rem; margin:0; }
         #easterEggOverlay small { color:#334155; font-size:0.75rem; margin-top:32px; }
