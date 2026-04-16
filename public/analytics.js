@@ -1510,7 +1510,7 @@
       toggle.addEventListener('change', applyCollisionFilter);
       applyCollisionFilter();
     } catch (e) {
-      el.innerHTML = `<div class="text-muted">Error loading subpath data: ${e.message}</div>`;
+      el.innerHTML = `<div class="text-muted">Error loading subpath data: ${esc(e.message)}</div>`;
     }
   }
 
@@ -1522,7 +1522,7 @@
       const data = await api('/analytics/subpath-detail?hops=' + encodeURIComponent(hopsStr), { ttl: CLIENT_TTL.analyticsRF });
       renderSubpathDetail(panel, data);
     } catch (e) {
-      panel.innerHTML = `<div class="text-muted">Error: ${e.message}</div>`;
+      panel.innerHTML = `<div class="text-muted">Error: ${esc(e.message)}</div>`;
     }
   }
 
@@ -2933,7 +2933,7 @@ function destroy() { _analyticsData = {}; _channelData = null; if (_ngState && _
       container.innerHTML = `
         <div class="rf-detail-header">
           <h3>${esc(name)}</h3>
-          <button class="rf-detail-close" aria-label="Close detail" title="Close">✕</button>
+          <button class="rf-detail-close" aria-label="Close detail" data-tooltip="Close">✕</button>
         </div>
         <div class="rf-detail-charts">
           <div class="rf-detail-chart" id="rfDetailNFChart"></div>

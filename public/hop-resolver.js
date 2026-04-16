@@ -5,7 +5,9 @@
 window.HopResolver = (function() {
   'use strict';
 
-  const MAX_HOP_DIST = 1.8; // ~200km in degrees
+  const MAX_HOP_DIST_KM = 100; // max plausible single-hop distance on 915MHz LoRa
+  // Typical range is 10–50km; 100km is generous for elevated hilltop nodes with
+  // clear LOS over water. Anything beyond this is almost certainly a wrong resolution.
   const REGION_RADIUS_KM = 300;
   let prefixIdx = {};   // lowercase hex prefix → [node, ...]
   let pubkeyIdx = {};   // full lowercase pubkey → node (O(1) lookup)
@@ -217,21 +219,35 @@ window.HopResolver = (function() {
       nextResolvedPubkey = picked.pubkey;
     }
 
-    // Sanity check: drop hops impossibly far from neighbors
+    // Sanity check: drop hops impossibly far from neighbors (haversine, not degree-based)
     for (let i = 0; i < hops.length; i++) {
       const pos = hopPositions[hops[i]];
       if (!pos) continue;
       const prev = i > 0 ? hopPositions[hops[i - 1]] : null;
       const next = i < hops.length - 1 ? hopPositions[hops[i + 1]] : null;
       if (!prev && !next) continue;
-      const dPrev = prev ? dist(pos.lat, pos.lon, prev.lat, prev.lon) : 0;
-      const dNext = next ? dist(pos.lat, pos.lon, next.lat, next.lon) : 0;
-      const tooFarPrev = prev && dPrev > MAX_HOP_DIST;
-      const tooFarNext = next && dNext > MAX_HOP_DIST;
+      const dPrev = prev ? haversineKm(pos.lat, pos.lon, prev.lat, prev.lon) : 0;
+      const dNext = next ? haversineKm(pos.lat, pos.lon, next.lat, next.lon) : 0;
+      const tooFarPrev = prev && dPrev > MAX_HOP_DIST_KM;
+      const tooFarNext = next && dNext > MAX_HOP_DIST_KM;
       if ((tooFarPrev && tooFarNext) || (tooFarPrev && !next) || (tooFarNext && !prev)) {
         const r = resolved[hops[i]];
         if (r) r.unreliable = true;
         delete hopPositions[hops[i]];
+      }
+    }
+
+    // 1-byte (2 hex char) hops that are still ambiguous after all disambiguation passes
+    // are unreliable — 256 possible values means collisions are near-certain in any
+    // real mesh, and the geo-distance guess produces wrong traces more often than not.
+    // Mark them unreliable so they fall through to ghost interpolation instead.
+    for (let i = 0; i < hops.length; i++) {
+      const hop = hops[i];
+      const r = resolved[hop];
+      if (!r || r.unreliable) continue;
+      if (hop.length === 2 && r.ambiguous) {
+        r.unreliable = true;
+        delete hopPositions[hop];
       }
     }
 

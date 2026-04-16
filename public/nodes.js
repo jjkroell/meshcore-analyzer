@@ -61,6 +61,11 @@
   let paused = false;
   let detailMap = null;
 
+  // Mobile back-gesture state (history.pushState approach, same as channels.js)
+  let _nodesMobileNavPushed = false;
+  let _nodesSkipNextPopstate = false;
+  let _nodesPopstateHandler = null;
+
   // ROLE_COLORS loaded from shared roles.js
   const TABS = [
     { key: 'all',       label: 'All',        icon: null },
@@ -376,7 +381,7 @@
       <div class="modal nodes-detail-modal" role="dialog" aria-label="Node Detail" aria-modal="true">
         <div class="nodes-detail-header">
           <span class="nodes-detail-title" id="nodesDetailTitle"></span>
-          <button class="btn-icon nodes-detail-close" id="nodesDetailClose" title="Close (Esc)">✕</button>
+          <button class="btn-icon nodes-detail-close" id="nodesDetailClose" data-tooltip="Close (Esc)">✕</button>
         </div>
         <div class="nodes-detail-body" id="nodesDetailBody"></div>
       </div>
@@ -930,6 +935,8 @@
     if (detailMap) { detailMap.remove(); detailMap = null; }
     if (regionChangeHandler) RegionFilter.offChange(regionChangeHandler);
     regionChangeHandler = null;
+    if (_nodesPopstateHandler) { window.removeEventListener('popstate', _nodesPopstateHandler); _nodesPopstateHandler = null; }
+    _nodesMobileNavPushed = false;
     nodes = [];
     selectedKey = null;
   }
@@ -1162,6 +1169,21 @@
       if (e.target === this) closeNodeModal();
     });
 
+    // Mobile: intercept browser back gesture to close node detail modal
+    _nodesPopstateHandler = function() {
+      if (_nodesSkipNextPopstate) { _nodesSkipNextPopstate = false; return; }
+      if (!_nodesMobileNavPushed) return;
+      _nodesMobileNavPushed = false;
+      const overlay = document.getElementById('nodesDetailOverlay');
+      if (overlay && overlay.style.display !== 'none') {
+        overlay.style.display = 'none';
+        if (detailMap) { try { detailMap.remove(); } catch {} detailMap = null; }
+        selectedKey = null;
+        renderRows();
+      }
+    };
+    window.addEventListener('popstate', _nodesPopstateHandler);
+
     renderRows();
   }
 
@@ -1231,6 +1253,11 @@
     if (detailMap) { try { detailMap.remove(); } catch {} detailMap = null; }
     selectedKey = null;
     renderRows();
+    if (_nodesMobileNavPushed) {
+      _nodesMobileNavPushed = false;
+      _nodesSkipNextPopstate = true;
+      history.back();
+    }
   }
 
   async function selectNode(pubkey) {
@@ -1240,6 +1267,10 @@
     const body = document.getElementById('nodesDetailBody');
     const title = document.getElementById('nodesDetailTitle');
     overlay.style.display = 'flex';
+    if (window.matchMedia('(max-width: 640px)').matches && !_nodesMobileNavPushed) {
+      _nodesMobileNavPushed = true;
+      history.pushState({ _nodesMobileBack: true }, '', location.href);
+    }
     if (title) title.textContent = '';
     body.innerHTML = '<div class="text-center text-muted" style="padding:40px">Loading…</div>';
 

@@ -20,8 +20,8 @@ services:
     ports:
       - "${STAGING_GO_HTTP_PORT:-80}:80"
       - "${STAGING_GO_MQTT_PORT:-1883}:1883"
-      - "6060:6060"   # pprof server
-      - "6061:6061"   # pprof ingestor
+      - "127.0.0.1:6060:6060"   # pprof server (localhost only)
+      - "127.0.0.1:6061:6061"   # pprof ingestor (localhost only)
     volumes:
       - ${STAGING_DATA_DIR:-~/meshcore-staging-data}:/app/data
       - caddy-data-staging-go:/data/caddy

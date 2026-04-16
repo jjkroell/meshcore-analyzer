@@ -108,8 +108,8 @@
       <div class="home-appearance">
         <span class="home-appearance-label">Appearance</span>
         <div class="home-theme-toggle" id="homeThemeToggle">
-          <button class="theme-opt" data-theme="light" title="Light mode">☀️ Light</button>
-          <button class="theme-opt" data-theme="dark" title="Dark mode">🌙 Dark</button>
+          <button class="theme-opt" data-theme="light" data-tooltip="Light mode">☀️ Light</button>
+          <button class="theme-opt" data-theme="dark" data-tooltip="Dark mode">🌙 Dark</button>
         </div>
       </div>
 
@@ -163,6 +163,14 @@
     const suggest = document.getElementById('homeSuggest');
     if (!input || !suggest) return;
 
+    // Reopen existing results when clicking/focusing back into the input
+    input.addEventListener('focus', () => {
+      if (input.value.trim() && suggest.children.length) {
+        suggest.classList.add('open');
+        input.setAttribute('aria-expanded', 'true');
+      }
+    });
+
     input.addEventListener('input', () => {
       clearTimeout(searchTimeout);
       const q = input.value.trim();
@@ -183,7 +191,7 @@
                 </div>
                 <div class="suggest-actions">
                   <span class="suggest-role badge-${n.role || 'unknown'}">${n.role || '?'}</span>
-                  <button class="suggest-claim ${claimed ? 'claimed' : ''}" data-key="${n.public_key}" data-name="${escapeAttr(n.name || '')}" title="${claimed ? 'Remove from My Mesh' : 'Add to My Mesh'}">
+                  <button class="suggest-claim ${claimed ? 'claimed' : ''}" data-key="${n.public_key}" data-name="${escapeAttr(n.name || '')}" data-tooltip="${claimed ? 'Remove from My Mesh' : 'Add to My Mesh'}">
                     ${claimed ? '✓ Mine' : '+ Claim'}
                   </button>
                 </div>
@@ -298,7 +306,7 @@
             <div class="mnc-status">${statusDot}</div>
             <div class="mnc-name">${escapeHtml(name)}</div>
             <div class="mnc-role">${node.role || '?'}</div>
-            <button class="mnc-remove" data-key="${mn.pubkey}" title="Remove from My Mesh" aria-label="Remove ${escapeAttr(name)} from My Mesh">✕</button>
+            <button class="mnc-remove" data-key="${mn.pubkey}" data-tooltip="Remove from My Mesh" aria-label="Remove ${escapeAttr(name)} from My Mesh">✕</button>
           </div>
           <div class="mnc-status-text">${statusText}${stats.lastHeard ? ' · ' + timeAgo(stats.lastHeard) : ''}</div>
           <div class="mnc-metrics">
@@ -331,7 +339,7 @@
           <div class="mnc-header">
             <div class="mnc-status">❓</div>
             <div class="mnc-name">${escapeHtml(mn.name || truncate(mn.pubkey, 12))}</div>
-            <button class="mnc-remove" data-key="${mn.pubkey}" title="Remove" aria-label="Remove ${escapeAttr(mn.name || truncate(mn.pubkey, 12))} from My Mesh">✕</button>
+            <button class="mnc-remove" data-key="${mn.pubkey}" data-tooltip="Remove from My Mesh" aria-label="Remove ${escapeAttr(mn.name || truncate(mn.pubkey, 12))} from My Mesh">✕</button>
           </div>
           <div class="mnc-status-text">Could not load data</div>
         </div>`;
@@ -411,7 +419,7 @@
             <div class="mnc-status">${statusDot}</div>
             <div class="mnc-name">${escapeHtml(name)}</div>
             <div class="mnc-role">${node.role || '?'}</div>
-            <button class="mnc-remove fav-remove" data-key="${pubkey}" title="Remove from Favorites" aria-label="Remove ${escapeAttr(name)} from Favorites">✕</button>
+            <button class="mnc-remove fav-remove" data-key="${pubkey}" data-tooltip="Remove from Favorites" aria-label="Remove ${escapeAttr(name)} from Favorites">✕</button>
           </div>
           <div class="mnc-status-text">${statusText}${stats.lastHeard ? ' · ' + timeAgo(stats.lastHeard) : ''}</div>
           <div class="mnc-metrics">
@@ -429,7 +437,7 @@
           <div class="mnc-header">
             <div class="mnc-status">❓</div>
             <div class="mnc-name">${escapeHtml(truncate(pubkey, 12))}</div>
-            <button class="mnc-remove fav-remove" data-key="${pubkey}" title="Remove from Favorites">✕</button>
+            <button class="mnc-remove fav-remove" data-key="${pubkey}" data-tooltip="Remove from Favorites">✕</button>
           </div>
           <div class="mnc-status-text">Could not load data</div>
         </div>`;

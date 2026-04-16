@@ -66,18 +66,20 @@ func main() {
 	log.Printf("SQLite opened: %s", cfg.DBPath)
 
 	// Node retention: move stale nodes to inactive_nodes on startup
+	infraDays := cfg.InfraNodeDaysOrDefault()
 	nodeDays := cfg.NodeDaysOrDefault()
-	store.MoveStaleNodes(nodeDays)
+	ghostDays := cfg.GhostNodeDaysOrDefault()
+	store.MoveStaleNodes(infraDays, nodeDays, ghostDays)
 
 	// Metrics retention: prune old metrics on startup
 	metricsDays := cfg.MetricsRetentionDays()
 	store.PruneOldMetrics(metricsDays)
 
-	// Daily ticker for node retention
+	// Hourly ticker for node retention
 	retentionTicker := time.NewTicker(1 * time.Hour)
 	go func() {
 		for range retentionTicker.C {
-			store.MoveStaleNodes(nodeDays)
+			store.MoveStaleNodes(infraDays, nodeDays, ghostDays)
 		}
 	}()
 

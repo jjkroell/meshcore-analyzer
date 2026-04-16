@@ -120,7 +120,7 @@
     topSenders: 10,
     topCollisionNodes: 10,
     recentReplay: 8,
-    feedMax: 25
+    feedMax: 15
   };
 
   // ─── Performance thresholds ───

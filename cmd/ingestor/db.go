@@ -33,8 +33,9 @@ type Store struct {
 	stmtInsertTransmission   *sql.Stmt
 	stmtUpdateTxFirstSeen    *sql.Stmt
 	stmtInsertObservation    *sql.Stmt
-	stmtUpsertNode           *sql.Stmt
-	stmtIncrementAdvertCount *sql.Stmt
+	stmtUpsertNode             *sql.Stmt
+	stmtDeleteFromInactive     *sql.Stmt
+	stmtIncrementAdvertCount   *sql.Stmt
 	stmtUpsertObserver       *sql.Stmt
 	stmtGetObserverRowid       *sql.Stmt
 	stmtUpdateObserverLastSeen *sql.Stmt
@@ -391,6 +392,11 @@ func (s *Store) prepareStatements() error {
 		return err
 	}
 
+	s.stmtDeleteFromInactive, err = s.db.Prepare(`DELETE FROM inactive_nodes WHERE public_key = ?`)
+	if err != nil {
+		return err
+	}
+
 	s.stmtIncrementAdvertCount, err = s.db.Prepare(`
 		UPDATE nodes SET advert_count = advert_count + 1 WHERE public_key = ?
 	`)
@@ -529,7 +535,7 @@ func (s *Store) InsertTransmission(data *PacketData) (bool, error) {
 	return isNew, nil
 }
 
-// UpsertNode inserts or updates a node.
+// UpsertNode inserts or updates a node, and removes it from inactive_nodes if it was archived.
 func (s *Store) UpsertNode(pubKey, name, role string, lat, lon *float64, lastSeen string) error {
 	now := lastSeen
 	if now == "" {
@@ -541,10 +547,12 @@ func (s *Store) UpsertNode(pubKey, name, role string, lat, lon *float64, lastSee
 	)
 	if err != nil {
 		s.Stats.WriteErrors.Add(1)
-	} else {
-		s.Stats.NodeUpserts.Add(1)
+		return err
 	}
-	return err
+	s.Stats.NodeUpserts.Add(1)
+	// Reactivation: if this node was previously archived, remove it from inactive_nodes.
+	s.stmtDeleteFromInactive.Exec(pubKey)
+	return nil
 }
 
 // IncrementAdvertCount increments advert_count for a node by public key.
@@ -729,32 +737,65 @@ func (s *Store) LogStats() {
 	)
 }
 
-// MoveStaleNodes moves nodes not seen in nodeDays to the inactive_nodes table.
-// Returns the number of nodes moved.
-func (s *Store) MoveStaleNodes(nodeDays int) (int64, error) {
-	cutoff := time.Now().UTC().AddDate(0, 0, -nodeDays).Format(time.RFC3339)
+// MoveStaleNodes moves nodes to inactive_nodes based on role-specific thresholds:
+//   - Repeaters/rooms (infra): archived after infraDays of silence
+//   - Companions/sensors: archived after nodeDays of silence
+//   - Ghost nodes (no last_seen): archived after ghostDays since first_seen
+//
+// Returns the total number of nodes moved.
+func (s *Store) MoveStaleNodes(infraDays, nodeDays, ghostDays int) (int64, error) {
+	now := time.Now().UTC()
+	infraCutoff := now.AddDate(0, 0, -infraDays).Format(time.RFC3339)
+	nodeCutoff := now.AddDate(0, 0, -nodeDays).Format(time.RFC3339)
+	ghostCutoff := now.AddDate(0, 0, -ghostDays).Format(time.RFC3339)
+
 	tx, err := s.db.Begin()
 	if err != nil {
 		return 0, fmt.Errorf("begin tx: %w", err)
 	}
 	defer tx.Rollback()
 
-	_, err = tx.Exec(`INSERT OR REPLACE INTO inactive_nodes SELECT * FROM nodes WHERE last_seen < ?`, cutoff)
-	if err != nil {
-		return 0, fmt.Errorf("insert inactive: %w", err)
+	archive := func(whereClause string, args ...interface{}) (int64, error) {
+		_, err := tx.Exec(`INSERT OR REPLACE INTO inactive_nodes SELECT * FROM nodes WHERE `+whereClause, args...)
+		if err != nil {
+			return 0, err
+		}
+		res, err := tx.Exec(`DELETE FROM nodes WHERE `+whereClause, args...)
+		if err != nil {
+			return 0, err
+		}
+		n, _ := res.RowsAffected()
+		return n, nil
 	}
-	result, err := tx.Exec(`DELETE FROM nodes WHERE last_seen < ?`, cutoff)
+
+	// Infra nodes (repeater/room)
+	n1, err := archive(`(role = 'repeater' OR role = 'room') AND last_seen IS NOT NULL AND last_seen < ?`, infraCutoff)
 	if err != nil {
-		return 0, fmt.Errorf("delete stale: %w", err)
+		return 0, fmt.Errorf("archive infra: %w", err)
 	}
-	moved, _ := result.RowsAffected()
+
+	// Companion/sensor nodes
+	n2, err := archive(`(role != 'repeater' AND role != 'room') AND last_seen IS NOT NULL AND last_seen < ?`, nodeCutoff)
+	if err != nil {
+		return 0, fmt.Errorf("archive nodes: %w", err)
+	}
+
+	// Ghost nodes: no last_seen, just a first_seen (created from path hops, never sent an ADVERT)
+	n3, err := archive(`last_seen IS NULL AND first_seen IS NOT NULL AND first_seen < ?`, ghostCutoff)
+	if err != nil {
+		return 0, fmt.Errorf("archive ghosts: %w", err)
+	}
+
 	if err := tx.Commit(); err != nil {
 		return 0, fmt.Errorf("commit: %w", err)
 	}
-	if moved > 0 {
-		log.Printf("Moved %d node(s) to inactive_nodes (not seen in %d days)", moved, nodeDays)
+
+	total := n1 + n2 + n3
+	if total > 0 {
+		log.Printf("Archived %d node(s) to inactive_nodes (infra=%d/%dd, nodes=%d/%dd, ghosts=%d/%dd)",
+			total, n1, infraDays, n2, nodeDays, n3, ghostDays)
 	}
-	return moved, nil
+	return total, nil
 }
 
 // PacketData holds the data needed to insert a packet into the DB.

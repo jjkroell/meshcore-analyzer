@@ -47,8 +47,10 @@ type GeoFilterConfig = geofilter.Config
 
 // RetentionConfig controls how long stale nodes are kept before being moved to inactive_nodes.
 type RetentionConfig struct {
-	NodeDays    int `json:"nodeDays"`
-	MetricsDays int `json:"metricsDays"`
+	NodeDays      int `json:"nodeDays"`      // companions/sensors: days before archiving (default 30)
+	InfraNodeDays int `json:"infraNodeDays"` // repeaters/rooms: days before archiving (default 60)
+	GhostNodeDays int `json:"ghostNodeDays"` // nodes with no last_seen: days after first_seen (default 7)
+	MetricsDays   int `json:"metricsDays"`
 }
 
 // MetricsConfig controls observer metrics collection.
@@ -72,10 +74,26 @@ func (c *Config) MetricsRetentionDays() int {
 	return 30
 }
 
-// NodeDaysOrDefault returns the configured retention.nodeDays or 7 if not set.
+// NodeDaysOrDefault returns the configured retention.nodeDays or 30 if not set.
 func (c *Config) NodeDaysOrDefault() int {
 	if c.Retention != nil && c.Retention.NodeDays > 0 {
 		return c.Retention.NodeDays
+	}
+	return 30
+}
+
+// InfraNodeDaysOrDefault returns the configured retention.infraNodeDays or 60 if not set.
+func (c *Config) InfraNodeDaysOrDefault() int {
+	if c.Retention != nil && c.Retention.InfraNodeDays > 0 {
+		return c.Retention.InfraNodeDays
+	}
+	return 60
+}
+
+// GhostNodeDaysOrDefault returns the configured retention.ghostNodeDays or 7 if not set.
+func (c *Config) GhostNodeDaysOrDefault() int {
+	if c.Retention != nil && c.Retention.GhostNodeDays > 0 {
+		return c.Retention.GhostNodeDays
 	}
 	return 7
 }

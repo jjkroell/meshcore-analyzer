@@ -354,7 +354,7 @@ function toggleFavorite(pubkey) {
 }
 function favStar(pubkey, cls, name) {
   const on = isFavorite(pubkey);
-  return '<button class="fav-star ' + (cls || '') + (on ? ' on' : '') + '" data-fav="' + pubkey + '" data-name="' + escapeHtml(name || '') + '" title="' + (on ? 'Remove from Favorites' : 'Add to Favorites') + '">' + (on ? '★' : '☆') + '</button>';
+  return '<button class="fav-star ' + (cls || '') + (on ? ' on' : '') + '" data-fav="' + pubkey + '" data-name="' + escapeHtml(name || '') + '" data-tooltip="' + (on ? 'Remove from Favorites' : 'Add to Favorites') + '">' + (on ? '★' : '☆') + '</button>';
 }
 function bindFavStars(container, onToggle) {
   container.querySelectorAll('.fav-star').forEach(btn => {
@@ -438,12 +438,12 @@ let ws = null;
 let wsListeners = [];
 
 function setTraceColor(color) {
-  const line  = document.getElementById('brandTraceLine');
-  const pulse = document.getElementById('brandTracePulse');
-  const nodes = document.getElementById('brandTraceNodes');
-  if (line)  line.setAttribute('stroke', color);
-  if (pulse) pulse.setAttribute('stroke', color);
-  if (nodes) nodes.setAttribute('fill', color);
+  const stop0 = document.getElementById('traceGradStop0');
+  const stop1 = document.getElementById('traceGradStop1');
+  const ripple = document.getElementById('brandTraceEndRipple');
+  if (stop0) stop0.setAttribute('stop-color', color);
+  if (stop1) stop1.setAttribute('stop-color', color);
+  if (ripple) ripple.setAttribute('stroke', color);
 }
 
 function fireBrandPulse() {
@@ -452,6 +452,14 @@ function fireBrandPulse() {
   pulse.classList.remove('trace-pulsing');
   void pulse.getBoundingClientRect();
   pulse.classList.add('trace-pulsing');
+  clearTimeout(fireBrandPulse._endTimer);
+  fireBrandPulse._endTimer = setTimeout(() => {
+    const ripple = document.getElementById('brandTraceEndRipple');
+    if (!ripple) return;
+    ripple.classList.remove('trace-end-flash');
+    void ripple.getBoundingClientRect();
+    ripple.classList.add('trace-end-flash');
+  }, 3200);
 }
 
 function connectWS() {
@@ -634,6 +642,41 @@ window.addEventListener('timestamp-mode-changed', () => {
   window.dispatchEvent(new CustomEvent('theme-refresh'));
 });
 window.addEventListener('DOMContentLoaded', () => {
+  // ── Custom tooltip engine ──
+  (function () {
+    const tip = document.createElement('div');
+    tip.id = 'uiTooltip';
+    document.body.appendChild(tip);
+    let hideTimer;
+    function pos(e) {
+      const tw = tip.offsetWidth, th = tip.offsetHeight;
+      const vw = window.innerWidth;
+      let x = e.clientX - tw / 2;
+      let y = e.clientY - th - 10;
+      if (x < 6) x = 6;
+      if (x + tw > vw - 6) x = vw - tw - 6;
+      if (y < 6) y = e.clientY + 22;
+      tip.style.left = x + 'px';
+      tip.style.top  = y + 'px';
+    }
+    document.addEventListener('mouseover', e => {
+      const t = e.target.closest('[data-tooltip]');
+      if (!t) return;
+      clearTimeout(hideTimer);
+      tip.textContent = t.dataset.tooltip;
+      tip.style.opacity = '1';
+      pos(e);
+    });
+    document.addEventListener('mousemove', e => {
+      if (tip.style.opacity === '1') pos(e);
+    });
+    document.addEventListener('mouseout', e => {
+      if (!e.target.closest('[data-tooltip]')) return;
+      hideTimer = setTimeout(() => { tip.style.opacity = '0'; }, 60);
+    });
+    document.addEventListener('click', () => { tip.style.opacity = '0'; });
+  })();
+
   // Reposition trace nodes for mobile: dot 1 at start, dot 2 at midpoint
   if (window.matchMedia('(max-width: 767px)').matches) {
     const nodes = document.querySelectorAll('#brandTraceNodes circle');

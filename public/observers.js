@@ -27,7 +27,7 @@
         </div>
         <div class="obs-toolbar">
           <div id="obsRegionFilter" class="region-filter-container"></div>
-          ${isMobile ? `<button class="obs-refresh-btn" data-action="obs-refresh" title="Refresh observer data" aria-label="Refresh">
+          ${isMobile ? `<button class="obs-refresh-btn" data-action="obs-refresh" data-tooltip="Refresh observer data" aria-label="Refresh">
             <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
             Refresh
           </button>` : ''}
@@ -150,8 +150,8 @@
       const maxPkts = Math.max(1, ...rows.map(o => o.packetsLastHour || 0));
       return rows.map(o => {
         const h = healthStatus(o.last_seen);
-        return `<tr style="cursor:pointer" tabindex="0" role="row" data-action="navigate" data-value="#/observers/${encodeURIComponent(o.id)}" onclick="location.hash='#/observers/${encodeURIComponent(o.id)}'">
-          <td><span class="health-dot ${h.cls}" title="${h.label}"></span> ${h.label}</td>
+        return `<tr style="cursor:pointer" tabindex="0" role="row" data-action="navigate" data-value="#/observers/${encodeURIComponent(o.id)}">
+          <td><span class="health-dot ${h.cls}" data-tooltip="${h.label}"></span> ${h.label}</td>
           <td class="mono">${o.name || o.id}</td>
           <td>${o.iata || '—'}</td>
           <td>${timeAgo(o.last_seen)}</td>

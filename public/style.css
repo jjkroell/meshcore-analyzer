@@ -1,5 +1,28 @@
 /* === CoreScope — style.css === */
 
+/* ── Global custom tooltip ───────────────────────────────────────────────── */
+#uiTooltip {
+  position: fixed;
+  z-index: 99999;
+  background: var(--surface-1, #1e293b);
+  color: var(--text, #e2e8f0);
+  border: 1px solid var(--border, #334155);
+  border-radius: 6px;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 3px 8px;
+  white-space: nowrap;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.12s;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5);
+  letter-spacing: 0.3px;
+  line-height: 1.5;
+  max-width: 220px;
+  white-space: normal;
+  text-align: center;
+}
+
 :root {
   --nav-bg: #0f0f23;
   --nav-bg2: #1a1a2e;
@@ -121,6 +144,12 @@ a:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible
   100% { stroke-dashoffset: -250; }
 }
 #brandTracePulse.trace-pulsing { animation: brand-trace-travel 3.5s linear 1 forwards; }
+@keyframes brand-trace-end-flash {
+  0%   { r: 5;  opacity: 0.9; }
+  50%  { r: 12; opacity: 0.5; }
+  100% { r: 18; opacity: 0; }
+}
+#brandTraceEndRipple.trace-end-flash { animation: brand-trace-end-flash 0.8s ease-out 1 forwards; }
 /* hide the nav brand status dot — SVG terminal node acts as the status indicator */
 .nav-brand .live-dot { opacity: 0; width: 0; margin: 0; }
 .brand-core  { font-size: 22px; font-weight: 400; color: rgba(255,255,255,0.85); letter-spacing: 0.03em; }
@@ -988,7 +1017,7 @@ fieldset.mc-section legend.mc-label { padding: 0; }
 }
 .nodes-detail-title { font-size: 15px; font-weight: 700; }
 .nodes-detail-close { font-size: 16px; }
-.nodes-detail-body { overflow-y: auto; flex: 1; padding: 0 20px 20px; -webkit-overflow-scrolling: touch; transform: translateZ(0); }
+.nodes-detail-body { overflow-y: auto; overflow-x: hidden; flex: 1; padding: 0 20px 20px; -webkit-overflow-scrolling: touch; transform: translateZ(0); }
 .nodes-topbar {
   padding: 12px 16px; display: flex; align-items: center; justify-content: center; gap: 8px;
   border-bottom: 1px solid var(--border); background: var(--card-bg); flex-shrink: 0;

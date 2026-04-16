@@ -129,6 +129,7 @@ func (s *Server) RegisterRoutes(r *mux.Router) {
 	r.HandleFunc("/api/perf", s.handlePerf).Methods("GET")
 	r.Handle("/api/perf/reset", s.requireAPIKey(http.HandlerFunc(s.handlePerfReset))).Methods("POST")
 	r.Handle("/api/admin/prune", s.requireAPIKey(http.HandlerFunc(s.handleAdminPrune))).Methods("POST")
+	r.Handle("/api/admin/nodes/delete-by-bounds", s.requireAPIKey(http.HandlerFunc(s.handleAdminDeleteNodesByBounds))).Methods("POST")
 	r.Handle("/api/debug/affinity", s.requireAPIKey(http.HandlerFunc(s.handleDebugAffinity))).Methods("GET")
 
 	// Packet endpoints
@@ -625,7 +626,7 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 		stats, err = s.db.GetStats()
 	}
 	if err != nil {
-		writeError(w, 500, err.Error())
+		internalError(w, r.URL.Path, err)
 		return
 	}
 	counts := s.db.GetRoleCounts()
@@ -824,7 +825,7 @@ func (s *Server) handlePackets(w http.ResponseWriter, r *http.Request) {
 				order, r.URL.Query().Get("since"), r.URL.Query().Get("until"))
 		}
 		if err != nil {
-			writeError(w, 500, err.Error())
+			internalError(w, r.URL.Path, err)
 			return
 		}
 		writeJSON(w, PacketListResponse{
@@ -869,7 +870,7 @@ func (s *Server) handlePackets(w http.ResponseWriter, r *http.Request) {
 			result, err = s.db.QueryGroupedPackets(q)
 		}
 		if err != nil {
-			writeError(w, 500, err.Error())
+			internalError(w, r.URL.Path, err)
 			return
 		}
 		writeJSON(w, result)
@@ -884,7 +885,7 @@ func (s *Server) handlePackets(w http.ResponseWriter, r *http.Request) {
 		result, err = s.db.QueryPackets(q)
 	}
 	if err != nil {
-		writeError(w, 500, err.Error())
+		internalError(w, r.URL.Path, err)
 		return
 	}
 
@@ -1104,7 +1105,7 @@ func (s *Server) handleNodes(w http.ResponseWriter, r *http.Request) {
 		q.Get("lastHeard"), q.Get("sortBy"), q.Get("region"),
 	)
 	if err != nil {
-		writeError(w, 500, err.Error())
+		internalError(w, r.URL.Path, err)
 		return
 	}
 	if s.store != nil {
@@ -1136,7 +1137,7 @@ func (s *Server) handleNodeSearch(w http.ResponseWriter, r *http.Request) {
 	}
 	nodes, err := s.db.SearchNodes(strings.TrimSpace(q), 10)
 	if err != nil {
-		writeError(w, 500, err.Error())
+		internalError(w, r.URL.Path, err)
 		return
 	}
 	writeJSON(w, NodeSearchResponse{Nodes: nodes})
@@ -1200,7 +1201,7 @@ func (s *Server) handleNetworkStatus(w http.ResponseWriter, r *http.Request) {
 	ht := s.cfg.GetHealthThresholds()
 	result, err := s.db.GetNetworkStatus(ht)
 	if err != nil {
-		writeError(w, 500, err.Error())
+		internalError(w, r.URL.Path, err)
 		return
 	}
 	writeJSON(w, result)
@@ -1740,7 +1741,7 @@ func (s *Server) handleChannels(w http.ResponseWriter, r *http.Request) {
 	}
 	channels, err := s.db.GetChannels()
 	if err != nil {
-		writeError(w, 500, err.Error())
+		internalError(w, r.URL.Path, err)
 		return
 	}
 	writeJSON(w, ChannelListResponse{Channels: channels})
@@ -1758,7 +1759,7 @@ func (s *Server) handleChannelMessages(w http.ResponseWriter, r *http.Request) {
 	}
 	messages, total, err := s.db.GetChannelMessages(hash, limit, offset, region)
 	if err != nil {
-		writeError(w, 500, err.Error())
+		internalError(w, r.URL.Path, err)
 		return
 	}
 	writeJSON(w, ChannelMessagesResponse{Messages: messages, Total: total})
@@ -1767,7 +1768,7 @@ func (s *Server) handleChannelMessages(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleObservers(w http.ResponseWriter, r *http.Request) {
 	observers, err := s.db.GetObservers()
 	if err != nil {
-		writeError(w, 500, err.Error())
+		internalError(w, r.URL.Path, err)
 		return
 	}
 
@@ -1994,7 +1995,7 @@ func (s *Server) handleTraces(w http.ResponseWriter, r *http.Request) {
 	hash := mux.Vars(r)["hash"]
 	traces, err := s.db.GetTraces(hash)
 	if err != nil {
-		writeError(w, 500, err.Error())
+		internalError(w, r.URL.Path, err)
 		return
 	}
 	writeJSON(w, TraceResponse{Traces: traces})
@@ -2342,7 +2343,7 @@ func (s *Server) handleObserverMetrics(w http.ResponseWriter, r *http.Request) {
 
 	metrics, reboots, err := s.db.GetObserverMetrics(id, since, until, resolution, sampleInterval)
 	if err != nil {
-		writeError(w, 500, err.Error())
+		internalError(w, r.URL.Path, err)
 		return
 	}
 	if metrics == nil {
@@ -2384,7 +2385,7 @@ func (s *Server) handleMetricsSummary(w http.ResponseWriter, r *http.Request) {
 	since := time.Now().UTC().Add(-dur).Format(time.RFC3339)
 	summary, err := s.db.GetMetricsSummary(since)
 	if err != nil {
-		writeError(w, 500, err.Error())
+		internalError(w, r.URL.Path, err)
 		return
 	}
 	if summary == nil {
@@ -2434,14 +2435,57 @@ func (s *Server) handleAdminPrune(w http.ResponseWriter, r *http.Request) {
 	}
 	n, err := s.db.PruneOldPackets(days)
 	if err != nil {
-		writeError(w, 500, err.Error())
+		internalError(w, r.URL.Path, err)
 		return
 	}
 	log.Printf("[prune] deleted %d transmissions older than %d days", n, days)
 	writeJSON(w, map[string]interface{}{"deleted": n, "days": days})
 }
 
+func (s *Server) handleAdminDeleteNodesByBounds(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	var minLat, maxLat, minLon, maxLon float64
+	if _, err := fmt.Sscanf(q.Get("min_lat"), "%f", &minLat); err != nil {
+		writeError(w, 400, "min_lat required")
+		return
+	}
+	if _, err := fmt.Sscanf(q.Get("max_lat"), "%f", &maxLat); err != nil {
+		writeError(w, 400, "max_lat required")
+		return
+	}
+	if _, err := fmt.Sscanf(q.Get("min_lon"), "%f", &minLon); err != nil {
+		writeError(w, 400, "min_lon required")
+		return
+	}
+	if _, err := fmt.Sscanf(q.Get("max_lon"), "%f", &maxLon); err != nil {
+		writeError(w, 400, "max_lon required")
+		return
+	}
+	if minLat > maxLat || minLon > maxLon {
+		writeError(w, 400, "invalid bounds: min values must be less than max values")
+		return
+	}
+	if maxLat-minLat > 10 || maxLon-minLon > 10 {
+		writeError(w, 400, "bounds too large: maximum 10° per axis")
+		return
+	}
+	n, err := s.db.DeleteNodesByBounds(minLat, maxLat, minLon, maxLon)
+	if err != nil {
+		internalError(w, r.URL.Path, err)
+		return
+	}
+	log.Printf("[admin] deleted %d nodes in bounds lat=[%.4f,%.4f] lon=[%.4f,%.4f]", n, minLat, maxLat, minLon, maxLon)
+	writeJSON(w, map[string]interface{}{"deleted": n})
+}
+
 // constantTimeEqual compares two strings in constant time to prevent timing attacks.
 func constantTimeEqual(a, b string) bool {
 	return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
+}
+
+// internalError logs the real error server-side and returns a generic 500 to the client
+// so internal details (SQL schema, file paths, etc.) are never exposed in HTTP responses.
+func internalError(w http.ResponseWriter, context string, err error) {
+	log.Printf("[error] %s: %v", context, err)
+	writeError(w, 500, "internal server error")
 }

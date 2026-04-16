@@ -1737,6 +1737,42 @@ func (db *DB) PruneOldPackets(days int) (int64, error) {
 	return n, tx.Commit()
 }
 
+// DeleteNodesByBounds hard-deletes nodes (and their inactive_nodes copies) whose
+// lat/lon falls within the given bounding box. Used to remove disconnected foreign
+// mesh nodes that pollute the prefix collision space.
+func (db *DB) DeleteNodesByBounds(minLat, maxLat, minLon, maxLon float64) (int64, error) {
+	dsn := fmt.Sprintf("file:%s?_journal_mode=WAL&_busy_timeout=10000", db.path)
+	rw, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		return 0, err
+	}
+	rw.SetMaxOpenConns(1)
+	defer rw.Close()
+
+	tx, err := rw.Begin()
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+
+	bounds := "lat >= ? AND lat <= ? AND lon >= ? AND lon <= ?"
+	args := []interface{}{minLat, maxLat, minLon, maxLon}
+
+	res, err := tx.Exec("DELETE FROM nodes WHERE "+bounds, args...)
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+
+	// Also clean up any archived copies
+	tx.Exec("DELETE FROM inactive_nodes WHERE "+bounds, args...)
+
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return n, nil
+}
+
 // MetricsSample represents a single row from observer_metrics with computed deltas.
 type MetricsSample struct {
 	Timestamp     string   `json:"timestamp"`

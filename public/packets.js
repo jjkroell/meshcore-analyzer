@@ -81,7 +81,7 @@
     });
   }
   const PANEL_WIDTH_KEY = 'meshcore-panel-width';
-  const PANEL_CLOSE_HTML = '<button class="panel-close-btn" title="Close detail pane (Esc)">✕</button>';
+  const PANEL_CLOSE_HTML = '<button class="panel-close-btn" data-tooltip="Close detail pane (Esc)">✕</button>';
 
   // getParsedPath / getParsedDecoded are in shared packet-helpers.js (loaded before this file)
   const getParsedPath = window.getParsedPath;
@@ -143,6 +143,7 @@
     }
     selectedId = null;
     location.hash = '/packets';
+    _popPktMobileBack();
   }
 
   function initPanelResize() {
@@ -287,6 +288,26 @@
 
   let directObsId = null;
 
+  // Mobile back-gesture state (history.pushState approach, same as channels.js)
+  let _pktMobileNavPushed = false;
+  let _pktSkipNextPopstate = false;
+  let _pktPopstateHandler = null;
+
+  function _pushPktMobileBack() {
+    if (window.matchMedia('(max-width: 640px)').matches && !_pktMobileNavPushed) {
+      _pktMobileNavPushed = true;
+      history.pushState({ _pktMobileBack: true }, '', location.href);
+    }
+  }
+
+  function _popPktMobileBack() {
+    if (_pktMobileNavPushed) {
+      _pktMobileNavPushed = false;
+      _pktSkipNextPopstate = true;
+      history.back();
+    }
+  }
+
   function removeAllByopOverlays() {
     document.querySelectorAll('.byop-overlay').forEach(function (el) { el.remove(); });
   }
@@ -356,7 +377,7 @@
       <div class="modal pkt-detail-modal" role="dialog" aria-label="Packet Detail" aria-modal="true">
         <div class="pkt-detail-modal-header">
           <span class="pkt-detail-modal-title" id="pktDetailTitle">Packet Detail</span>
-          <button class="btn-icon pkt-detail-close" id="pktDetailClose" title="Close">✕</button>
+          <button class="btn-icon pkt-detail-close" id="pktDetailClose" data-tooltip="Close">✕</button>
         </div>
         <div class="pkt-detail-modal-body" id="pktDetailBody"></div>
       </div>
@@ -370,41 +391,26 @@
       if (e.key === 'Escape' && document.getElementById('pktDetailOverlay').style.display !== 'none') closeDetailPanel();
     });
 
-    // Horizontal swipe (left or right) to close on touch devices
-    (function() {
-      const modal = document.querySelector('.pkt-detail-modal');
-      if (!modal) return;
-      let startX = 0, startY = 0, dragging = false, pending = false;
-      modal.addEventListener('touchstart', function(e) {
-        startX = e.touches[0].clientX;
-        startY = e.touches[0].clientY;
-        pending = true;
-        dragging = false;
-        modal.style.transition = 'none';
-      }, { passive: true });
-      modal.addEventListener('touchmove', function(e) {
-        if (!pending) return;
-        const dx = e.touches[0].clientX - startX;
-        const dy = e.touches[0].clientY - startY;
-        if (!dragging) {
-          if (Math.abs(dy) > Math.abs(dx)) { pending = false; return; } // vertical — let scroll happen
-          if (Math.abs(dx) < 5) return; // wait for clear direction
-          dragging = true;
-        }
-        e.preventDefault();
-        modal.style.transform = `translateX(${dx}px)`;
-      }, { passive: false });
-      modal.addEventListener('touchend', function(e) {
-        modal.style.transition = '';
-        modal.style.transform = '';
-        const wasDragging = dragging;
-        pending = false;
-        dragging = false;
-        if (!wasDragging) return;
-        const dx = e.changedTouches[0].clientX - startX;
-        if (Math.abs(dx) > 80) closeDetailPanel();
-      }, { passive: true });
-    })();
+    // Mobile: intercept browser back gesture to close open modals
+    _pktPopstateHandler = function() {
+      if (_pktSkipNextPopstate) { _pktSkipNextPopstate = false; return; }
+      if (!_pktMobileNavPushed) return;
+      _pktMobileNavPushed = false;
+      const detailOverlay = document.getElementById('pktDetailOverlay');
+      const filtersOverlay = document.getElementById('pktFiltersOverlay');
+      const byopOverlay = document.querySelector('.byop-overlay');
+      if (detailOverlay && detailOverlay.style.display !== 'none') {
+        detailOverlay.style.display = 'none';
+        selectedId = null;
+        location.hash = '/packets';
+      } else if (filtersOverlay && filtersOverlay.style.display !== 'none') {
+        filtersOverlay.style.display = 'none';
+        filtersOverlay.setAttribute('aria-hidden', 'true');
+      } else if (byopOverlay) {
+        removeAllByopOverlays();
+      }
+    };
+    window.addEventListener('popstate', _pktPopstateHandler);
 
     await loadObservers();
     loadPackets();
@@ -610,6 +616,8 @@
     if (_docActionHandler) { document.removeEventListener('click', _docActionHandler); _docActionHandler = null; }
     if (_docMenuCloseHandler) { document.removeEventListener('click', _docMenuCloseHandler); _docMenuCloseHandler = null; }
     if (_docColMenuCloseHandler) { document.removeEventListener('click', _docColMenuCloseHandler); _docColMenuCloseHandler = null; }
+    if (_pktPopstateHandler) { window.removeEventListener('popstate', _pktPopstateHandler); _pktPopstateHandler = null; }
+    _pktMobileNavPushed = false;
     removeAllByopOverlays();
     packets = [];
     hashIndex = new Map();    selectedId = null;
@@ -755,13 +763,13 @@
             <span class="pkt-trigger-text">Search packets…</span>
             <kbd class="pkt-search-trigger-kbd">/</kbd>
           </button>
-          <button class="pkt-byop-pill pkt-filters-btn" id="pktFiltersBtn" aria-haspopup="dialog" title="Filters">
+          <button class="pkt-byop-pill pkt-filters-btn" id="pktFiltersBtn" aria-haspopup="dialog" data-tooltip="Filters">
             ⚙<span class="pkt-pill-text"> Filters</span><span class="pkt-filter-badge" id="pktFilterBadge" style="display:none">0</span>
           </button>
-          <button class="pkt-byop-pill pkt-decode-btn" data-action="pkt-byop" title="Paste raw packet hex for analysis" aria-label="Bring Your Own Packet - paste raw packet hex for analysis" aria-haspopup="dialog">
+          <button class="pkt-byop-pill pkt-decode-btn" data-action="pkt-byop" data-tooltip="Paste raw packet hex for analysis" aria-label="Bring Your Own Packet - paste raw packet hex for analysis" aria-haspopup="dialog">
             📦<span class="pkt-pill-text"> Decode Packet</span>
           </button>
-          <button class="pkt-byop-pill pkt-pause-btn" id="pktPauseBtn" data-action="pkt-pause" title="Pause live updates" aria-pressed="false">
+          <button class="pkt-byop-pill pkt-pause-btn" id="pktPauseBtn" data-action="pkt-pause" data-tooltip="Pause live updates" aria-pressed="false">
             ⏸<span class="pkt-pill-text"> Pause</span>
           </button>
         </div>
@@ -770,7 +778,7 @@
         <div class="modal pkt-filters-modal" role="dialog" aria-label="Packet Filters" aria-modal="true">
           <div class="pkt-fm-header">
             <span class="pkt-fm-title">Filters</span>
-            <button class="btn-icon pkt-fm-close" id="pktFMClose" title="Close filters">✕</button>
+            <button class="btn-icon pkt-fm-close" id="pktFMClose" data-tooltip="Close filters">✕</button>
           </div>
           <div class="pkt-fm-body">
             <div class="pkt-fm-row">
@@ -820,8 +828,8 @@
               </div>
             </div>
             <div class="pkt-fm-row pkt-fm-toggles">
-              <button class="btn ${groupByHash ? 'active' : ''}" id="fGroup" title="Collapse duplicate observations of the same packet into expandable groups">Group by Hash</button>
-              <button class="btn" id="fMyNodes" title="Show only packets from your favorited/claimed nodes">★ My Nodes</button>
+              <button class="btn ${groupByHash ? 'active' : ''}" id="fGroup" data-tooltip="Collapse duplicate observations into expandable groups">Group by Hash</button>
+              <button class="btn" id="fMyNodes" data-tooltip="Show only packets from your favorited/claimed nodes">★ My Nodes</button>
             </div>
             <div class="pkt-fm-divider"></div>
             <div class="pkt-fm-row">
@@ -1219,11 +1227,13 @@
       _pktFiltersOverlay.style.display = 'flex';
       _pktFiltersOverlay.removeAttribute('aria-hidden');
       _pktFMClose.focus();
+      _pushPktMobileBack();
     }
     function _closeFiltersModal() {
       _pktFiltersOverlay.style.display = 'none';
       _pktFiltersOverlay.setAttribute('aria-hidden', 'true');
       _pktFiltersBtn.focus();
+      _popPktMobileBack();
     }
     _pktFiltersBtn.addEventListener('click', _openFiltersModal);
     _pktFMClose.addEventListener('click', _closeFiltersModal);
@@ -2029,6 +2039,7 @@
     body.innerHTML = '<div class="text-center text-muted" style="padding:40px">Loading…</div>';
     if (title) title.textContent = hash ? `Packet ${hash.slice(0, 8)}…` : `Packet #${id}`;
     overlay.style.display = 'flex';
+    _pushPktMobileBack();
     document.getElementById('pktDetailClose').focus();
 
     try {
@@ -2201,10 +2212,10 @@
         <dt>Path</dt><dd>${pathHops.length ? renderPath(pathHops, pkt.observer_id) : '—'}</dd>
       </dl>
       <div class="detail-actions">
-        <button class="copy-link-btn" data-packet-hash="${pkt.hash || ''}" data-packet-id="${pkt.id}" title="Copy link to this packet">🔗 Copy Link</button>
+        <button class="copy-link-btn" data-packet-hash="${pkt.hash || ''}" data-packet-id="${pkt.id}" data-tooltip="Copy link to this packet">🔗 Copy Link</button>
         ${pathHops.length ? `<button class="detail-map-link" id="viewRouteBtn">🗺️ View route on map</button>` : ''}
         ${pkt.hash ? `<a href="#/traces/${pkt.hash}" class="detail-map-link" style="text-decoration:none">🔍 Trace</a>` : ''}
-        <button class="replay-live-btn" title="Replay this packet on the live map">▶ Replay</button>
+        <button class="replay-live-btn" data-tooltip="Replay this packet on the live map">▶ Replay</button>
       </div>
 
       ${hasRawHex ? `<div class="hex-legend">${buildHexLegend(ranges)}</div>
@@ -2410,7 +2421,7 @@
     const overlay = document.createElement('div');
     overlay.className = 'modal-overlay byop-overlay';
     overlay.innerHTML = '<div class="modal byop-modal" role="dialog" aria-label="Decode a Packet" aria-modal="true">'
-      + '<div class="byop-header"><h3>📦 Decode a Packet</h3><button class="btn-icon byop-x" title="Close" aria-label="Close dialog">✕</button></div>'
+      + '<div class="byop-header"><h3>📦 Decode a Packet</h3><button class="btn-icon byop-x" data-tooltip="Close" aria-label="Close dialog">✕</button></div>'
       + '<p class="text-muted" style="margin:0 0 12px;font-size:.85rem">Paste raw hex bytes from your radio or MQTT feed:</p>'
       + '<textarea id="byopHex" class="byop-input" aria-label="Packet hex data" placeholder="e.g. 15C31A8D4674FEAE37..." spellcheck="false"></textarea>'
       + '<button class="btn-primary byop-go" id="byopDecode" style="width:100%;margin:8px 0">Decode</button>'
@@ -2419,7 +2430,8 @@
     document.body.appendChild(overlay);
 
     const modal = overlay.querySelector('.byop-modal');
-    const close = () => { removeAllByopOverlays(); if (triggerBtn) triggerBtn.focus(); };
+    const close = () => { removeAllByopOverlays(); _popPktMobileBack(); if (triggerBtn) triggerBtn.focus(); };
+    _pushPktMobileBack();
     overlay.querySelector('.byop-x').onclick = close;
     overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
 

@@ -863,26 +863,26 @@
         <div class="live-overlay live-feed" id="liveFeed">
           <div class="panel-header">
             <span class="panel-feed-title">Recent Packets</span>
-            <button class="feed-hide-btn" id="feedHideBtn" title="Hide feed">✕</button>
+            <button class="feed-hide-btn" id="feedHideBtn" data-tooltip="Hide feed">✕</button>
           </div>
           <div class="panel-content" aria-live="polite" aria-relevant="additions" role="log"></div>
         </div>
-        <button class="feed-show-btn hidden" id="feedShowBtn" title="Show feed">📋</button>
+        <button class="feed-show-btn hidden" id="feedShowBtn" data-tooltip="Show feed">📋</button>
         <div class="node-detail-backdrop hidden" id="nodeDetailBackdrop"></div>
         <div class="live-overlay live-node-detail hidden" id="liveNodeDetail">
           <div class="panel-header">
-            <button class="panel-corner-btn" data-panel="liveNodeDetail" title="Move panel to next corner" aria-label="Move panel to next corner">◫</button>
-            <button class="feed-hide-btn" id="nodeDetailClose" title="Close">✕</button>
+            <button class="panel-corner-btn" data-panel="liveNodeDetail" data-tooltip="Move panel to next corner" aria-label="Move panel to next corner">◫</button>
+            <button class="feed-hide-btn" id="nodeDetailClose" data-tooltip="Close">✕</button>
           </div>
           <div class="panel-content" id="nodeDetailContent"></div>
         </div>
-        <button class="legend-toggle-btn" id="legendToggleBtn" aria-label="Show legend" title="Show legend">🎨</button>
+        <button class="legend-toggle-btn" id="legendToggleBtn" aria-label="Show legend" data-tooltip="Show legend">🎨</button>
         <div class="live-overlay live-legend" id="liveLegend" role="region" aria-label="Map legend">
           <div class="panel-header">
             <span class="panel-feed-title">Packet Types</span>
           </div>
           <div class="panel-content">
-          <button class="legend-filter-btn" id="legendFilterBtn" title="Filter by type / role" aria-pressed="false">⊘ Filter</button>
+          <button class="legend-filter-btn" id="legendFilterBtn" data-tooltip="Filter by type / role" aria-pressed="false">⊘ Filter</button>
           <ul class="legend-list" id="typeLegendList">
             <li data-type="ADVERT"><span class="live-dot" style="background:${TYPE_COLORS.ADVERT}" aria-hidden="true"></span> Advert</li>
             <li data-type="GRP_TXT"><span class="live-dot" style="background:${TYPE_COLORS.GRP_TXT}" aria-hidden="true"></span> Message</li>
@@ -901,10 +901,10 @@
         <div class="sr-only" id="panelPositionAnnounce" aria-live="polite"></div>
         <div class="vcr-bar" id="vcrBar">
           <div class="vcr-controls">
-            <button id="vcrRewindBtn" class="vcr-btn" title="Rewind" aria-label="Rewind">⏪</button>
-            <button id="vcrPauseBtn" class="vcr-btn" title="Pause/Play" aria-label="Pause">⏸</button>
-            <button id="vcrLiveBtn" class="vcr-btn vcr-live-btn" title="Jump to live" aria-label="Snap to Live">LIVE</button>
-            <button id="vcrSpeedBtn" class="vcr-btn" title="Playback speed" aria-label="Speed 1x">1x</button>
+            <button id="vcrRewindBtn" class="vcr-btn" data-tooltip="Rewind" aria-label="Rewind">⏪</button>
+            <button id="vcrPauseBtn" class="vcr-btn" data-tooltip="Pause / Play" aria-label="Pause">⏸</button>
+            <button id="vcrLiveBtn" class="vcr-btn vcr-live-btn" data-tooltip="Jump to live" aria-label="Snap to Live">LIVE</button>
+            <button id="vcrSpeedBtn" class="vcr-btn" data-tooltip="Playback speed" aria-label="Speed 1x">1x</button>
             <div id="vcrMode" class="vcr-mode vcr-mode-live"><span class="vcr-live-dot"></span> LIVE</div>
           </div>
           <div class="vcr-scope-btns" role="radiogroup" aria-label="Timeline scope">
@@ -1860,8 +1860,8 @@
       }
     }
 
-    // Sort by latest timestamp desc, take top 25
-    const sorted = [...byHash.values()].sort((a, b) => b.latestTs - a.latestTs).slice(0, 25);
+    // Sort by latest timestamp desc, take top 15
+    const sorted = [...byHash.values()].sort((a, b) => b.latestTs - a.latestTs).slice(0, 15);
 
     for (const group of sorted) {
       const pkt = Object.assign({}, group.latestPkt, { observation_count: group.count });
@@ -3025,7 +3025,7 @@
     item.addEventListener('click', () => showFeedCard(item, pkt, color));
     feed.prepend(item);
     requestAnimationFrame(() => requestAnimationFrame(() => item.classList.remove('live-feed-enter')));
-    while (feed.children.length > 25) feed.removeChild(feed.lastChild);
+    while (feed.children.length > 15) feed.removeChild(feed.lastChild);
 
     // Register
     if (hash) {

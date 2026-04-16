@@ -84,7 +84,7 @@ func TestMoveStaleNodes(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	moved, err := store.MoveStaleNodes(7)
+	moved, err := store.MoveStaleNodes(60, 30, 7)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -110,7 +110,7 @@ func TestMoveStaleNodes(t *testing.T) {
 
 func TestMoveStaleNodesNoneToMove(t *testing.T) {
 	store := newTestStore(t)
-	moved, err := store.MoveStaleNodes(7)
+	moved, err := store.MoveStaleNodes(60, 30, 7)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1079,7 +1079,7 @@ func TestMoveStaleNodesReplace(t *testing.T) {
 	// Insert same node in nodes with old last_seen
 	store.UpsertNode(pk, "StaleNode", "repeater", nil, nil, "2020-01-01T00:00:00Z")
 
-	moved, err := store.MoveStaleNodes(7)
+	moved, err := store.MoveStaleNodes(60, 30, 7)
 	if err != nil {
 		t.Fatal(err)
 	}

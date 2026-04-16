@@ -16,6 +16,7 @@
   let _mobileNavPushed = false;   // true when we pushState'd for mobile channel view
   let _skipNextPopstate = false;  // suppress the popstate triggered by our own history.back()
   let _popstateHandler = null;    // stored so destroy() can remove it
+  let _themeObserver = null;      // stored so destroy() can disconnect it
   var _nodeCacheTTL = 5 * 60 * 1000; // 5 minutes
   const INACTIVE_MS = 8 * 60 * 60 * 1000; // 8 hours
   const unreadChannels = new Set(); // hashes with new unread messages
@@ -824,7 +825,7 @@
     })();
 
     // #90: Theme change observer — re-render messages on theme toggle
-    var _themeObserver = new MutationObserver(function (muts) {
+    _themeObserver = new MutationObserver(function (muts) {
       for (var i = 0; i < muts.length; i++) {
         if (muts[i].attributeName === 'data-theme') { if (selectedHash) renderMessages(); break; }
       }
@@ -1079,7 +1080,7 @@
           header.querySelector('.ch-header-text').innerHTML = `<span class="ch-header-name">${escapeHtml(ch2.name || 'Channel ' + selectedHash)}</span><span class="ch-header-count">${messages.length} messages</span>`;
         }
         var msgEl = document.getElementById('chMessages');
-        if (msgEl && autoScroll) scrollToBottom();
+        if (msgEl && autoScroll) scrollToLatest();
       }
     }
 
@@ -1153,7 +1154,7 @@
             hdr.querySelector('.ch-header-text').innerHTML = `<span class="ch-header-name">🔒 ${escapeHtml(ch.name)}</span><span class="ch-header-count">${messages.length} messages</span>`;
           }
           var msgElP = document.getElementById('chMessages');
-          if (msgElP && autoScroll) scrollToBottom();
+          if (msgElP && autoScroll) scrollToLatest();
         }
       }
     }
@@ -1198,6 +1199,7 @@
     selectedNode = null;
     _mobileNavPushed = false;
     if (_popstateHandler) { window.removeEventListener('popstate', _popstateHandler); _popstateHandler = null; }
+    if (_themeObserver) { _themeObserver.disconnect(); _themeObserver = null; }
     hideNodeTooltip();
     const panel = document.getElementById('chNodePanel');
     if (panel) panel.remove();

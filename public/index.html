@@ -47,14 +47,21 @@
           </span>
           <span class="brand-trace" aria-hidden="true">
             <svg id="brandTraceSvg" width="100%" height="10" viewBox="0 0 230 10" preserveAspectRatio="none" xmlns="http://www.w3.org/2000/svg">
-              <line id="brandTraceLine" x1="0" y1="5" x2="220" y2="5" stroke="#94a3b8" stroke-width="1.8" opacity="0.55"/>
-              <line id="brandTracePulse" x1="0" y1="5" x2="220" y2="5" stroke="#94a3b8" stroke-width="3" stroke-dasharray="20 2400" stroke-dashoffset="1000" stroke-linecap="round" opacity="0.8"/>
-              <g id="brandTraceNodes" fill="#94a3b8">
+              <defs>
+                <linearGradient id="traceGrad" gradientUnits="userSpaceOnUse" x1="0" y1="5" x2="220" y2="5">
+                  <stop id="traceGradStop0" offset="0%" stop-color="#cdd5e0" stop-opacity="0.2"/>
+                  <stop id="traceGradStop1" offset="100%" stop-color="#94a3b8" stop-opacity="1"/>
+                </linearGradient>
+              </defs>
+              <line id="brandTraceLine" x1="0" y1="5" x2="220" y2="5" stroke="url(#traceGrad)" stroke-width="1.8"/>
+              <line id="brandTracePulse" x1="0" y1="5" x2="220" y2="5" stroke="url(#traceGrad)" stroke-width="3" stroke-dasharray="20 2400" stroke-dashoffset="1000" stroke-linecap="round"/>
+              <g id="brandTraceNodes" fill="url(#traceGrad)">
                 <circle cx="32"  cy="5" r="3" opacity="1"/>
                 <circle cx="95"  cy="5" r="3" opacity="1"/>
                 <circle cx="158" cy="5" r="3" opacity="1"/>
                 <circle cx="218" cy="5" r="5" opacity="1"/>
               </g>
+              <circle id="brandTraceEndRipple" cx="218" cy="5" r="5" fill="none" stroke="#94a3b8" stroke-width="1.5" opacity="0"/>
             </svg>
           </span>
         </span>
@@ -73,19 +80,19 @@
         <a href="#/perf" class="nav-link" data-route="perf"><span class="nav-perf-icon" aria-hidden="true">⚡</span>Perf</a>
       </div>
       <div class="nav-more-wrap">
-        <button class="nav-btn nav-more-btn" id="navMoreBtn" aria-haspopup="true" aria-expanded="false" aria-controls="navMoreMenu" title="More pages">More ▾</button>
+        <button class="nav-btn nav-more-btn" id="navMoreBtn" aria-haspopup="true" aria-expanded="false" aria-controls="navMoreMenu" data-tooltip="More pages">More ▾</button>
         <div class="nav-more-menu" id="navMoreMenu" role="menu"></div>
       </div>
     </div>
     <div class="nav-right">
       <div class="nav-stats" id="navStats" title="Live stats"></div>
       <div class="nav-fav-wrap" style="display:none">
-        <button class="nav-btn" id="favToggle" title="Favorites">⭐</button>
+        <button class="nav-btn" id="favToggle" data-tooltip="Favorites">⭐</button>
         <div class="nav-fav-dropdown" id="favDropdown"></div>
       </div>
-      <button class="nav-btn" id="searchToggle" style="display:none" title="Search (Ctrl+K)">🔍</button>
-      <button class="nav-btn" id="customizeToggle" style="display:none" title="Customize theme & branding">🎨</button>
-      <button class="nav-btn" id="darkModeToggle" style="display:none" title="Toggle dark mode">☀️</button>
+      <button class="nav-btn" id="searchToggle" style="display:none" data-tooltip="Search (Ctrl+K)">🔍</button>
+      <button class="nav-btn" id="customizeToggle" style="display:none" data-tooltip="Customize theme & branding">🎨</button>
+      <button class="nav-btn" id="darkModeToggle" style="display:none" data-tooltip="Toggle dark mode">☀️</button>
     </div>
   </nav>
 
@@ -160,7 +167,6 @@
   <script src="geo-filter-overlay.js?v=__BUST__"></script>
   <script src="map.js?v=__BUST__"></script>
   <script src="channels.js?v=__BUST__"></script>
-  <script src="table-sort.js?v=__BUST__"></script>
   <script src="nodes.js?v=__BUST__"></script>
   <script src="traces.js?v=__BUST__"></script>
   <script src="analytics.js?v=__BUST__"></script>

@@ -202,9 +202,15 @@ func LoadConfig(baseDirs ...string) (*Config, error) {
 			continue
 		}
 		cfg.NormalizeTimestampConfig()
+		if envKey := os.Getenv("MESHCORE_API_KEY"); envKey != "" {
+			cfg.APIKey = envKey
+		}
 		return cfg, nil
 	}
 	cfg.NormalizeTimestampConfig()
+	if envKey := os.Getenv("MESHCORE_API_KEY"); envKey != "" {
+		cfg.APIKey = envKey
+	}
 	return cfg, nil // defaults
 }
 

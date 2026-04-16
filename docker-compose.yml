@@ -29,6 +29,7 @@ services:
     environment:
       - NODE_ENV=production
       - DISABLE_MOSQUITTO=${DISABLE_MOSQUITTO:-false}
+      - MESHCORE_API_KEY=${MESHCORE_API_KEY}
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:3000/api/stats"]
       interval: 30s
@@ -52,6 +53,7 @@ services:
       - caddy-data-dev:/data/caddy
     environment:
       - NODE_ENV=development
+      - MESHCORE_API_KEY=${MESHCORE_API_KEY}
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:3000/api/stats"]
       interval: 30s
