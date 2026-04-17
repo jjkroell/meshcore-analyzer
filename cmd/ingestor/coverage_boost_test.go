@@ -29,9 +29,9 @@ func TestNodeDaysOrDefault(t *testing.T) {
 		cfg  Config
 		want int
 	}{
-		{"nil retention", Config{}, 7},
-		{"zero nodeDays", Config{Retention: &RetentionConfig{NodeDays: 0}}, 7},
-		{"negative nodeDays", Config{Retention: &RetentionConfig{NodeDays: -1}}, 7},
+		{"nil retention", Config{}, 30},
+		{"zero nodeDays", Config{Retention: &RetentionConfig{NodeDays: 0}}, 30},
+		{"negative nodeDays", Config{Retention: &RetentionConfig{NodeDays: -1}}, 30},
 		{"custom nodeDays", Config{Retention: &RetentionConfig{NodeDays: 14}}, 14},
 		{"one day", Config{Retention: &RetentionConfig{NodeDays: 1}}, 1},
 	}
