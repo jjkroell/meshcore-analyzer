@@ -46,22 +46,25 @@
             <span class="brand-core">SWBC</span><span class="brand-sep"> / </span><span class="brand-scope">Salish Mesh</span>
           </span>
           <span class="brand-trace" aria-hidden="true">
-            <svg id="brandTraceSvg" width="100%" height="10" viewBox="0 0 230 10" preserveAspectRatio="none" xmlns="http://www.w3.org/2000/svg">
+            <svg id="brandTraceSvg" width="100%" height="10" viewBox="0 0 230 10" preserveAspectRatio="none" xmlns="http://www.w3.org/2000/svg" style="overflow:visible">
               <defs>
-                <linearGradient id="traceGrad" gradientUnits="userSpaceOnUse" x1="0" y1="5" x2="220" y2="5">
+                <linearGradient id="traceGrad" gradientUnits="userSpaceOnUse" x1="0" y1="5" x2="222" y2="5">
                   <stop id="traceGradStop0" offset="0%" stop-color="#cdd5e0" stop-opacity="0.2"/>
                   <stop id="traceGradStop1" offset="100%" stop-color="#94a3b8" stop-opacity="1"/>
                 </linearGradient>
+                <clipPath id="rippleVClip">
+                  <rect x="-100" y="0" width="600" height="10"/>
+                </clipPath>
               </defs>
-              <line id="brandTraceLine" x1="0" y1="5" x2="220" y2="5" stroke="url(#traceGrad)" stroke-width="1.8"/>
-              <line id="brandTracePulse" x1="0" y1="5" x2="220" y2="5" stroke="url(#traceGrad)" stroke-width="3" stroke-dasharray="20 2400" stroke-dashoffset="1000" stroke-linecap="round"/>
+              <line id="brandTraceLine" x1="0" y1="5" x2="222" y2="5" stroke="url(#traceGrad)" stroke-width="1.8"/>
+              <line id="brandTracePulse" x1="0" y1="5" x2="222" y2="5" stroke="url(#traceGrad)" stroke-width="3" stroke-dasharray="20 2400" stroke-dashoffset="1000" stroke-linecap="round"/>
               <g id="brandTraceNodes" fill="url(#traceGrad)">
                 <circle cx="32"  cy="5" r="3" opacity="1"/>
                 <circle cx="95"  cy="5" r="3" opacity="1"/>
                 <circle cx="158" cy="5" r="3" opacity="1"/>
-                <circle cx="218" cy="5" r="5" opacity="1"/>
+                <circle cx="222" cy="5" r="5" opacity="1"/>
               </g>
-              <circle id="brandTraceEndRipple" cx="218" cy="5" r="5" fill="none" stroke="#94a3b8" stroke-width="1.5" opacity="0"/>
+              <circle id="brandTraceEndRipple" cx="222" cy="5" r="5" fill="none" stroke="#4a9eff" stroke-width="2.5" opacity="0" clip-path="url(#rippleVClip)"/>
             </svg>
           </span>
         </span>
@@ -106,9 +109,9 @@
       <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="22 12 16 12 14 15 10 15 8 12 2 12"/><path d="M5.45 5.11L2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/></svg>
       <span>Packets</span>
     </a>
-    <a href="#/map" class="bottom-nav-item" data-route="map" aria-label="Map">
-      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="1 6 1 22 8 18 16 22 23 18 23 2 16 6 8 2 1 6"/><line x1="8" y1="2" x2="8" y2="18"/><line x1="16" y1="6" x2="16" y2="22"/></svg>
-      <span>Map</span>
+    <a href="#/channels" class="bottom-nav-item" data-route="channels" aria-label="Channels">
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+      <span>Channels</span>
     </a>
     <a href="#/live" class="bottom-nav-item" data-route="live" aria-label="Live">
       <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1.42 9a16 16 0 0 1 21.16 0"/><path d="M5 12.55a11 11 0 0 1 14.08 0"/><path d="M8.53 16.11a6 6 0 0 1 6.95 0"/><line x1="12" y1="20" x2="12" y2="20"/></svg>

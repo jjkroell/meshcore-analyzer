@@ -145,11 +145,11 @@ a:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible
 }
 #brandTracePulse.trace-pulsing { animation: brand-trace-travel 3.5s linear 1 forwards; }
 @keyframes brand-trace-end-flash {
-  0%   { r: 5;  opacity: 0.9; }
-  50%  { r: 12; opacity: 0.5; }
-  100% { r: 18; opacity: 0; }
+  0%   { r: 5;  opacity: 1; }
+  40%  { r: 16; opacity: 0.7; }
+  100% { r: 28; opacity: 0; }
 }
-#brandTraceEndRipple.trace-end-flash { animation: brand-trace-end-flash 0.8s ease-out 1 forwards; }
+#brandTraceEndRipple.trace-end-flash { animation: brand-trace-end-flash 1.2s ease-out 1 forwards; }
 /* hide the nav brand status dot — SVG terminal node acts as the status indicator */
 .nav-brand .live-dot { opacity: 0; width: 0; margin: 0; }
 .brand-core  { font-size: 22px; font-weight: 400; color: rgba(255,255,255,0.85); letter-spacing: 0.03em; }
