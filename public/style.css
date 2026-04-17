@@ -137,8 +137,8 @@ a:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible
 .brand-icon { display: block; flex-shrink: 0; }
 .brand-stack { display: flex; flex-direction: column; gap: 5px; }
 .brand-text { white-space: nowrap; line-height: 1; display: flex; align-items: center; }
-.brand-trace { display: block; width: 100%; }
-.brand-trace svg { display: block; width: 100%; }
+.brand-trace { display: block; width: 100%; clip-path: inset(-1px -60px -1px 0); }
+.brand-trace svg { display: block; width: 100%; overflow: visible; }
 @keyframes brand-trace-travel {
   0%   { stroke-dashoffset: 250; }
   100% { stroke-dashoffset: -250; }
@@ -153,6 +153,7 @@ a:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible
   animation: brand-trace-end-flash 1.2s ease-out 1 forwards;
   transform-box: fill-box;
   transform-origin: center;
+  vector-effect: non-scaling-stroke;
 }
 /* hide the nav brand status dot — SVG terminal node acts as the status indicator */
 .nav-brand .live-dot { opacity: 0; width: 0; margin: 0; }
