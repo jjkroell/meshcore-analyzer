@@ -35,14 +35,72 @@
         #easterEggLogo { animation: eggSpin 8s linear infinite; filter:brightness(0) drop-shadow(0 0 2px #fff) drop-shadow(0 0 2px #fff) drop-shadow(0 0 2px #fff) drop-shadow(0 0 28px rgba(74,158,255,0.7)); }
         #easterEggOverlay h2 { color:#fff; font-size:1.6rem; font-weight:700; margin:28px 0 8px; letter-spacing:0.04em; }
         #easterEggOverlay p { color:#64748b; font-size:0.9rem; margin:0; }
-        #easterEggOverlay small { color:#334155; font-size:0.75rem; margin-top:32px; }
+        #easterEggCounter { color:#4a9eff; font-size:0.85rem; margin-top:10px; min-height:1.2em; transition:opacity 0.4s; }
+        #easterEggOverlay small { color:#334155; font-size:0.75rem; margin-top:28px; }
+        #eggCanvas { position:absolute; inset:0; pointer-events:none; }
       </style>
+      <canvas id="eggCanvas"></canvas>
       <img id="easterEggLogo" src="salishmesh-logo.svg" width="220" height="220" alt="Salish Mesh">
       <h2>Salish Mesh</h2>
       <p>You found the secret. Welcome to the mesh.</p>
+      <div id="easterEggCounter"></div>
       <small>click or press Esc to close</small>`;
     document.body.appendChild(overlay);
-    const close = () => overlay.remove();
+
+    // Fetch discovery count from server
+    fetch('/api/easter', { method: 'POST' })
+      .then(r => r.ok ? r.json() : null)
+      .then(data => {
+        if (!data) return;
+        const el = document.getElementById('easterEggCounter');
+        if (el) el.textContent = 'Discovery #' + data.count + ' — you\'re one of us now.';
+      })
+      .catch(() => {});
+
+    // Burst confetti from the center of the screen
+    const canvas = document.getElementById('eggCanvas');
+    canvas.width = window.innerWidth;
+    canvas.height = window.innerHeight;
+    const ctx = canvas.getContext('2d');
+    const COLORS = ['#4a9eff','#22c55e','#f59e0b','#a78bfa','#f472b6','#94a3b8','#fff'];
+    const particles = Array.from({ length: 72 }, () => {
+      const angle = Math.random() * Math.PI * 2;
+      const speed = 3 + Math.random() * 6;
+      return {
+        x: canvas.width / 2, y: canvas.height / 2,
+        vx: Math.cos(angle) * speed, vy: Math.sin(angle) * speed - 2,
+        r: 3 + Math.random() * 4,
+        color: COLORS[Math.floor(Math.random() * COLORS.length)],
+        alpha: 1, decay: 0.012 + Math.random() * 0.01,
+        shape: Math.random() > 0.5 ? 'circle' : 'rect',
+        rot: Math.random() * Math.PI * 2, spin: (Math.random() - 0.5) * 0.2,
+      };
+    });
+    let rafId;
+    function animateConfetti() {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      let alive = 0;
+      for (const p of particles) {
+        if (p.alpha <= 0) continue;
+        alive++;
+        p.x += p.vx; p.y += p.vy; p.vy += 0.12; // gravity
+        p.alpha -= p.decay; p.rot += p.spin;
+        ctx.save();
+        ctx.globalAlpha = Math.max(0, p.alpha);
+        ctx.fillStyle = p.color;
+        ctx.translate(p.x, p.y); ctx.rotate(p.rot);
+        if (p.shape === 'circle') {
+          ctx.beginPath(); ctx.arc(0, 0, p.r, 0, Math.PI * 2); ctx.fill();
+        } else {
+          ctx.fillRect(-p.r, -p.r * 0.6, p.r * 2, p.r * 1.2);
+        }
+        ctx.restore();
+      }
+      if (alive > 0) rafId = requestAnimationFrame(animateConfetti);
+    }
+    animateConfetti();
+
+    const close = () => { overlay.remove(); cancelAnimationFrame(rafId); };
     overlay.addEventListener('click', close);
     document.addEventListener('keydown', function esc(e) { if (e.key === 'Escape') { close(); document.removeEventListener('keydown', esc); } });
   }

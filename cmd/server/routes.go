@@ -52,6 +52,10 @@ type Server struct {
 
 	// Router reference for OpenAPI spec generation
 	router *mux.Router
+
+	// Easter egg discovery counter (file-backed, mutex-protected)
+	easterEggMu   sync.Mutex
+	easterEggFile string // path to counter JSON file
 }
 
 // PerfStats tracks request performance.
@@ -81,14 +85,15 @@ func NewPerfStats() *PerfStats {
 
 func NewServer(db *DB, cfg *Config, hub *Hub) *Server {
 	return &Server{
-		db:        db,
-		cfg:       cfg,
-		hub:       hub,
-		startedAt: time.Now(),
-		perfStats: NewPerfStats(),
-		version:   resolveVersion(),
-		commit:    resolveCommit(),
-		buildTime: resolveBuildTime(),
+		db:            db,
+		cfg:           cfg,
+		hub:           hub,
+		startedAt:     time.Now(),
+		perfStats:     NewPerfStats(),
+		version:       resolveVersion(),
+		commit:        resolveCommit(),
+		buildTime:     resolveBuildTime(),
+		easterEggFile: filepath.Join(filepath.Dir(db.path), "easter_egg.json"),
 	}
 }
 
@@ -122,6 +127,9 @@ func (s *Server) RegisterRoutes(r *mux.Router) {
 	r.HandleFunc("/api/config/theme", s.handleConfigTheme).Methods("GET")
 	r.HandleFunc("/api/config/map", s.handleConfigMap).Methods("GET")
 	r.HandleFunc("/api/config/geo-filter", s.handleConfigGeoFilter).Methods("GET")
+
+	// Easter egg counter (unauthenticated — it's a fun feature, not a write endpoint)
+	r.HandleFunc("/api/easter", s.handleEasterEgg).Methods("POST")
 
 	// System endpoints
 	r.HandleFunc("/api/health", s.handleHealth).Methods("GET")
@@ -2488,4 +2496,27 @@ func constantTimeEqual(a, b string) bool {
 func internalError(w http.ResponseWriter, context string, err error) {
 	log.Printf("[error] %s: %v", context, err)
 	writeError(w, 500, "internal server error")
+}
+
+// handleEasterEgg increments the global easter-egg discovery counter and returns the new count.
+// The counter is stored in easter_egg.json in the data directory alongside the DB.
+func (s *Server) handleEasterEgg(w http.ResponseWriter, r *http.Request) {
+	s.easterEggMu.Lock()
+	defer s.easterEggMu.Unlock()
+
+	count := 0
+	if data, err := os.ReadFile(s.easterEggFile); err == nil {
+		var v struct{ Count int }
+		if json.Unmarshal(data, &v) == nil {
+			count = v.Count
+		}
+	}
+	count++
+
+	if out, err := json.Marshal(map[string]int{"count": count}); err == nil {
+		os.WriteFile(s.easterEggFile, out, 0644)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]int{"count": count})
 }
