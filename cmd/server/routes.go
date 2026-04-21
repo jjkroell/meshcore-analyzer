@@ -113,6 +113,9 @@ func (s *Server) getMemStats() runtime.MemStats {
 // RegisterRoutes sets up all HTTP routes on the given router.
 func (s *Server) RegisterRoutes(r *mux.Router) {
 	s.router = r
+	// CORS middleware — allow any origin on API routes (read-only data is public)
+	r.Use(s.corsMiddleware)
+
 	// Performance instrumentation middleware
 	r.Use(s.perfMiddleware)
 
@@ -269,6 +272,21 @@ func (s *Server) backfillStatusMiddleware(next http.Handler) http.Handler {
 			w.Header().Set("X-CoreScope-Status", "ready")
 		} else {
 			w.Header().Set("X-CoreScope-Status", "backfilling")
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func (s *Server) corsMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/api/") {
+			w.Header().Set("Access-Control-Allow-Origin", "*")
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-API-Key")
+			if r.Method == http.MethodOptions {
+				w.WriteHeader(http.StatusNoContent)
+				return
+			}
 		}
 		next.ServeHTTP(w, r)
 	})
