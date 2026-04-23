@@ -237,15 +237,18 @@ window.HopResolver = (function() {
       }
     }
 
-    // 1-byte (2 hex char) hops that are still ambiguous after all disambiguation passes
-    // are unreliable — 256 possible values means collisions are near-certain in any
-    // real mesh, and the geo-distance guess produces wrong traces more often than not.
-    // Mark them unreliable so they fall through to ghost interpolation instead.
+    // Hops that are still ambiguous after all disambiguation passes are unreliable.
+    // The threshold scales with prefix length:
+    //   1-byte (2 hex chars): 256 possible values — collisions near-certain on any real mesh
+    //   2-byte (4 hex chars): 65,536 values — collisions rare but possible on large networks
+    //   3-byte (6 hex chars): 16,777,216 values — collisions extremely unlikely
+    // All ambiguous hops regardless of length are flagged so operators aren't misled
+    // by a silently wrong trace.
     for (let i = 0; i < hops.length; i++) {
       const hop = hops[i];
       const r = resolved[hop];
       if (!r || r.unreliable) continue;
-      if (hop.length === 2 && r.ambiguous) {
+      if (r.ambiguous) {
         r.unreliable = true;
         delete hopPositions[hop];
       }

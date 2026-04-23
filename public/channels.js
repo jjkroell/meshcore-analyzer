@@ -20,6 +20,7 @@
   var _nodeCacheTTL = 5 * 60 * 1000; // 5 minutes
   const INACTIVE_MS = 8 * 60 * 60 * 1000; // 8 hours
   const unreadChannels = new Set(); // hashes with new unread messages
+  let _channelTimeline = {}; // channelName → {hour → count}
   const USER_CHANNELS_KEY = 'meshcore-user-channels';
   const PRIVATE_KEYS_KEY = 'meshcore-private-keys';
   const PERMANENT_BLOCK_NAMES = new Set(['#wardriving', '#wardrive', 'unknown']); // hardcoded
@@ -494,6 +495,72 @@
 
   let regionChangeHandler = null;
   let availModalOpen = false;
+
+  async function loadChannelTimeline() {
+    try {
+      const data = await api('/analytics/channels', { ttl: 60000 });
+      const tl = data.channelTimeline || [];
+      const byChannel = {};
+      for (const e of tl) {
+        if (!e.hour || !e.channel) continue;
+        if (!byChannel[e.channel]) byChannel[e.channel] = {};
+        byChannel[e.channel][e.hour] = e.count;
+      }
+      _channelTimeline = byChannel;
+      if (selectedHash) {
+        const ch = channels.find(c => c.hash === selectedHash);
+        renderActivityTimeline(selectedHash, ch?.name);
+      }
+    } catch {}
+  }
+
+  function renderActivityTimeline(hash, channelName) {
+    const el = document.getElementById('chActivityTimeline');
+    if (!el) return;
+    if (!channelName) {
+      const ch = channels.find(c => c.hash === hash);
+      channelName = ch?.name || hash;
+    }
+    // Private channels don't have timeline data from server
+    if (hash && hash.startsWith('priv:')) { el.style.display = 'none'; return; }
+
+    const tlData = _channelTimeline[channelName] || {};
+    // Build 24 hourly buckets in UTC, oldest → newest
+    // Floor to current hour so labels always show HH:00
+    const now = new Date();
+    now.setMinutes(0, 0, 0);
+    const buckets = [];
+    for (let i = 23; i >= 0; i--) {
+      const t = new Date(now.getTime() - i * 3600 * 1000);
+      const hour = t.toISOString().slice(0, 13); // "2026-04-23T14"
+      const count = tlData[hour] || 0;
+      const hh = t.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
+      const tNext = new Date(t.getTime() + 3600 * 1000);
+      const hhNext = tNext.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
+      const label = `${hh} - ${hhNext}`;
+      buckets.push({ count, label, isCurrent: i === 0 });
+    }
+
+    const hasActivity = buckets.some(b => b.count > 0);
+    if (!hasActivity) { el.style.display = 'none'; return; }
+
+    el.style.display = 'block';
+    const color = getChannelColor(hash);
+    const max = Math.max(...buckets.map(b => b.count), 1);
+
+    // SVG: 24 bars in a 480×28 viewBox, preserveAspectRatio="none" so it fills width
+    const H = 28;
+    const bars = buckets.map((b, i) => {
+      const bh = b.count === 0 ? 2 : Math.max(3, Math.round((b.count / max) * (H - 2)));
+      const x = i * 20;
+      const y = H - bh;
+      const opacity = b.count === 0 ? 0.1 : (b.isCurrent ? 1.0 : 0.3 + 0.7 * (b.count / max));
+      const tip = `${b.label}: ${b.count} msg${b.count !== 1 ? 's' : ''}`;
+      return `<rect x="${x}" y="${y}" width="19" height="${bh}" fill="${color}" opacity="${opacity.toFixed(2)}" rx="1" data-tooltip="${tip}"></rect>`;
+    }).join('');
+
+    el.innerHTML = `<div class="ch-activity-label">24h activity</div><svg viewBox="0 0 480 ${H}" width="100%" height="${H}" preserveAspectRatio="none" class="ch-activity-svg" aria-hidden="true">${bars}</svg>`;
+  }
   let modalChannels = null; // full unfiltered channel list for the modal
 
   function openAvailModal() {
@@ -612,6 +679,7 @@
           <span class="ch-header-text"><span class="ch-header-name">Select a channel</span></span>
           <button class="ch-add-btn ch-sort-pill" id="chSortBtn">Sort: newest at top</button>
         </div>
+        <div class="ch-activity-timeline" id="chActivityTimeline"></div>
         <div class="ch-messages" id="chMessages">
           <div class="ch-empty">Choose a channel from the sidebar to view messages</div>
         </div>
@@ -1217,6 +1285,7 @@
     channels = [];
     messages = [];
     selectedHash = null;
+    _channelTimeline = {};
     selectedNode = null;
     _mobileNavPushed = false;
     if (_popstateHandler) { window.removeEventListener('popstate', _popstateHandler); _popstateHandler = null; }
@@ -1262,6 +1331,7 @@
       });
       renderChannelList();
       reconcileSelectionAfterChannelRefresh();
+      loadChannelTimeline();
     } catch (e) {
       if (!silent) {
         const el = document.getElementById('chList');
@@ -1361,6 +1431,7 @@
     const name = ch?.name || `Channel ${formatHashHex(hash)}`;
     const header = document.getElementById('chHeader');
     header.querySelector('.ch-header-text').innerHTML = `<span class="ch-header-name">${escapeHtml(name)}</span><span class="ch-header-count">${ch?.messageCount || 0} messages</span>`;
+    renderActivityTimeline(hash, name);
 
     // On mobile, show the message view
     document.querySelector('.ch-layout')?.classList.add('ch-show-main');

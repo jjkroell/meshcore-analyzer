@@ -187,14 +187,20 @@
       item.style.borderLeft = color ? '3px solid ' + color : '';
     }
 
-    // Update color dots everywhere
-    var dots = document.querySelectorAll('.ch-color-dot');
+    // Update color dots everywhere (channels page + live feed)
+    var dots = document.querySelectorAll('.ch-color-dot, .feed-color-dot');
     for (var j = 0; j < dots.length; j++) {
       var dot = dots[j];
       var dotCh = dot.getAttribute('data-channel');
       if (!dotCh) continue;
       var dotColor = window.ChannelColors.get(dotCh);
-      dot.style.background = dotColor || '';
+      if (dotColor) {
+        dot.style.background = dotColor;
+        dot.style.border = '1px solid ' + dotColor;
+      } else {
+        dot.style.background = 'transparent';
+        dot.style.border = '1px dashed var(--border-color, #555)';
+      }
     }
 
     // Channel list items — update border
